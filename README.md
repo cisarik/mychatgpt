@@ -34,6 +34,12 @@ MyChatGPT keeps your ChatGPT account tidy while storing short “search-like” 
 - LIST_ONLY and DRY_RUN stay enabled by default, so the feature never issues real DELETE/PATCH requests. The Debug report is strictly a preview of what *would* be deleted.
 - Open **Debug → Would-delete report (simulated)** to refresh counters, export `mychatgpt_would_delete.csv`, clear the log, or trigger **Scan all open chat tabs now** for a manual sweep. The popup badge mirrors the current qualified count so you can jump straight to Debug.
 
+## Soft-delete DRY-RUN (no network)
+- Open **Debug → Soft-delete DRY-RUN plan** to build a PATCH preview from the latest would-delete snapshot. Each entry shows the synthetic request (`PATCH /conversation/{id}` with `{is_visible:false}`) plus a diff preview (`is_visible: true → false`).
+- The justification viewer explains why each conversation qualifies, including the age/message heuristics and any disqualifying flags; the same reason codes appear in the Debug logs.
+- Use **Regenerate plan from current report** after an auto-scan to refresh the plan (respecting `REPORT_LIMIT` and deduplicated by conversation). **Simulate batch confirm (log-only)** only appends to `soft_delete_confirmed_history` and logs `dry_run_confirmed`; nothing hits the network.
+- Export the JSON plan for external review, clear the plan if you want to start over, and rely on the popup badge to track how many DRY-RUN deletions are staged.
+
 ## Troubleshooting `no_injection`
 If you see `reasonCode=no_injection` in the logs, open the **Debug** tab, click **Force inject content script**, or reload the chat tab. Remember to reload the extension after any manifest changes.
 

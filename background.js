@@ -38,6 +38,9 @@ const RUNNER_SCOPE = 'runner';
 const CHAT_URL_PREFIX = 'https://chatgpt.com';
 const CHAT_URL_PATTERN = 'https://chatgpt.com/*';
 const REPORT_STORAGE_KEY = 'would_delete_report';
+const SOFT_DELETE_PLAN_KEY = 'soft_delete_plan';
+const SOFT_DELETE_CONFIRMED_HISTORY_KEY = 'soft_delete_confirmed_history';
+const SOFT_DELETE_CONFIRMED_HISTORY_LIMIT = 200;
 
 const runnerTrace = (msg, meta = {}) => logTrace(RUNNER_SCOPE, msg, meta);
 const runnerDebug = (msg, meta = {}) => logDebug(RUNNER_SCOPE, msg, meta);
@@ -65,6 +68,14 @@ function defaultReport() {
     items: [],
     totalSeen: 0,
     totalQualified: 0
+  };
+}
+
+function defaultSoftDeletePlan() {
+  return {
+    ts: 0,
+    items: [],
+    totals: { planned: 0 }
   };
 }
 
@@ -103,6 +114,26 @@ async function loadWouldDeleteReport(limit) {
   return report;
 }
 
+async function loadSoftDeletePlan() {
+  const stored = await chrome.storage.local.get([SOFT_DELETE_PLAN_KEY]);
+  const plan = stored[SOFT_DELETE_PLAN_KEY];
+  if (!plan || typeof plan !== 'object') {
+    return defaultSoftDeletePlan();
+  }
+  const items = Array.isArray(plan.items) ? plan.items.slice() : [];
+  return {
+    ts: Number.isFinite(plan.ts) ? plan.ts : Number.parseInt(plan.ts, 10) || 0,
+    items,
+    totals: {
+      planned: Number.isFinite(plan?.totals?.planned)
+        ? plan.totals.planned
+        : Array.isArray(items)
+        ? items.length
+        : 0
+    }
+  };
+}
+
 async function persistWouldDeleteReport(report) {
   await chrome.storage.local.set({ [REPORT_STORAGE_KEY]: report });
   await runnerDebug('Would-delete report stored', withReason('report_update_ok', {
@@ -110,6 +141,237 @@ async function persistWouldDeleteReport(report) {
     totalQualified: report.totalQualified,
     items: report.items.length
   }));
+}
+
+async function persistSoftDeletePlan(plan, { reasonCode = 'plan_rebuilt', meta = {} } = {}) {
+  const normalized = {
+    ts: plan?.ts || Date.now(),
+    items: Array.isArray(plan?.items) ? plan.items : [],
+    totals: {
+      planned: Number.isFinite(plan?.totals?.planned)
+        ? plan.totals.planned
+        : Array.isArray(plan?.items)
+        ? plan.items.length
+        : 0
+    }
+  };
+  await chrome.storage.local.set({ [SOFT_DELETE_PLAN_KEY]: normalized });
+  await runnerInfo('Soft-delete DRY-RUN plan persisted', withReason(reasonCode, {
+    planned: normalized.totals.planned,
+    ...meta
+  }));
+  return normalized;
+}
+
+function summarizeHeuristicBoolean({ passes, successCode, failureCode }) {
+  return {
+    code: passes ? successCode : failureCode,
+    value: Boolean(passes)
+  };
+}
+
+function coerceFinite(value) {
+  if (Number.isFinite(value)) {
+    return value;
+  }
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function buildSoftDeleteJustification(item, settings) {
+  const maxMessages = Number.isFinite(settings?.MAX_MESSAGES)
+    ? settings.MAX_MESSAGES
+    : DEFAULT_SETTINGS.MAX_MESSAGES;
+  const maxUserMessages = Number.isFinite(settings?.USER_MESSAGES_MAX)
+    ? settings.USER_MESSAGES_MAX
+    : DEFAULT_SETTINGS.USER_MESSAGES_MAX;
+  const minAge = Number.isFinite(settings?.MIN_AGE_MINUTES)
+    ? settings.MIN_AGE_MINUTES
+    : DEFAULT_SETTINGS.MIN_AGE_MINUTES;
+
+  const totalMessages = coerceFinite(item.messageCount);
+  const userMessages = coerceFinite(item.userMessageCount);
+  const ageMinutes = coerceFinite(item.lastMessageAgeMin);
+
+  const messageCheck = Number.isFinite(totalMessages)
+    ? summarizeHeuristicBoolean({
+        passes: totalMessages <= maxMessages,
+        successCode: 'messages_leq_max',
+        failureCode: 'messages_gt_max'
+      })
+    : { code: 'messages_unknown', value: null };
+
+  const userMessageCheck = Number.isFinite(userMessages)
+    ? summarizeHeuristicBoolean({
+        passes: userMessages <= maxUserMessages,
+        successCode: 'user_messages_leq_max',
+        failureCode: 'user_messages_gt_max'
+      })
+    : { code: 'user_messages_unknown', value: null };
+
+  const ageCheck = Number.isFinite(ageMinutes)
+    ? summarizeHeuristicBoolean({
+        passes: ageMinutes >= minAge,
+        successCode: 'age_ge_min',
+        failureCode: 'age_lt_min'
+      })
+    : { code: 'age_unknown', value: null };
+
+  const summaryTokens = ['heuristics'];
+  summaryTokens.push(
+    messageCheck.value === false
+      ? `messages>${maxMessages}`
+      : `messages<=${maxMessages}`
+  );
+  summaryTokens.push(
+    userMessageCheck.value === false
+      ? `user>${maxUserMessages}`
+      : `user<=${maxUserMessages}`
+  );
+  summaryTokens.push(
+    ageCheck.value === false ? `age<${minAge}` : `age>=${minAge}`
+  );
+
+  const details = [
+    {
+      code: messageCheck.code,
+      value: messageCheck.value,
+      expected: `<=${maxMessages}`,
+      actual: totalMessages
+    },
+    {
+      code: userMessageCheck.code,
+      value: userMessageCheck.value,
+      expected: `<=${maxUserMessages}`,
+      actual: userMessages
+    },
+    {
+      code: ageCheck.code,
+      value: ageCheck.value,
+      expected: `>=${minAge}`,
+      actual: ageMinutes
+    }
+  ];
+
+  return {
+    summary: summaryTokens.join(', '),
+    details
+  };
+}
+
+function buildSoftDeletePlanItem(item, settings) {
+  const justification = buildSoftDeleteJustification(item, settings);
+  const planItem = {
+    convoId: item.convoId || '',
+    url: item.url || '',
+    title: item.title || '',
+    messageCount: item.messageCount ?? null,
+    userMessageCount: item.userMessageCount ?? null,
+    lastMessageAgeMin: item.lastMessageAgeMin ?? null,
+    qualifies: Boolean(item.qualifies),
+    reasons: Array.isArray(item.reasons) ? item.reasons.slice() : [],
+    patch: {
+      method: 'PATCH',
+      endpoint: `/conversation/${item.convoId || ''}`,
+      body: { is_visible: false }
+    },
+    justification,
+    diffPreview: {
+      before: { is_visible: true },
+      after: { is_visible: false }
+    },
+    createdAt: new Date().toISOString()
+  };
+
+  if (item.snapshotId) {
+    planItem.snapshotId = item.snapshotId;
+  }
+
+  return planItem;
+}
+
+async function regenerateSoftDeletePlanFromReport({ report, settings, reasonCode = 'plan_rebuilt' }) {
+  try {
+    const activeSettings = settings || (await getSettings());
+    const limit = activeSettings?.REPORT_LIMIT || DEFAULT_SETTINGS.REPORT_LIMIT;
+    const snapshot = report || (await loadWouldDeleteReport(limit));
+    const seen = new Set();
+    const qualified = [];
+    for (const item of (snapshot.items || [])) {
+      if (!item?.qualifies) {
+        continue;
+      }
+      const key = item.convoId || item.url;
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      qualified.push(buildSoftDeletePlanItem(item, activeSettings));
+      if (qualified.length >= limit) {
+        break;
+      }
+    }
+    const plan = {
+      ts: Date.now(),
+      items: qualified,
+      totals: { planned: qualified.length }
+    };
+    return await persistSoftDeletePlan(plan, { reasonCode });
+  } catch (error) {
+    await runnerWarn('Soft-delete plan regeneration failed', withReason('plan_rebuild_failed', {
+      error: error?.message || 'unknown'
+    }));
+    return defaultSoftDeletePlan();
+  }
+}
+
+async function clearSoftDeletePlan({ reasonCode = 'plan_cleared' } = {}) {
+  const cleared = {
+    ts: Date.now(),
+    items: [],
+    totals: { planned: 0 }
+  };
+  await persistSoftDeletePlan(cleared, { reasonCode });
+  return cleared;
+}
+
+async function removePlanItem({ convoId, url }) {
+  const plan = await loadSoftDeletePlan();
+  const key = convoId || url;
+  if (!key) {
+    return plan;
+  }
+  const filtered = plan.items.filter((item) => (item.convoId || item.url) !== key);
+  const next = {
+    ts: Date.now(),
+    items: filtered,
+    totals: { planned: filtered.length }
+  };
+  const removalMeta = {};
+  if (convoId) {
+    removalMeta.convoId = convoId;
+  }
+  if (url) {
+    removalMeta.url = url;
+  }
+  await persistSoftDeletePlan(next, {
+    reasonCode: 'plan_item_removed',
+    meta: removalMeta
+  });
+  return next;
+}
+
+async function appendConfirmedHistory(items) {
+  if (!Array.isArray(items) || !items.length) {
+    return [];
+  }
+  const stored = await chrome.storage.local.get([SOFT_DELETE_CONFIRMED_HISTORY_KEY]);
+  const history = Array.isArray(stored[SOFT_DELETE_CONFIRMED_HISTORY_KEY])
+    ? stored[SOFT_DELETE_CONFIRMED_HISTORY_KEY]
+    : [];
+  const updated = [...history, ...items].slice(-SOFT_DELETE_CONFIRMED_HISTORY_LIMIT);
+  await chrome.storage.local.set({ [SOFT_DELETE_CONFIRMED_HISTORY_KEY]: updated });
+  return updated;
 }
 
 async function updateWouldDeleteReport({ url, meta, reasons, qualifies, snapshotId, settings }) {
@@ -157,6 +419,7 @@ async function updateWouldDeleteReport({ url, meta, reasons, qualifies, snapshot
     }
     report.totalQualified = report.items.filter((item) => item.qualifies).length;
     await persistWouldDeleteReport(report);
+    await regenerateSoftDeletePlanFromReport({ report, settings, reasonCode: 'plan_rebuilt' });
     return entry;
   } catch (error) {
     await runnerWarn('Failed to update would-delete report', withReason('report_update_failed', {
@@ -171,6 +434,7 @@ async function clearWouldDeleteReport() {
   const blank = { ...defaultReport(), ts: Date.now() };
   await chrome.storage.local.set({ [REPORT_STORAGE_KEY]: blank });
   await runnerInfo('Would-delete report cleared', withReason('report_cleared'));
+  await clearSoftDeletePlan({ reasonCode: 'plan_cleared' });
   return blank;
 }
 
@@ -364,6 +628,96 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ ok: true, items: report.items, ts: report.ts });
       } catch (error) {
         await runnerWarn('REPORT_EXPORT failed', withReason('report_export_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message });
+      }
+    })();
+    return true;
+  }
+  if (message?.type === 'PLAN_GET') {
+    (async () => {
+      try {
+        const plan = await loadSoftDeletePlan();
+        sendResponse({ ok: true, plan });
+      } catch (error) {
+        await runnerWarn('PLAN_GET failed', withReason('plan_get_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message });
+      }
+    })();
+    return true;
+  }
+  if (message?.type === 'PLAN_REGENERATE') {
+    (async () => {
+      try {
+        const settings = await getSettings();
+        const plan = await regenerateSoftDeletePlanFromReport({ settings, reasonCode: 'plan_rebuilt' });
+        sendResponse({ ok: true, plan });
+      } catch (error) {
+        await runnerWarn('PLAN_REGENERATE failed', withReason('plan_rebuild_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message });
+      }
+    })();
+    return true;
+  }
+  if (message?.type === 'PLAN_CLEAR') {
+    (async () => {
+      try {
+        const plan = await clearSoftDeletePlan({ reasonCode: 'plan_cleared' });
+        sendResponse({ ok: true, plan });
+      } catch (error) {
+        await runnerWarn('PLAN_CLEAR failed', withReason('plan_clear_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message });
+      }
+    })();
+    return true;
+  }
+  if (message?.type === 'PLAN_REMOVE_ITEM') {
+    (async () => {
+      try {
+        const plan = await removePlanItem({ convoId: message?.convoId, url: message?.url });
+        sendResponse({ ok: true, plan });
+      } catch (error) {
+        await runnerWarn('PLAN_REMOVE_ITEM failed', withReason('plan_remove_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message });
+      }
+    })();
+    return true;
+  }
+  if (message?.type === 'PLAN_EXPORT') {
+    (async () => {
+      try {
+        const plan = await loadSoftDeletePlan();
+        await runnerInfo('Soft-delete plan export requested', withReason('plan_export_started', {
+          planned: plan?.totals?.planned ?? plan?.items?.length ?? 0
+        }));
+        sendResponse({ ok: true, items: plan.items || [], ts: plan.ts || Date.now() });
+      } catch (error) {
+        await runnerWarn('PLAN_EXPORT failed', withReason('plan_export_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message });
+      }
+    })();
+    return true;
+  }
+  if (message?.type === 'PLAN_CONFIRM_DRY_RUN') {
+    (async () => {
+      try {
+        const plan = await loadSoftDeletePlan();
+        const items = Array.isArray(plan.items) ? plan.items : [];
+        const now = Date.now();
+        const historyEntries = items.map((item) => ({
+          ts: now,
+          convoId: item.convoId || '',
+          url: item.url || '',
+          patch: item.patch,
+          justification: item.justification,
+          result: 'simulated-ok'
+        }));
+        await appendConfirmedHistory(historyEntries);
+        await runnerInfo('Soft-delete DRY-RUN confirmation simulated', withReason('dry_run_confirmed', {
+          count: items.length
+        }));
+        sendResponse({ ok: true, count: items.length });
+      } catch (error) {
+        await runnerWarn('PLAN_CONFIRM_DRY_RUN failed', withReason('plan_confirm_failed', { error: error?.message }));
         sendResponse({ ok: false, error: error?.message });
       }
     })();

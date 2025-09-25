@@ -3,6 +3,7 @@ import { logInfo, tailLogs, clearLogs, getLogs } from './utils.js';
 const TAIL_LIMIT = 200;
 const TAIL_INTERVAL_MS = 1000;
 const REPORT_STORAGE_KEY = 'would_delete_report';
+const SOFT_PLAN_STORAGE_KEY = 'soft_delete_plan';
 const REPORT_CSV_COLUMNS = [
   'url',
   'convoId',
@@ -37,15 +38,27 @@ export async function init({ root }) {
   const reportExportButton = root.querySelector('[data-action="report-export"]');
   const reportClearButton = root.querySelector('[data-action="report-clear"]');
   const reportScanAllButton = root.querySelector('[data-action="report-scan-all"]');
+  const planCard = root.querySelector('[data-role="soft-plan"]');
+  const planRows = root.querySelector('[data-role="plan-rows"]');
+  const planTotalEl = root.querySelector('[data-role="plan-total"]');
+  const planUpdatedEl = root.querySelector('[data-role="plan-updated"]');
+  const planRegenerateButton = root.querySelector('[data-action="plan-regenerate"]');
+  const planExportButton = root.querySelector('[data-action="plan-export"]');
+  const planClearButton = root.querySelector('[data-action="plan-clear"]');
+  const planConfirmButton = root.querySelector('[data-action="plan-confirm"]');
+  const planModal = root.querySelector('[data-role="soft-plan-modal"]');
+  const planModalTitle = root.querySelector('[data-role="plan-modal-title"]');
+  const planModalContent = root.querySelector('[data-role="plan-modal-content"]');
 
   let tailTimer = null;
   let currentLevel = levelSelect?.value || 'INFO';
   let latestProbeJson = '';
   let injectStatusTimer = null;
   let latestReport = null;
+  let latestPlan = null;
 
   async function refreshAll() {
-    await Promise.all([refreshLogs(), refreshSummary(), refreshSnapshot(), refreshReport()]);
+    await Promise.all([refreshLogs(), refreshSummary(), refreshSnapshot(), refreshReport(), refreshPlan()]);
   }
 
   async function refreshLogs() {
@@ -136,6 +149,22 @@ export async function init({ root }) {
     }
   }
 
+  async function refreshPlan() {
+    if (!planCard) {
+      return;
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'PLAN_GET' });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'plan-load-failed');
+      }
+      latestPlan = normalizePlan(response.plan);
+      renderPlan(latestPlan);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
   /**
    * Slovensky: Normalizuje report pre jednoduchšie renderovanie.
    */
@@ -154,6 +183,23 @@ export async function init({ root }) {
     };
   }
 
+  /**
+   * Slovensky: Normalizuje DRY-RUN plán pre UI.
+   */
+  function normalizePlan(plan) {
+    if (!plan || typeof plan !== 'object') {
+      return { ts: 0, items: [], totals: { planned: 0 } };
+    }
+    const ts = Number.parseInt(plan.ts, 10);
+    const items = Array.isArray(plan.items) ? plan.items : [];
+    const planned = Number.isFinite(plan?.totals?.planned) ? plan.totals.planned : items.length;
+    return {
+      ts: Number.isFinite(ts) ? ts : 0,
+      items,
+      totals: { planned }
+    };
+  }
+
   function renderReport(report) {
     if (!reportCard) {
       return;
@@ -168,6 +214,19 @@ export async function init({ root }) {
       reportUpdatedEl.textContent = formatReportTimestamp(report.ts);
     }
     renderReportRows(report.items || []);
+  }
+
+  function renderPlan(plan) {
+    if (!planCard) {
+      return;
+    }
+    if (planTotalEl) {
+      planTotalEl.textContent = String(plan.totals.planned || 0);
+    }
+    if (planUpdatedEl) {
+      planUpdatedEl.textContent = formatReportTimestamp(plan.ts);
+    }
+    renderPlanRows(plan.items || []);
   }
 
   function renderReportRows(items) {
@@ -194,6 +253,36 @@ export async function init({ root }) {
       row.appendChild(renderCell(formatReasons(item.reasons)));
       row.appendChild(renderLinkCell(item.url));
       reportRows.appendChild(row);
+    });
+  }
+
+  function renderPlanRows(items) {
+    if (!planRows) {
+      return;
+    }
+    planRows.innerHTML = '';
+    const data = Array.isArray(items) ? items : [];
+    if (!data.length) {
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 6;
+      cell.textContent = 'No DRY-RUN plan entries yet.';
+      row.appendChild(cell);
+      planRows.appendChild(row);
+      return;
+    }
+    data.forEach((item, index) => {
+      const row = document.createElement('tr');
+      row.dataset.index = String(index);
+      row.dataset.convoId = item.convoId || '';
+      row.dataset.url = item.url || '';
+      row.appendChild(renderCell(item.title?.trim() ? item.title : '(no title)'));
+      row.appendChild(renderCell(formatConvoId(item.convoId)));
+      row.appendChild(renderCell(formatNumber(item.lastMessageAgeMin)));
+      row.appendChild(renderCell(formatNumber(item.messageCount)));
+      row.appendChild(renderCell(formatReasons(item.reasons)));
+      row.appendChild(renderPlanActions());
+      planRows.appendChild(row);
     });
   }
 
@@ -231,6 +320,17 @@ export async function init({ root }) {
       return '—';
     }
     return reasons.join(', ');
+  }
+
+  function formatConvoId(value) {
+    if (!value) {
+      return '—';
+    }
+    const text = String(value);
+    if (text.length <= 10) {
+      return text;
+    }
+    return `${text.slice(0, 10)}…`;
   }
 
   function formatReportTimestamp(ts) {
@@ -277,6 +377,50 @@ export async function init({ root }) {
       return `"${text.replace(/"/g, '""')}"`;
     }
     return text;
+  }
+
+  function renderPlanActions() {
+    const cell = document.createElement('td');
+    cell.className = 'inline-group';
+    const diff = document.createElement('button');
+    diff.type = 'button';
+    diff.className = 'secondary';
+    diff.dataset.action = 'plan-view-diff';
+    diff.textContent = 'View diff';
+    const justification = document.createElement('button');
+    justification.type = 'button';
+    justification.className = 'secondary';
+    justification.dataset.action = 'plan-view-justification';
+    justification.textContent = 'View justification';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.dataset.action = 'plan-remove';
+    remove.textContent = 'Remove from plan';
+    cell.appendChild(diff);
+    cell.appendChild(justification);
+    cell.appendChild(remove);
+    return cell;
+  }
+
+  function openPlanModal(title, payload) {
+    if (!planModal) {
+      return;
+    }
+    if (planModalTitle) {
+      planModalTitle.textContent = title || 'Detail';
+    }
+    if (planModalContent) {
+      planModalContent.textContent = payload || '';
+    }
+    if (typeof planModal.showModal === 'function') {
+      planModal.showModal();
+    }
+  }
+
+  function closePlanModal() {
+    if (planModal && typeof planModal.close === 'function' && planModal.open) {
+      planModal.close();
+    }
   }
 
   function startTailPolling() {
@@ -421,6 +565,126 @@ export async function init({ root }) {
     }
   });
 
+  planRegenerateButton?.addEventListener('click', async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'PLAN_REGENERATE' });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'plan-regenerate-failed');
+      }
+      latestPlan = normalizePlan(response.plan);
+      renderPlan(latestPlan);
+    } catch (error) {
+      console.error(error);
+    }
+  });
+
+  planExportButton?.addEventListener('click', async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'PLAN_EXPORT' });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'plan-export-failed');
+      }
+      const blob = new Blob([JSON.stringify(response.items || [], null, 2)], {
+        type: 'application/json'
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'mychatgpt_soft_delete_plan.json';
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error(error);
+    }
+  });
+
+  planClearButton?.addEventListener('click', async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'PLAN_CLEAR' });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'plan-clear-failed');
+      }
+      latestPlan = normalizePlan(response.plan);
+      renderPlan(latestPlan);
+    } catch (error) {
+      console.error(error);
+    }
+  });
+
+  planConfirmButton?.addEventListener('click', async () => {
+    if (planConfirmButton.disabled) {
+      return;
+    }
+    planConfirmButton.disabled = true;
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'PLAN_CONFIRM_DRY_RUN' });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'plan-confirm-failed');
+      }
+    } catch (error) {
+      console.error(error);
+    } finally {
+      planConfirmButton.disabled = false;
+    }
+  });
+
+  planCard?.addEventListener('click', async (event) => {
+    const diffBtn = event.target.closest('button[data-action="plan-view-diff"]');
+    const justificationBtn = event.target.closest('button[data-action="plan-view-justification"]');
+    const removeBtn = event.target.closest('button[data-action="plan-remove"]');
+    if (!diffBtn && !justificationBtn && !removeBtn) {
+      return;
+    }
+    const row = event.target.closest('tr');
+    if (!row) {
+      return;
+    }
+    const index = Number.parseInt(row.dataset.index || '', 10);
+    if (!Number.isFinite(index) || !latestPlan?.items?.[index]) {
+      return;
+    }
+    const item = latestPlan.items[index];
+    if (diffBtn) {
+      openPlanModal('Diff preview', JSON.stringify(item.diffPreview, null, 2));
+      return;
+    }
+    if (justificationBtn) {
+      const payload = {
+        summary: item.justification?.summary || '',
+        details: item.justification?.details || []
+      };
+      openPlanModal('Justification', JSON.stringify(payload, null, 2));
+      return;
+    }
+    if (removeBtn) {
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'PLAN_REMOVE_ITEM',
+          convoId: item.convoId,
+          url: item.url
+        });
+        if (!response?.ok) {
+          throw new Error(response?.error || 'plan-remove-failed');
+        }
+        latestPlan = normalizePlan(response.plan);
+        renderPlan(latestPlan);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+  });
+
+  planModal?.addEventListener('close', () => {
+    if (planModalContent) {
+      planModalContent.textContent = '';
+    }
+  });
+
+  planModal?.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    closePlanModal();
+  });
+
   reportScanAllButton?.addEventListener('click', async () => {
     if (reportScanAllButton.disabled) {
       return;
@@ -493,6 +757,9 @@ export async function init({ root }) {
     if (changes[REPORT_STORAGE_KEY]) {
       refreshReport();
     }
+    if (changes[SOFT_PLAN_STORAGE_KEY]) {
+      refreshPlan();
+    }
   });
 
   await refreshAll();
@@ -505,6 +772,11 @@ export async function init({ root }) {
     },
     onHide: () => {
       stopTailPolling();
+    },
+    focusSoftDeletePlan: () => {
+      if (planCard) {
+        planCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
     }
   };
 }

@@ -62,6 +62,36 @@
       </table>
     </div>
   </div>
+  <div class="tab-card" data-role="soft-plan">
+    <div class="flex-between">
+      <h3>Soft-delete DRY-RUN plan</h3>
+      <div class="inline-group">
+        <button class="secondary" data-action="plan-regenerate">Regenerate plan from current report</button>
+        <button class="secondary" data-action="plan-export">Export plan (JSON)</button>
+        <button class="secondary" data-action="plan-clear">Clear plan</button>
+        <button data-action="plan-confirm">Simulate batch confirm (log-only)</button>
+      </div>
+    </div>
+    <p class="tab-copy">
+      Planned: <span data-role="plan-total">0</span> • Generated
+      <span data-role="plan-updated">never</span>
+    </p>
+    <div class="table-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Convo</th>
+            <th>Last age (min)</th>
+            <th>Msgs</th>
+            <th>Reasons</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody data-role="plan-rows"></tbody>
+      </table>
+    </div>
+  </div>
   <div class="tab-card" data-role="probe-container">
     <div class="flex-between">
       <h3>Extractor Self-Test</h3>
@@ -75,4 +105,13 @@
       <pre class="code-block" data-role="snapshot-output"></pre>
     </details>
   </div>
+  <dialog data-role="soft-plan-modal">
+    <form method="dialog" class="modal-body">
+      <header class="flex-between">
+        <strong data-role="plan-modal-title">Detail</strong>
+        <button type="submit" value="cancel" data-action="plan-modal-close" class="secondary">Close</button>
+      </header>
+      <pre class="code-block" data-role="plan-modal-content"></pre>
+    </form>
+  </dialog>
 </section>

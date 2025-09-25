@@ -1,7 +1,7 @@
 import { initDb } from './db.js';
 import { logInfo } from './utils.js';
 
-const REPORT_STORAGE_KEY = 'would_delete_report';
+const SOFT_PLAN_STORAGE_KEY = 'soft_delete_plan';
 
 const tabConfig = {
   searches: {
@@ -96,45 +96,49 @@ function bindBadge() {
   }
   badgeButton.addEventListener('click', async () => {
     await switchTab('debug');
+    const handler = handlersCache.get('debug');
+    handler?.focusSoftDeletePlan?.();
   });
 }
 
 async function syncBadge() {
   try {
-    const response = await chrome.runtime.sendMessage({ type: 'REPORT_GET' });
+    const response = await chrome.runtime.sendMessage({ type: 'PLAN_GET' });
     if (response?.ok) {
-      applyBadge(response.report);
+      applyBadge(response.plan);
     }
   } catch (error) {
     console.error(error);
   }
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local' || !changes[REPORT_STORAGE_KEY]) {
+    if (area !== 'local' || !changes[SOFT_PLAN_STORAGE_KEY]) {
       return;
     }
-    applyBadge(changes[REPORT_STORAGE_KEY].newValue);
+    applyBadge(changes[SOFT_PLAN_STORAGE_KEY].newValue);
   });
 }
 
 /**
- * Slovensky: Aktualizuje odznak s počtom kvalifikovaných konverzácií.
+ * Slovensky: Aktualizuje odznak s počtom plánovaných DRY-RUN zásahov.
  */
-function applyBadge(report) {
+function applyBadge(plan) {
   if (!badgeButton || !badgeCount) {
     return;
   }
-  const normalized = normalizeReport(report);
-  badgeCount.textContent = String(normalized.totalQualified);
-  badgeButton.hidden = normalized.totalQualified === 0;
+  const normalized = normalizePlan(plan);
+  badgeCount.textContent = String(normalized.totals.planned);
+  badgeButton.hidden = normalized.totals.planned === 0;
 }
 
-function normalizeReport(report) {
-  if (!report || typeof report !== 'object') {
-    return { totalQualified: 0 };
+function normalizePlan(plan) {
+  if (!plan || typeof plan !== 'object') {
+    return { totals: { planned: 0 } };
   }
-  const total = Number.parseInt(report.totalQualified, 10);
+  const total = Number.isFinite(plan?.totals?.planned)
+    ? plan.totals.planned
+    : Number.parseInt(plan.totals?.planned, 10);
   return {
-    totalQualified: Number.isFinite(total) ? total : 0
+    totals: { planned: Number.isFinite(total) ? total : 0 }
   };
 }
 
