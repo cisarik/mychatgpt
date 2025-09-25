@@ -2,6 +2,17 @@ import { logInfo, tailLogs, clearLogs, getLogs } from './utils.js';
 
 const TAIL_LIMIT = 200;
 const TAIL_INTERVAL_MS = 1000;
+const REPORT_STORAGE_KEY = 'would_delete_report';
+const REPORT_CSV_COLUMNS = [
+  'url',
+  'convoId',
+  'title',
+  'messageCount',
+  'userMessageCount',
+  'lastMessageAgeMin',
+  'reasons',
+  'ts'
+];
 
 export async function init({ root }) {
   const tailEl = root.querySelector('[data-role="log-tail"]');
@@ -17,14 +28,24 @@ export async function init({ root }) {
   const snapshotContainer = root.querySelector('[data-role="snapshot-container"]');
   const snapshotOutput = root.querySelector('[data-role="snapshot-output"]');
   const injectStatus = root.querySelector('[data-role="inject-status"]');
+  const reportCard = root.querySelector('[data-role="would-report"]');
+  const reportRows = root.querySelector('[data-role="report-rows"]');
+  const reportTotalSeenEl = root.querySelector('[data-role="report-total-seen"]');
+  const reportTotalQualifiedEl = root.querySelector('[data-role="report-total-qualified"]');
+  const reportUpdatedEl = root.querySelector('[data-role="report-updated"]');
+  const reportRefreshButton = root.querySelector('[data-action="report-refresh"]');
+  const reportExportButton = root.querySelector('[data-action="report-export"]');
+  const reportClearButton = root.querySelector('[data-action="report-clear"]');
+  const reportScanAllButton = root.querySelector('[data-action="report-scan-all"]');
 
   let tailTimer = null;
   let currentLevel = levelSelect?.value || 'INFO';
   let latestProbeJson = '';
   let injectStatusTimer = null;
+  let latestReport = null;
 
   async function refreshAll() {
-    await Promise.all([refreshLogs(), refreshSummary(), refreshSnapshot()]);
+    await Promise.all([refreshLogs(), refreshSummary(), refreshSnapshot(), refreshReport()]);
   }
 
   async function refreshLogs() {
@@ -97,6 +118,165 @@ export async function init({ root }) {
     }
     snapshotContainer.hidden = false;
     snapshotOutput.textContent = JSON.stringify(snapshot, null, 2);
+  }
+
+  async function refreshReport() {
+    if (!reportCard) {
+      return;
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'REPORT_GET' });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'report-load-failed');
+      }
+      latestReport = normalizeReport(response.report);
+      renderReport(latestReport);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  /**
+   * Slovensky: Normalizuje report pre jednoduchšie renderovanie.
+   */
+  function normalizeReport(report) {
+    if (!report || typeof report !== 'object') {
+      return { ts: 0, items: [], totalSeen: 0, totalQualified: 0 };
+    }
+    const ts = Number.parseInt(report.ts, 10);
+    const totalSeen = Number.parseInt(report.totalSeen, 10);
+    const totalQualified = Number.parseInt(report.totalQualified, 10);
+    return {
+      ts: Number.isFinite(ts) ? ts : 0,
+      items: Array.isArray(report.items) ? report.items : [],
+      totalSeen: Number.isFinite(totalSeen) ? totalSeen : 0,
+      totalQualified: Number.isFinite(totalQualified) ? totalQualified : 0
+    };
+  }
+
+  function renderReport(report) {
+    if (!reportCard) {
+      return;
+    }
+    if (reportTotalSeenEl) {
+      reportTotalSeenEl.textContent = String(report.totalSeen || 0);
+    }
+    if (reportTotalQualifiedEl) {
+      reportTotalQualifiedEl.textContent = String(report.totalQualified || 0);
+    }
+    if (reportUpdatedEl) {
+      reportUpdatedEl.textContent = formatReportTimestamp(report.ts);
+    }
+    renderReportRows(report.items || []);
+  }
+
+  function renderReportRows(items) {
+    if (!reportRows) {
+      return;
+    }
+    reportRows.innerHTML = '';
+    const data = Array.isArray(items) ? items : [];
+    if (!data.length) {
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 6;
+      cell.textContent = 'No simulated deletions yet.';
+      row.appendChild(cell);
+      reportRows.appendChild(row);
+      return;
+    }
+    data.forEach((item) => {
+      const row = document.createElement('tr');
+      row.appendChild(renderCell(item.title?.trim() ? item.title : '(no title)'));
+      row.appendChild(renderCell(formatNumber(item.lastMessageAgeMin)));
+      row.appendChild(renderCell(formatNumber(item.messageCount)));
+      row.appendChild(renderCell(formatNumber(item.userMessageCount)));
+      row.appendChild(renderCell(formatReasons(item.reasons)));
+      row.appendChild(renderLinkCell(item.url));
+      reportRows.appendChild(row);
+    });
+  }
+
+  function renderCell(value) {
+    const cell = document.createElement('td');
+    cell.textContent = value ?? '—';
+    return cell;
+  }
+
+  function renderLinkCell(url) {
+    const cell = document.createElement('td');
+    if (url) {
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.textContent = 'Open';
+      cell.appendChild(link);
+    } else {
+      cell.textContent = '—';
+    }
+    return cell;
+  }
+
+  function formatNumber(value) {
+    if (value === null || value === undefined) {
+      return '—';
+    }
+    const num = typeof value === 'number' ? value : Number.parseFloat(value);
+    return Number.isFinite(num) ? String(num) : '—';
+  }
+
+  function formatReasons(reasons) {
+    if (!Array.isArray(reasons) || reasons.length === 0) {
+      return '—';
+    }
+    return reasons.join(', ');
+  }
+
+  function formatReportTimestamp(ts) {
+    if (!ts) {
+      return 'never';
+    }
+    const date = new Date(ts);
+    if (Number.isNaN(date.getTime())) {
+      return 'never';
+    }
+    return date.toLocaleString();
+  }
+
+  function buildReportCsv(items) {
+    const rows = Array.isArray(items) ? items : [];
+    const header = REPORT_CSV_COLUMNS.join(',');
+    const lines = rows.map((item) =>
+      REPORT_CSV_COLUMNS.map((key) => csvEscape(resolveCsvValue(item, key))).join(',')
+    );
+    return [header, ...lines].join('\n');
+  }
+
+  function resolveCsvValue(item, key) {
+    if (!item || typeof item !== 'object') {
+      return '';
+    }
+    if (key === 'reasons') {
+      return Array.isArray(item.reasons) ? item.reasons.join('|') : '';
+    }
+    if (key === 'ts') {
+      const ts = Number.isFinite(item.ts) ? item.ts : Number.parseInt(item.ts, 10);
+      return Number.isFinite(ts) ? new Date(ts).toISOString() : '';
+    }
+    const value = item[key];
+    return value === undefined || value === null ? '' : String(value);
+  }
+
+  function csvEscape(value) {
+    const text = String(value ?? '');
+    if (text === '') {
+      return '';
+    }
+    if (/[",\n]/.test(text)) {
+      return `"${text.replace(/"/g, '""')}"`;
+    }
+    return text;
   }
 
   function startTailPolling() {
@@ -205,6 +385,56 @@ export async function init({ root }) {
     await refreshLogs();
   });
 
+  reportRefreshButton?.addEventListener('click', async () => {
+    await refreshReport();
+  });
+
+  reportExportButton?.addEventListener('click', async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'REPORT_EXPORT' });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'export-failed');
+      }
+      const csv = buildReportCsv(response.items || []);
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'mychatgpt_would_delete.csv';
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error(error);
+    }
+  });
+
+  reportClearButton?.addEventListener('click', async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'REPORT_CLEAR' });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'clear-failed');
+      }
+      latestReport = normalizeReport(response.report);
+      renderReport(latestReport);
+    } catch (error) {
+      console.error(error);
+    }
+  });
+
+  reportScanAllButton?.addEventListener('click', async () => {
+    if (reportScanAllButton.disabled) {
+      return;
+    }
+    reportScanAllButton.disabled = true;
+    try {
+      await chrome.runtime.sendMessage({ type: 'SCAN_ALL_TABS_NOW', bypassCooldown: true });
+    } catch (error) {
+      console.error(error);
+    } finally {
+      reportScanAllButton.disabled = false;
+    }
+  });
+
   probeButton?.addEventListener('click', async () => {
     probeButton.disabled = true;
     copyProbeButton.disabled = true;
@@ -259,6 +489,9 @@ export async function init({ root }) {
     }
     if (changes.debug_last_extractor_dump) {
       refreshSnapshot();
+    }
+    if (changes[REPORT_STORAGE_KEY]) {
+      refreshReport();
     }
   });
 

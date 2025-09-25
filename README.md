@@ -26,7 +26,19 @@ MyChatGPT keeps your ChatGPT account tidy while storing short “search-like” 
 - Enable verbose tracing in **Settings > Diagnostics** by setting `DEBUG_LEVEL` to `TRACE` and toggling `TRACE_EXTRACTOR` or `TRACE_RUNNER` as needed; keep `REDACT_TEXT_IN_DIAGNOSTICS` enabled when you want message bodies redacted.
 - Use the Debug tab's **Run extractor self-test (active tab)** button to execute the new probe. The result shows selectors tried, warnings, and errors, and the **Copy JSON** shortcut lets you share the snapshot locally.
 - Flip on `DIAGNOSTICS_SAFE_SNAPSHOT` to persist the last probe into `debug_last_extractor_dump`; the Debug tab renders the most recent snapshot for quick review.
-- Open the service worker console via `chrome://extensions -> MyChatGPT -> "Service worker" -> Inspect` to watch streaming logs. Reason codes such as `cooldown_active`, `tab_ignored_safe_url`, `qualify_false_message-limit`, `qualify_true`, `probe_failed`, and `backup_stored` map directly to runner decision points.
+- Open the service worker console via `chrome://extensions -> MyChatGPT -> "Service worker" -> Inspect` to watch streaming logs. Reason codes such as `cooldown_active`, `tab_ignored_safe_url`, `qualify_false_messages_gt_max`, `qualify_true`, `probe_failed`, and `backup_stored` map directly to runner decision points.
+
+## Auto-scan & Would-delete (simulated)
+- The service worker auto-scans chatgpt.com tabs when the extension installs, Chrome starts, or a chat tab activates/completes loading. Per-tab and global cooldown timers (respecting `COOLDOWN_MIN`) prevent excessive polling, and SAFE URL patterns continue to short-circuit eligible pages.
+- Conversations qualify for the simulated “would-delete” list only when they meet the heuristics: `messageCount ≤ MAX_MESSAGES`, `userMessageCount ≤ USER_MESSAGES_MAX`, `lastMessageAgeMin ≥ MIN_AGE_MINUTES`, and within the optional `DELETE_LIMIT`. Missing metadata or safe-domain matches keep them off the list.
+- LIST_ONLY and DRY_RUN stay enabled by default, so the feature never issues real DELETE/PATCH requests. The Debug report is strictly a preview of what *would* be deleted.
+- Open **Debug → Would-delete report (simulated)** to refresh counters, export `mychatgpt_would_delete.csv`, clear the log, or trigger **Scan all open chat tabs now** for a manual sweep. The popup badge mirrors the current qualified count so you can jump straight to Debug.
+
+## Troubleshooting `no_injection`
+If you see `reasonCode=no_injection` in the logs, open the **Debug** tab, click **Force inject content script**, or reload the chat tab. Remember to reload the extension after any manifest changes.
+
+## Troubleshooting `cooldown_active`
+`cooldown_active` means the per-tab or global cooldown is still in effect. Wait for the configured `COOLDOWN_MIN` interval or launch **Scan all open chat tabs now** from Debug with the cooldown bypass.
 
 ## Current limitations
 - DOM scraping relies on data attributes from chatgpt.com; major UI changes can break extraction until heuristics are updated.

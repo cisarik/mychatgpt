@@ -31,6 +31,37 @@
   <div class="flex-between">
     <small data-role="last-scan">No scans yet.</small>
   </div>
+  <div class="tab-card" data-role="would-report">
+    <div class="flex-between">
+      <h3>Would-delete report (simulated)</h3>
+      <div class="inline-group">
+        <button class="secondary" data-action="report-refresh">Refresh report</button>
+        <button class="secondary" data-action="report-export">Export CSV</button>
+        <button class="secondary" data-action="report-clear">Clear report</button>
+        <button data-action="report-scan-all">Scan all open chat tabs now</button>
+      </div>
+    </div>
+    <p class="tab-copy">
+      <span data-role="report-total-seen">0</span> tabs scanned •
+      <span data-role="report-total-qualified">0</span> qualify • Updated
+      <span data-role="report-updated">never</span>
+    </p>
+    <div class="table-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Last age (min)</th>
+            <th>Msgs</th>
+            <th>User msgs</th>
+            <th>Reasons</th>
+            <th>Link</th>
+          </tr>
+        </thead>
+        <tbody data-role="report-rows"></tbody>
+      </table>
+    </div>
+  </div>
   <div class="tab-card" data-role="probe-container">
     <div class="flex-between">
       <h3>Extractor Self-Test</h3>

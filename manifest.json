@@ -44,10 +44,6 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["assets/*"],
-      "matches": ["https://chatgpt.com/*"]
-    },
-    {
       "resources": ["utils.js"],
       "matches": ["https://chatgpt.com/*"]
     }

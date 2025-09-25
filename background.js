@@ -14,6 +14,8 @@ const DEFAULT_SETTINGS = {
   DELETE_LIMIT: 10,
   SAFE_URL_PATTERNS: ['/workspaces', '/projects', '/new-project'],
   ALLOW_LOCAL_BACKUP_WHEN_LIST_ONLY: false,
+  REPORT_LIMIT: 200,
+  INCLUDE_BACKUP_SNAPSHOT_ID: true,
   DEBUG_LEVEL: 'INFO',
   TRACE_EXTRACTOR: false,
   TRACE_RUNNER: false,
@@ -22,7 +24,8 @@ const DEFAULT_SETTINGS = {
 };
 
 const cooldownMemory = {
-  lastRun: 0
+  globalLastRun: 0,
+  perTab: {}
 };
 
 const SCAN_DELAY_MS = 1000;
@@ -34,6 +37,7 @@ let scheduledTimer = null;
 const RUNNER_SCOPE = 'runner';
 const CHAT_URL_PREFIX = 'https://chatgpt.com';
 const CHAT_URL_PATTERN = 'https://chatgpt.com/*';
+const REPORT_STORAGE_KEY = 'would_delete_report';
 
 const runnerTrace = (msg, meta = {}) => logTrace(RUNNER_SCOPE, msg, meta);
 const runnerDebug = (msg, meta = {}) => logDebug(RUNNER_SCOPE, msg, meta);
@@ -55,6 +59,121 @@ function withReason(reasonCode, extra = {}) {
   return { ...extra, reasonCode };
 }
 
+function defaultReport() {
+  return {
+    ts: 0,
+    items: [],
+    totalSeen: 0,
+    totalQualified: 0
+  };
+}
+
+function buildReportItem({ url, meta, reasons, qualifies, snapshotId }) {
+  const summary = summarizeMeta(meta) || {};
+  return {
+    ts: Date.now(),
+    url,
+    convoId: summary.convoId || '',
+    title: summary.title || '',
+    messageCount: summary.messageCount ?? null,
+    userMessageCount: summary.userMessageCount ?? null,
+    lastMessageAgeMin: summary.lastMessageAgeMin ?? null,
+    reasons: Array.isArray(reasons) ? reasons.slice() : [],
+    qualifies: Boolean(qualifies),
+    snapshotId: snapshotId || undefined
+  };
+}
+
+async function loadWouldDeleteReport(limit) {
+  const stored = await chrome.storage.local.get([REPORT_STORAGE_KEY]);
+  const existing = stored[REPORT_STORAGE_KEY];
+  if (!existing || typeof existing !== 'object') {
+    return defaultReport();
+  }
+  const report = {
+    ts: existing.ts || 0,
+    totalSeen: Number.isFinite(existing.totalSeen) ? existing.totalSeen : 0,
+    totalQualified: Number.isFinite(existing.totalQualified) ? existing.totalQualified : 0,
+    items: Array.isArray(existing.items) ? existing.items.slice(0, limit) : []
+  };
+  if (report.items.length > limit) {
+    report.items = report.items.slice(0, limit);
+  }
+  report.totalQualified = report.items.filter((item) => item.qualifies).length;
+  return report;
+}
+
+async function persistWouldDeleteReport(report) {
+  await chrome.storage.local.set({ [REPORT_STORAGE_KEY]: report });
+  await runnerDebug('Would-delete report stored', withReason('report_update_ok', {
+    totalSeen: report.totalSeen,
+    totalQualified: report.totalQualified,
+    items: report.items.length
+  }));
+}
+
+async function updateWouldDeleteReport({ url, meta, reasons, qualifies, snapshotId, settings }) {
+  try {
+    const limit = settings?.REPORT_LIMIT || 200;
+    const report = await loadWouldDeleteReport(limit);
+    report.ts = Date.now();
+    report.totalSeen = (report.totalSeen || 0) + 1;
+    const entry = buildReportItem({ url, meta, reasons, qualifies, snapshotId });
+    const key = entry.convoId || url;
+    const previousIndex = report.items.findIndex((item) => (item.convoId || item.url) === key);
+    if (previousIndex !== -1) {
+      report.items.splice(previousIndex, 1);
+      if (qualifies) {
+        await runnerInfo('Would-delete candidate updated', withReason('candidate_updated', {
+          url,
+          convoId: entry.convoId,
+          meta: summarizeMeta(meta)
+        }));
+      } else {
+        await runnerDebug('Would-delete record refreshed (non-qualified)', withReason('qualify_false_update', {
+          url,
+          convoId: entry.convoId,
+          reasons
+        }));
+      }
+    } else {
+      if (qualifies) {
+        await runnerInfo('Would-delete candidate recorded', withReason('candidate_recorded', {
+          url,
+          convoId: entry.convoId,
+          meta: summarizeMeta(meta)
+        }));
+      } else {
+        await runnerDebug('Would-delete record stored (non-qualified)', withReason('qualify_false_recorded', {
+          url,
+          convoId: entry.convoId,
+          reasons
+        }));
+      }
+    }
+    report.items.unshift(entry);
+    if (report.items.length > limit) {
+      report.items = report.items.slice(0, limit);
+    }
+    report.totalQualified = report.items.filter((item) => item.qualifies).length;
+    await persistWouldDeleteReport(report);
+    return entry;
+  } catch (error) {
+    await runnerWarn('Failed to update would-delete report', withReason('report_update_failed', {
+      url,
+      error: error?.message
+    }));
+    return null;
+  }
+}
+
+async function clearWouldDeleteReport() {
+  const blank = { ...defaultReport(), ts: Date.now() };
+  await chrome.storage.local.set({ [REPORT_STORAGE_KEY]: blank });
+  await runnerInfo('Would-delete report cleared', withReason('report_cleared'));
+  return blank;
+}
+
 function normalizeSettings(raw) {
   const merged = { ...DEFAULT_SETTINGS, ...(raw || {}) };
   if (!Array.isArray(merged.SAFE_URL_PATTERNS)) {
@@ -63,6 +182,15 @@ function normalizeSettings(raw) {
       .map((token) => token.trim())
       .filter(Boolean);
   }
+  const parsedLimit = Number.parseInt(merged.REPORT_LIMIT, 10);
+  merged.REPORT_LIMIT = Number.isFinite(parsedLimit)
+    ? Math.max(1, Math.floor(parsedLimit))
+    : DEFAULT_SETTINGS.REPORT_LIMIT;
+  const parsedCooldown = Number.parseInt(merged.COOLDOWN_MIN, 10);
+  merged.COOLDOWN_MIN = Number.isFinite(parsedCooldown)
+    ? Math.max(0, Math.floor(parsedCooldown))
+    : DEFAULT_SETTINGS.COOLDOWN_MIN;
+  merged.INCLUDE_BACKUP_SNAPSHOT_ID = Boolean(merged.INCLUDE_BACKUP_SNAPSHOT_ID);
   return merged;
 }
 
@@ -97,6 +225,12 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
     scheduleTabScan({ tabId, url, trigger: 'tab-activated' });
   } catch (error) {
     await runnerWarn('Failed to inspect activated tab', withReason('tab_lookup_failed', { error: error?.message }));
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (cooldownMemory.perTab[tabId]) {
+    delete cooldownMemory.perTab[tabId];
   }
 });
 
@@ -192,6 +326,63 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     log(message.level || 'info', message.scope || 'general', message.msg || 'Event', message.meta).finally(() =>
       sendResponse({ ok: true })
     );
+    return true;
+  }
+  if (message?.type === 'REPORT_GET') {
+    (async () => {
+      try {
+        const settings = await getSettings();
+        const report = await loadWouldDeleteReport(settings.REPORT_LIMIT);
+        sendResponse({ ok: true, report });
+      } catch (error) {
+        await runnerWarn('REPORT_GET failed', withReason('report_get_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message });
+      }
+    })();
+    return true;
+  }
+  if (message?.type === 'REPORT_CLEAR') {
+    (async () => {
+      try {
+        const cleared = await clearWouldDeleteReport();
+        sendResponse({ ok: true, report: cleared });
+      } catch (error) {
+        await runnerWarn('REPORT_CLEAR failed', withReason('report_clear_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message });
+      }
+    })();
+    return true;
+  }
+  if (message?.type === 'REPORT_EXPORT') {
+    (async () => {
+      try {
+        const settings = await getSettings();
+        const report = await loadWouldDeleteReport(settings.REPORT_LIMIT);
+        await runnerInfo('Report export requested', withReason('report_export_started', {
+          count: report.items.length
+        }));
+        sendResponse({ ok: true, items: report.items, ts: report.ts });
+      } catch (error) {
+        await runnerWarn('REPORT_EXPORT failed', withReason('report_export_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message });
+      }
+    })();
+    return true;
+  }
+  if (message?.type === 'SCAN_ALL_TABS_NOW') {
+    (async () => {
+      try {
+        await runnerInfo('Manual scan-all requested', withReason('scan_all_triggered', {
+          bypass: Boolean(message?.bypassCooldown)
+        }));
+        const total = await triggerScanForAllTabs(Boolean(message?.bypassCooldown));
+        await runnerInfo('Manual scan-all completed', withReason('scan_all_completed', { total }));
+        sendResponse({ ok: true, total });
+      } catch (error) {
+        await runnerWarn('SCAN_ALL_TABS_NOW failed', withReason('scan_all_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message });
+      }
+    })();
     return true;
   }
   return undefined;
@@ -340,29 +531,54 @@ async function runScan({ tabId, trigger, bypassCooldown, manual, forcedUrl = nul
   await trace('Run invoked', { trigger, bypassCooldown, manual });
 
   const now = Date.now();
-  const elapsed = minutesSince(cooldownMemory.lastRun);
-  if (!bypassCooldown && cooldownMemory.lastRun && elapsed < settings.COOLDOWN_MIN) {
-    const remaining = Math.max(settings.COOLDOWN_MIN - elapsed, 0);
-    await runnerDebug('Cooldown active, skipping run', withReason('cooldown_active', {
-      trigger,
-      elapsed,
-      remaining
-    }));
-    await persistSummary({
-      trigger,
-      outcome: 'cooldown-skip',
-      details: { elapsed, remaining }
-    });
-    return {
-      ran: false,
-      trigger,
-      reason: 'cooldown',
-      elapsed,
-      remaining
-    };
+  if (!bypassCooldown) {
+    const tabLast = cooldownMemory.perTab[tabId] || 0;
+    const tabElapsed = minutesSince(tabLast);
+    if (tabLast && tabElapsed < settings.COOLDOWN_MIN) {
+      const remaining = Math.max(settings.COOLDOWN_MIN - tabElapsed, 0);
+      await runnerDebug('Per-tab cooldown active, skipping run', withReason('cooldown_active', {
+        trigger,
+        scope: 'tab',
+        tabId,
+        elapsed: tabElapsed,
+        remaining
+      }));
+      await persistSummary({
+        trigger,
+        outcome: 'cooldown-skip',
+        details: { elapsed: tabElapsed, remaining, scope: 'tab', tabId }
+      });
+      return {
+        ran: false,
+        trigger,
+        reason: 'cooldown-tab',
+        elapsed: tabElapsed,
+        remaining
+      };
+    }
+    const globalElapsed = minutesSince(cooldownMemory.globalLastRun);
+    if (cooldownMemory.globalLastRun && globalElapsed < settings.COOLDOWN_MIN) {
+      const remaining = Math.max(settings.COOLDOWN_MIN - globalElapsed, 0);
+      await runnerDebug('Global cooldown active, skipping run', withReason('cooldown_active', {
+        trigger,
+        scope: 'global',
+        elapsed: globalElapsed,
+        remaining
+      }));
+      await persistSummary({
+        trigger,
+        outcome: 'cooldown-skip',
+        details: { elapsed: globalElapsed, remaining, scope: 'global' }
+      });
+      return {
+        ran: false,
+        trigger,
+        reason: 'cooldown-global',
+        elapsed: globalElapsed,
+        remaining
+      };
+    }
   }
-
-  cooldownMemory.lastRun = now;
 
   let tab;
   try {
@@ -378,14 +594,31 @@ async function runScan({ tabId, trigger, bypassCooldown, manual, forcedUrl = nul
   if (!url.startsWith('https://chatgpt.com')) {
     await runnerDebug('Tab outside chatgpt.com scope', withReason('tab_ignored_domain', { trigger, url }));
     await persistSummary({ trigger, outcome: 'url-mismatch', details: { url } });
+    await updateWouldDeleteReport({
+      url,
+      meta: null,
+      reasons: ['domain_mismatch'],
+      qualifies: false,
+      settings
+    });
     return { ran: false, trigger, reason: 'url-mismatch' };
   }
 
   if (shouldSkipUrl(url, settings)) {
     await runnerInfo('SAFE_URL_PATTERNS match, skipping', withReason('tab_ignored_safe_url', { trigger, url }));
     await persistSummary({ trigger, outcome: 'safe-url-skip', details: { url } });
+    await updateWouldDeleteReport({
+      url,
+      meta: null,
+      reasons: ['tab_ignored_safe_url'],
+      qualifies: false,
+      settings
+    });
     return { ran: false, trigger, reason: 'safe-url' };
   }
+
+  cooldownMemory.perTab[tabId] = now;
+  cooldownMemory.globalLastRun = now;
 
   await runnerInfo('Scan started', withReason('scan_started', { trigger, manual }));
   await trace('Requesting conversation meta', { trigger });
@@ -394,6 +627,13 @@ async function runScan({ tabId, trigger, bypassCooldown, manual, forcedUrl = nul
   if (!meta) {
     await runnerWarn('Meta extraction failed', withReason('meta_missing', { trigger, manual }));
     await persistSummary({ trigger, outcome: 'meta-missing' });
+    await updateWouldDeleteReport({
+      url,
+      meta: null,
+      reasons: ['missing_meta'],
+      qualifies: false,
+      settings
+    });
     if (settings.DIAGNOSTICS_SAFE_SNAPSHOT) {
       await runDebugProbeForDiagnostics({
         tabId,
@@ -414,15 +654,24 @@ async function runScan({ tabId, trigger, bypassCooldown, manual, forcedUrl = nul
     for (const reason of qualifier.reasons) {
       await runnerDebug('Conversation disqualified (detail)', withReason(`qualify_false_${reason}`, {
         trigger,
+        url,
         meta: summarizedMeta
       }));
     }
     await runnerInfo('Conversation disqualified', withReason('qualify_false', {
       trigger,
+      url,
       reasons: qualifier.reasons,
       meta: summarizedMeta
     }));
     await persistSummary({ trigger, outcome: 'disqualified', details: { reasons: qualifier.reasons } });
+    await updateWouldDeleteReport({
+      url,
+      meta,
+      reasons: qualifier.reasons,
+      qualifies: false,
+      settings
+    });
     return {
       ran: true,
       trigger,
@@ -432,7 +681,37 @@ async function runScan({ tabId, trigger, bypassCooldown, manual, forcedUrl = nul
     };
   }
 
-  await runnerInfo('Conversation qualifies', withReason('qualify_true', { trigger, meta: summarizedMeta }));
+  const deleteLimit = Number.parseInt(settings.DELETE_LIMIT, 10);
+  if (Number.isFinite(deleteLimit) && deleteLimit > 0) {
+    const snapshot = await loadWouldDeleteReport(settings.REPORT_LIMIT);
+    const activeQualified = (snapshot.items || []).filter((item) => item.qualifies).length;
+    if (activeQualified >= deleteLimit) {
+      const reasons = ['delete_limit_reached'];
+      await runnerInfo('Delete limit reached, skipping candidate', withReason('qualify_false_delete_limit_reached', {
+        trigger,
+        url,
+        meta: summarizedMeta,
+        activeQualified,
+        deleteLimit
+      }));
+      await updateWouldDeleteReport({
+        url,
+        meta,
+        reasons,
+        qualifies: false,
+        settings
+      });
+      return {
+        ran: true,
+        trigger,
+        qualified: false,
+        reasons,
+        meta
+      };
+    }
+  }
+
+  await runnerInfo('Conversation qualifies', withReason('qualify_true', { trigger, url, meta: summarizedMeta }));
 
   const mayPersist = !settings.LIST_ONLY || settings.ALLOW_LOCAL_BACKUP_WHEN_LIST_ONLY;
   if (!mayPersist) {
@@ -442,6 +721,13 @@ async function runScan({ tabId, trigger, bypassCooldown, manual, forcedUrl = nul
       meta: summarizedMeta
     }));
     await persistSummary({ trigger, outcome: 'would-backup', details: { meta: summarizedMeta } });
+    await updateWouldDeleteReport({
+      url,
+      meta,
+      reasons: [],
+      qualifies: true,
+      settings
+    });
     return {
       ran: true,
       trigger,
@@ -457,6 +743,13 @@ async function runScan({ tabId, trigger, bypassCooldown, manual, forcedUrl = nul
   if (!qa) {
     await runnerWarn('Q/A extraction failed', withReason('qa_missing', { trigger, manual }));
     await persistSummary({ trigger, outcome: 'qa-missing' });
+    await updateWouldDeleteReport({
+      url,
+      meta,
+      reasons: ['qa_missing'],
+      qualifies: true,
+      settings
+    });
     return {
       ran: true,
       trigger,
@@ -473,25 +766,58 @@ async function runScan({ tabId, trigger, bypassCooldown, manual, forcedUrl = nul
   });
 
   const entry = buildBackupEntry(meta, qa);
-  const id = await backups.add(entry);
-  await runnerInfo('Backup stored', withReason('backup_stored', {
-    trigger,
-    id,
-    manual,
-    meta: summarizedMeta
-  }));
-  await persistSummary({ trigger, outcome: 'stored', details: { id } });
-
-  notifyBackupsChanged();
-
-  return {
-    ran: true,
-    trigger,
-    qualified: true,
-    stored: true,
-    id,
-    meta
-  };
+  try {
+    const id = await backups.add(entry);
+    await runnerInfo('Backup stored', withReason('backup_stored', {
+      trigger,
+      id,
+      manual,
+      meta: summarizedMeta
+    }));
+    await persistSummary({ trigger, outcome: 'stored', details: { id } });
+    notifyBackupsChanged();
+    await updateWouldDeleteReport({
+      url,
+      meta,
+      reasons: [],
+      qualifies: true,
+      snapshotId: settings.INCLUDE_BACKUP_SNAPSHOT_ID ? id : undefined,
+      settings
+    });
+    return {
+      ran: true,
+      trigger,
+      qualified: true,
+      stored: true,
+      id,
+      meta
+    };
+  } catch (error) {
+    await runnerWarn('Backup storage failed', withReason('backup_failed', {
+      trigger,
+      error: error?.message,
+      meta: summarizedMeta
+    }));
+    await persistSummary({
+      trigger,
+      outcome: 'store-failed',
+      details: { error: error?.message }
+    });
+    await updateWouldDeleteReport({
+      url,
+      meta,
+      reasons: ['backup_failed'],
+      qualifies: true,
+      settings
+    });
+    return {
+      ran: true,
+      trigger,
+      qualified: true,
+      stored: false,
+      error: 'backup-failed'
+    };
+  }
 }
 
 function shouldSkipUrl(url, settings) {
@@ -509,15 +835,15 @@ function evaluateQualifiers(meta, settings) {
   const minAge = settings.MIN_AGE_MINUTES ?? 2;
 
   if (typeof meta.messageCount === 'number' && meta.messageCount > maxMessages) {
-    reasons.push('message-limit');
+    reasons.push('messages_gt_max');
   }
 
   if (typeof meta.userMessageCount === 'number' && meta.userMessageCount > maxUserMessages) {
-    reasons.push('user-message-limit');
+    reasons.push('user_messages_gt_max');
   }
 
   if (typeof meta.lastMessageAgeMin === 'number' && meta.lastMessageAgeMin < minAge) {
-    reasons.push('too-fresh');
+    reasons.push('age_lt_min');
   }
 
   return {
@@ -678,4 +1004,36 @@ function notifyBackupsChanged() {
   chrome.runtime.sendMessage({ type: 'mychatgpt-backups-changed' }).catch(() => {
     /* Slovensky: Ignoruje chybu keď popup nie je otvorený. */
   });
+}
+
+async function triggerScanForAllTabs(bypassCooldown) {
+  try {
+    const tabs = await chrome.tabs.query({ url: [CHAT_URL_PATTERN] });
+    let processed = 0;
+    for (const tab of tabs) {
+      if (typeof tab?.id !== 'number') {
+        continue;
+      }
+      processed += 1;
+      try {
+        await runScan({
+          tabId: tab.id,
+          trigger: 'scan-all-manual',
+          bypassCooldown,
+          manual: true,
+          forcedUrl: tab.url
+        });
+      } catch (error) {
+        await runnerWarn('Scan-all iteration failed', withReason('scan_all_tab_failed', {
+          tabId: tab.id,
+          error: error?.message
+        }));
+      }
+      await delay(50);
+    }
+    return processed;
+  } catch (error) {
+    await runnerWarn('Scan-all query failed', withReason('scan_all_query_failed', { error: error?.message }));
+    return 0;
+  }
 }

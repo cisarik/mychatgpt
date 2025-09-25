@@ -12,7 +12,9 @@ const DEFAULT_SETTINGS = {
   USER_MESSAGES_MAX: 2,
   MIN_AGE_MINUTES: 2,
   DELETE_LIMIT: 10,
-  SAFE_URL_PATTERNS: ['/workspaces', '/projects', '/new-project'],
+  SAFE_URL_PATTERNS: ['/workspaces', '/projects', '/new-project','/codex'],
+  REPORT_LIMIT: 200,
+  INCLUDE_BACKUP_SNAPSHOT_ID: true,
   DEBUG_LEVEL: 'INFO',
   TRACE_EXTRACTOR: false,
   TRACE_RUNNER: false,
@@ -37,6 +39,13 @@ const FIELD_DEFS = [
   { key: 'MIN_AGE_MINUTES', label: 'MIN_AGE_MINUTES', type: 'number', min: 0, group: 'heuristics' },
   { key: 'DELETE_LIMIT', label: 'DELETE_LIMIT', type: 'number', min: 1, group: 'heuristics' },
   { key: 'SAFE_URL_PATTERNS', label: 'SAFE_URL_PATTERNS', type: 'textarea', group: 'heuristics' },
+  { key: 'REPORT_LIMIT', label: 'REPORT_LIMIT', type: 'number', min: 1, group: 'diagnostics' },
+  {
+    key: 'INCLUDE_BACKUP_SNAPSHOT_ID',
+    label: 'INCLUDE_BACKUP_SNAPSHOT_ID',
+    type: 'checkbox',
+    group: 'diagnostics'
+  },
   {
     key: 'DEBUG_LEVEL',
     label: 'DEBUG_LEVEL',
@@ -75,6 +84,11 @@ function normalizeSettings(raw) {
   if (!Array.isArray(merged.SAFE_URL_PATTERNS)) {
     merged.SAFE_URL_PATTERNS = csvToArray(merged.SAFE_URL_PATTERNS || '');
   }
+  const parsedLimit = Number.parseInt(merged.REPORT_LIMIT, 10);
+  merged.REPORT_LIMIT = Number.isFinite(parsedLimit)
+    ? Math.max(1, Math.floor(parsedLimit))
+    : DEFAULT_SETTINGS.REPORT_LIMIT;
+  merged.INCLUDE_BACKUP_SNAPSHOT_ID = Boolean(merged.INCLUDE_BACKUP_SNAPSHOT_ID);
   return merged;
 }
 
