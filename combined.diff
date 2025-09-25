@@ -1,0 +1,2197 @@
+--- a/background.js
++++ b/background.js
+@@ -0,0 +1,420 @@
++import { initDb, backups } from './db.js';
++import { log, minutesSince } from './utils.js';
++
++const SETTINGS_KEY = 'settings';
++const DEFAULT_SETTINGS = {
++  LIST_ONLY: true,
++  DRY_RUN: true,
++  CONFIRM_BEFORE_DELETE: true,
++  AUTO_SCAN: true,
++  COOLDOWN_MIN: 5,
++  MAX_MESSAGES: 2,
++  USER_MESSAGES_MAX: 2,
++  MIN_AGE_MINUTES: 2,
++  DELETE_LIMIT: 10,
++  SAFE_URL_PATTERNS: ['/workspaces', '/projects', '/new-project'],
++  ALLOW_LOCAL_BACKUP_WHEN_LIST_ONLY: false
++};
++
++const cooldownMemory = {
++  lastRun: 0
++};
++
++const SCAN_DELAY_MS = 1000;
++
++let scheduledScan = null;
++let scheduledTimer = null;
++
++function normalizeSettings(raw) {
++  const merged = { ...DEFAULT_SETTINGS, ...(raw || {}) };
++  if (!Array.isArray(merged.SAFE_URL_PATTERNS)) {
++    merged.SAFE_URL_PATTERNS = String(merged.SAFE_URL_PATTERNS || '')
++      .split(',')
++      .map((token) => token.trim())
++      .filter(Boolean);
++  }
++  return merged;
++}
++
++chrome.runtime.onInstalled.addListener(() => {
++  bootstrap('install');
++});
++
++chrome.runtime.onStartup.addListener(() => {
++  bootstrap('startup');
++});
++
++chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
++  if (changeInfo.status !== 'complete') {
++    return;
++  }
++  scheduleTabScan({ tabId, url: tab?.url || '', trigger: 'tab-updated' });
++});
++
++chrome.tabs.onActivated.addListener(async ({ tabId }) => {
++  try {
++    const tab = await chrome.tabs.get(tabId);
++    scheduleTabScan({ tabId, url: tab?.url || '', trigger: 'tab-activated' });
++  } catch (error) {
++    await log('warn', 'runner', 'Failed to inspect activated tab', { error: error?.message });
++  }
++});
++
++chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
++  if (message?.type === 'scanNow') {
++    handleScanRequest({
++      trigger: 'manual-scan',
++      bypassCooldown: true,
++      manual: false,
++      sendResponse
++    });
++    return true;
++  }
++
++  if (message?.type === 'manualBackup') {
++    handleScanRequest({
++      trigger: 'popup-manual-backup',
++      bypassCooldown: true,
++      manual: true,
++      sendResponse
++    });
++    return true;
++  }
++
++  if (message?.type === 'getSettings') {
++    getSettings()
++      .then((settings) => sendResponse({ settings }))
++      .catch((error) => sendResponse({ error: error.message }));
++    return true;
++  }
++
++  if (message?.type === 'ensureSettings') {
++    ensureSettings()
++      .then((settings) => sendResponse({ settings }))
++      .catch((error) => sendResponse({ error: error.message }));
++    return true;
++  }
++  if (message?.type === 'mychatgpt:log') {
++    log(message.level || 'info', message.scope || 'general', message.msg || 'Event', message.meta).finally(() =>
++      sendResponse({ ok: true })
++    );
++    return true;
++  }
++  return undefined;
++});
++
++async function bootstrap(reason) {
++  try {
++    await initDb();
++    const settings = await ensureSettings();
++    await log('info', 'runner', 'Service worker ready', { reason, settings });
++  } catch (error) {
++    await log('error', 'runner', 'Bootstrap failed', { reason, error: error.message });
++  }
++}
++
++async function ensureSettings() {
++  const stored = await chrome.storage.local.get([SETTINGS_KEY]);
++  const merged = normalizeSettings(stored[SETTINGS_KEY]);
++  await chrome.storage.local.set({ [SETTINGS_KEY]: merged });
++  return merged;
++}
++
++async function getSettings() {
++  const stored = await chrome.storage.local.get([SETTINGS_KEY]);
++  return normalizeSettings(stored[SETTINGS_KEY]);
++}
++
++function scheduleTabScan({ tabId, url, trigger }) {
++  if (!url || !url.startsWith('https://chatgpt.com')) {
++    return;
++  }
++
++  scheduledScan = { tabId, url, trigger };
++
++  if (scheduledTimer) {
++    clearTimeout(scheduledTimer);
++  }
++
++  scheduledTimer = setTimeout(async () => {
++    scheduledTimer = null;
++    const context = scheduledScan;
++    scheduledScan = null;
++    if (!context) {
++      return;
++    }
++
++    const settings = await getSettings();
++    if (!settings.AUTO_SCAN) {
++      await log('debug', 'runner', 'AUTO_SCAN disabled, skipping scheduled scan', { trigger: context.trigger });
++      return;
++    }
++
++    await runScan({
++      tabId: context.tabId,
++      trigger: context.trigger,
++      bypassCooldown: false,
++      manual: false
++    });
++  }, SCAN_DELAY_MS);
++}
++
++async function handleScanRequest({ trigger, bypassCooldown, manual, sendResponse }) {
++  try {
++    const tab = await getActiveChatTab();
++    if (!tab) {
++      await log('warn', 'runner', 'Manual scan requested but no active chat tab', { trigger });
++      sendResponse({ ran: false, error: 'no-active-chat-tab' });
++      return;
++    }
++
++    const result = await runScan({
++      tabId: tab.id,
++      trigger,
++      bypassCooldown,
++      manual,
++      forcedUrl: tab.url
++    });
++    sendResponse(result);
++  } catch (error) {
++    await log('error', 'runner', 'Manual scan failed', { trigger, error: error?.message });
++    sendResponse({ ran: false, error: error?.message });
++  }
++}
++
++async function getActiveChatTab() {
++  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
++  if (!tab?.url?.startsWith('https://chatgpt.com')) {
++    return null;
++  }
++  return tab;
++}
++
++async function runScan({ tabId, trigger, bypassCooldown, manual, forcedUrl = null }) {
++  const settings = await getSettings();
++
++  const now = Date.now();
++  const elapsed = minutesSince(cooldownMemory.lastRun);
++  if (!bypassCooldown && cooldownMemory.lastRun && elapsed < settings.COOLDOWN_MIN) {
++    const remaining = settings.COOLDOWN_MIN - elapsed;
++    await log('debug', 'runner', 'Cooldown active, skipping run', {
++      trigger,
++      elapsed,
++      remaining
++    });
++    await persistSummary({
++      trigger,
++      outcome: 'cooldown-skip',
++      details: { elapsed, remaining }
++    });
++    return {
++      ran: false,
++      trigger,
++      reason: 'cooldown',
++      elapsed,
++      remaining
++    };
++  }
++
++  cooldownMemory.lastRun = now;
++
++  let tab;
++  try {
++    tab = await chrome.tabs.get(tabId);
++  } catch (error) {
++    await log('error', 'runner', 'Failed to get tab during scan', { trigger, error: error?.message });
++    return { ran: false, trigger, error: 'tab-unavailable' };
++  }
++
++  const url = forcedUrl || tab?.url || '';
++  if (!url.startsWith('https://chatgpt.com')) {
++    await log('debug', 'runner', 'Tab no longer on chatgpt.com', { trigger, url });
++    await persistSummary({ trigger, outcome: 'url-mismatch', details: { url } });
++    return { ran: false, trigger, reason: 'url-mismatch' };
++  }
++
++  if (shouldSkipUrl(url, settings)) {
++    await log('info', 'runner', 'SAFE_URL_PATTERNS match, skipping', { trigger, url });
++    await persistSummary({ trigger, outcome: 'safe-url-skip', details: { url } });
++    return { ran: false, trigger, reason: 'safe-url' };
++  }
++
++  await log('info', 'runner', 'Scan started', { trigger, manual });
++
++  const meta = await requestFromContent(tabId, { type: 'MYCHATGPT:getConversationMeta' });
++  if (!meta) {
++    await log('warn', 'runner', 'Meta extraction failed', { trigger, manual });
++    await persistSummary({ trigger, outcome: 'meta-missing' });
++    return { ran: true, trigger, reason: 'meta-missing' };
++  }
++
++  const qualifier = evaluateQualifiers(meta, settings);
++  if (!qualifier.qualifies) {
++    await log('info', 'runner', 'Conversation disqualified', {
++      trigger,
++      reasons: qualifier.reasons,
++      meta
++    });
++    await persistSummary({ trigger, outcome: 'disqualified', details: { reasons: qualifier.reasons } });
++    return {
++      ran: true,
++      trigger,
++      qualified: false,
++      reasons: qualifier.reasons,
++      meta
++    };
++  }
++
++  const mayPersist = !settings.LIST_ONLY || settings.ALLOW_LOCAL_BACKUP_WHEN_LIST_ONLY;
++  if (!mayPersist) {
++    await log('info', 'runner', 'LIST_ONLY mode would store backup (blocked)', {
++      trigger,
++      meta,
++      manual
++    });
++    await persistSummary({ trigger, outcome: 'would-backup', details: { meta } });
++    return {
++      ran: true,
++      trigger,
++      qualified: true,
++      stored: false,
++      wouldStore: true,
++      meta
++    };
++  }
++
++  const qa = await requestFromContent(tabId, { type: 'MYCHATGPT:getQandA' });
++  if (!qa) {
++    await log('warn', 'runner', 'Q/A extraction failed', { trigger, manual });
++    await persistSummary({ trigger, outcome: 'qa-missing' });
++    return {
++      ran: true,
++      trigger,
++      qualified: true,
++      stored: false,
++      reason: 'qa-missing'
++    };
++  }
++
++  const entry = buildBackupEntry(meta, qa);
++  const id = await backups.add(entry);
++  await log('info', 'runner', 'Backup stored', { trigger, id, manual, meta: summarizeMeta(meta) });
++  await persistSummary({ trigger, outcome: 'stored', details: { id } });
++
++  notifyBackupsChanged();
++
++  return {
++    ran: true,
++    trigger,
++    qualified: true,
++    stored: true,
++    id,
++    meta
++  };
++}
++
++function shouldSkipUrl(url, settings) {
++  const patterns = settings?.SAFE_URL_PATTERNS || [];
++  if (!patterns.length) {
++    return false;
++  }
++  return patterns.some((pattern) => pattern && url.includes(pattern));
++}
++
++function evaluateQualifiers(meta, settings) {
++  const reasons = [];
++  const maxMessages = settings.MAX_MESSAGES ?? 2;
++  const maxUserMessages = settings.USER_MESSAGES_MAX ?? 2;
++  const minAge = settings.MIN_AGE_MINUTES ?? 2;
++
++  if (typeof meta.messageCount === 'number' && meta.messageCount > maxMessages) {
++    reasons.push('message-limit');
++  }
++
++  if (typeof meta.userMessageCount === 'number' && meta.userMessageCount > maxUserMessages) {
++    reasons.push('user-message-limit');
++  }
++
++  if (typeof meta.lastMessageAgeMin === 'number' && meta.lastMessageAgeMin < minAge) {
++    reasons.push('too-fresh');
++  }
++
++  return {
++    qualifies: reasons.length === 0,
++    reasons
++  };
++}
++
++function buildBackupEntry(meta, qa) {
++  const title = deriveTitle(meta, qa);
++  return {
++    id: meta.id || undefined,
++    title,
++    questionText: qa.questionText || '',
++    answerHTML: qa.answerHTML || '',
++    timestamp: Date.now(),
++    category: meta.category || undefined,
++    convoId: meta.convoId || extractConvoIdFromUrl(meta.url)
++  };
++}
++
++function deriveTitle(meta, qa) {
++  if (meta?.title) {
++    return meta.title;
++  }
++  const text = qa?.questionText || '';
++  if (text) {
++    const trimmed = text.trim();
++    return trimmed.length > 80 ? `${trimmed.slice(0, 77)}…` : trimmed || 'Untitled backup';
++  }
++  return 'Untitled backup';
++}
++
++function extractConvoIdFromUrl(url) {
++  if (!url) {
++    return '';
++  }
++  const match = url.match(/\/c\/([^/?#]+)/);
++  return match ? match[1] : '';
++}
++
++function summarizeMeta(meta) {
++  if (!meta) {
++    return null;
++  }
++  return {
++    messageCount: meta.messageCount ?? null,
++    userMessageCount: meta.userMessageCount ?? null,
++    lastMessageAgeMin: meta.lastMessageAgeMin ?? null,
++    title: meta.title ?? null,
++    convoId: meta.convoId ?? null
++  };
++}
++
++async function requestFromContent(tabId, payload) {
++  try {
++    const response = await chrome.tabs.sendMessage(tabId, payload);
++    return response?.ok === false ? null : response;
++  } catch (error) {
++    await log('warn', 'runner', 'Content script request failed', {
++      action: payload?.type,
++      error: error?.message
++    });
++    return null;
++  }
++}
++
++async function persistSummary({ trigger, outcome, details = {} }) {
++  const summary = `${trigger}: ${outcome}`;
++  await chrome.storage.local.set({
++    last_scan_summary: summary,
++    last_scan_at: Date.now(),
++    last_scan_details: details
++  });
++}
++
++function notifyBackupsChanged() {
++  chrome.runtime.sendMessage({ type: 'mychatgpt-backups-changed' }).catch(() => {
++    /* Slovensky: Ignoruje chybu keď popup nie je otvorený. */
++  });
++}
+--- a/content.js
++++ b/content.js
+@@ -0,0 +1,211 @@
++(async () => {
++  const { sanitizeHTML, log } = await import(chrome.runtime.getURL('utils.js'));
++
++  /**
++   * Slovensky: Bezpečne zaloguje extraktorové udalosti, chyby sa ignorujú.
++   */
++  function logExtractor(level, msg, meta) {
++    log(level, 'extractor', msg, meta).catch(() => {
++      // Slovensky: Obsahové skripty potláčajú chyby logovania.
++    });
++  }
++
++  function getRoot() {
++    return document.querySelector('[data-testid="conversation-main"]') || document.body;
++  }
++
++  function getConversationMeta() {
++    try {
++      const root = getRoot();
++      const nodes = Array.from(root.querySelectorAll('[data-message-author-role]'));
++      const userNodes = nodes.filter((node) => node.getAttribute('data-message-author-role') === 'user');
++
++      const lastMessage = nodes.length ? nodes[nodes.length - 1] : null;
++      const meta = {
++        messageCount: nodes.length || null,
++        userMessageCount: userNodes.length || null,
++        lastMessageAgeMin: lastMessage ? computeAgeMinutes(lastMessage) : null,
++        title: findConversationTitle(),
++        convoId: extractConvoId(location.href),
++        url: location.href,
++        category: null
++      };
++
++      logExtractor('debug', 'Extracted conversation meta', meta);
++      return meta;
++    } catch (error) {
++      logExtractor('error', 'Failed to read conversation meta', { error: error?.message });
++      return {
++        messageCount: null,
++        userMessageCount: null,
++        lastMessageAgeMin: null,
++        title: null,
++        convoId: extractConvoId(location.href),
++        url: location.href,
++        category: null
++      };
++    }
++  }
++
++  function getQandA() {
++    try {
++      const root = getRoot();
++      const userMessages = filterVisible(
++        Array.from(root.querySelectorAll('[data-message-author-role="user"]'))
++      );
++      const assistantMessages = filterVisible(
++        Array.from(root.querySelectorAll('[data-message-author-role="assistant"]'))
++      );
++
++      const questionNode = userMessages.length ? userMessages[userMessages.length - 1] : null;
++      const answerNode = assistantMessages.length ? assistantMessages[assistantMessages.length - 1] : null;
++      const qa = {
++        questionText: questionNode ? extractPlainText(questionNode) : '',
++        answerHTML: answerNode ? sanitizeHTML(extractAnswerHtml(answerNode)) : ''
++      };
++
++      logExtractor('debug', 'Extracted Q&A pair', {
++        hasQuestion: Boolean(questionNode),
++        hasAnswer: Boolean(answerNode),
++        questionLength: qa.questionText.length,
++        answerLength: qa.answerHTML.length
++      });
++      return qa;
++    } catch (error) {
++      logExtractor('error', 'Failed to extract Q&A', { error: error?.message });
++      return {
++        questionText: '',
++        answerHTML: ''
++      };
++    }
++  }
++
++  function filterVisible(nodes) {
++    return nodes.filter((node) => {
++      const style = window.getComputedStyle(node);
++      if (style?.display === 'none' || style?.visibility === 'hidden') {
++        return false;
++      }
++      if (style?.display === 'contents') {
++        return true;
++      }
++      return node.offsetParent !== null || style?.position === 'fixed';
++    });
++  }
++
++  function extractPlainText(node) {
++    const clone = node.cloneNode(true);
++    clone.querySelectorAll('code').forEach((code) => {
++      code.innerHTML = code.textContent || '';
++    });
++    return clone.textContent?.trim() || '';
++  }
++
++  function extractAnswerHtml(node) {
++    const clone = node.cloneNode(true);
++    // Slovensky: Odstráni interaktívne prvky, ktoré nemajú hodnotu v offline režime.
++    clone.querySelectorAll('button, svg, style, script').forEach((el) => el.remove());
++    return clone.innerHTML || '';
++  }
++
++  function computeAgeMinutes(messageNode) {
++    const timeNode =
++      messageNode.querySelector('time') || messageNode.querySelector('[data-testid="timestamp"]');
++    if (!timeNode) {
++      return null;
++    }
++    const iso = timeNode.getAttribute('datetime') || timeNode.getAttribute('data-timestring');
++    if (iso) {
++      const parsed = Date.parse(iso);
++      if (Number.isFinite(parsed)) {
++        return (Date.now() - parsed) / 60000;
++      }
++    }
++    const candidates = [
++      timeNode.getAttribute('title'),
++      timeNode.getAttribute('aria-label'),
++      timeNode.textContent
++    ].filter(Boolean);
++    for (const raw of candidates) {
++      const minutes = parseRelativeMinutes(raw);
++      if (minutes !== null) {
++        return minutes;
++      }
++    }
++    return null;
++  }
++
++  function parseRelativeMinutes(text) {
++    if (!text) {
++      return null;
++    }
++    const normalized = text.toLowerCase().trim();
++    if (!normalized) {
++      return null;
++    }
++    if (['now', 'just now', 'moments ago'].includes(normalized)) {
++      return 0;
++    }
++    const match = normalized.match(/(\d+)\s*(minute|min|minutes|mins)/);
++    if (match) {
++      return Number.parseInt(match[1], 10);
++    }
++    const hourMatch = normalized.match(/(\d+)\s*(hour|hours|hr|hrs)/);
++    if (hourMatch) {
++      return Number.parseInt(hourMatch[1], 10) * 60;
++    }
++    const dayMatch = normalized.match(/(\d+)\s*(day|days)/);
++    if (dayMatch) {
++      return Number.parseInt(dayMatch[1], 10) * 1440;
++    }
++    if (normalized.startsWith('an hour')) {
++      return 60;
++    }
++    if (normalized.startsWith('a minute')) {
++      return 1;
++    }
++    if (normalized.startsWith('a day')) {
++      return 1440;
++    }
++    return null;
++  }
++
++  function findConversationTitle() {
++    const selectors = [
++      '[data-testid="conversation-name"]',
++      'aside h3',
++      'header h1'
++    ];
++    for (const selector of selectors) {
++      const element = document.querySelector(selector);
++      if (element && element.textContent?.trim()) {
++        return element.textContent.trim();
++      }
++    }
++    return '';
++  }
++
++  function extractConvoId(href) {
++    const match = href.match(/\/c\/([^/?#]+)/);
++    return match ? match[1] : '';
++  }
++
++  if (!window.MyChatGPTContent) {
++    window.MyChatGPTContent = {};
++  }
++
++  window.MyChatGPTContent.getConversationMeta = getConversationMeta;
++  window.MyChatGPTContent.getQandA = getQandA;
++
++  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
++    if (message?.type === 'MYCHATGPT:getConversationMeta') {
++      sendResponse(getConversationMeta());
++      return false;
++    }
++    if (message?.type === 'MYCHATGPT:getQandA') {
++      sendResponse(getQandA());
++      return false;
++    }
++    return undefined;
++  });
++})();
+--- a/popup.js
++++ b/popup.js
+@@ -0,0 +1,150 @@
++import { initDb } from './db.js';
++import { log } from './utils.js';
++
++const tabConfig = {
++  searches: {
++    html: 'searches.html',
++    loader: () => import('./searches.js')
++  },
++  backup: {
++    html: 'backup.html',
++    loader: () => import('./backup.js')
++  },
++  settings: {
++    html: 'settings.html',
++    loader: () => import('./settings.js')
++  },
++  debug: {
++    html: 'debug.html',
++    loader: () => import('./debug.js')
++  }
++};
++
++const htmlTextCache = new Map();
++const tabRootCache = new Map();
++const handlersCache = new Map();
++
++const searchInput = document.getElementById('global-search');
++const tabContent = document.getElementById('tab-content');
++const tabButtons = Array.from(document.querySelectorAll('.tab-button'));
++const toastHost = createToastHost();
++
++let activeTab = null;
++
++(async function bootstrapPopup() {
++  await initDb();
++  await log('info', 'ui', 'Popup opened');
++  bindNav();
++  bindSearch();
++  await switchTab('searches');
++})();
++
++function bindNav() {
++  tabButtons.forEach((button) => {
++    button.addEventListener('click', async () => {
++      const name = button.dataset.tab;
++      await switchTab(name);
++    });
++  });
++}
++
++function bindSearch() {
++  /**
++   * Slovensky: Preposiela text vyhľadávania aktívnemu tabu.
++   */
++  const emit = () => {
++    const value = searchInput.value.trim();
++    const handler = handlersCache.get(activeTab);
++    if (handler?.onSearch) {
++      handler.onSearch(value);
++    }
++  };
++  searchInput.addEventListener('input', emit);
++}
++
++async function switchTab(name) {
++  if (!tabConfig[name]) {
++    return;
++  }
++  if (activeTab === name) {
++    const handler = handlersCache.get(name);
++    handler?.onShow?.();
++    return;
++  }
++  activeTab = name;
++  updateButtonState(name);
++  const tabRoot = await ensureTab(name);
++  tabContent.innerHTML = '';
++  tabContent.appendChild(tabRoot);
++  const handler = handlersCache.get(name);
++  handler?.onShow?.();
++  const currentValue = searchInput.value.trim();
++  if (currentValue && handler?.onSearch) {
++    handler.onSearch(currentValue);
++  }
++}
++
++function updateButtonState(active) {
++  tabButtons.forEach((button) => {
++    const selected = button.dataset.tab === active;
++    button.setAttribute('aria-selected', selected ? 'true' : 'false');
++  });
++}
++
++async function ensureTab(name) {
++  if (tabRootCache.has(name)) {
++    return tabRootCache.get(name);
++  }
++
++  const html = await loadHtml(tabConfig[name].html);
++  const wrapper = document.createElement('div');
++  wrapper.innerHTML = html;
++  const tabRoot = wrapper.firstElementChild;
++
++  const module = await tabConfig[name].loader();
++  const handler = await module.init({
++    root: tabRoot,
++    switchTab,
++    getSearchValue: () => searchInput.value.trim(),
++    toast: showToast
++  });
++  handlersCache.set(name, handler || {});
++  tabRootCache.set(name, tabRoot);
++  return tabRoot;
++}
++
++async function loadHtml(path) {
++  if (htmlTextCache.has(path)) {
++    return htmlTextCache.get(path);
++  }
++  const response = await fetch(chrome.runtime.getURL(path));
++  const text = await response.text();
++  htmlTextCache.set(path, text);
++  return text;
++}
++
++function createToastHost() {
++  const host = document.createElement('div');
++  host.id = 'toast-host';
++  document.body.appendChild(host);
++  return host;
++}
++
++/**
++ * Slovensky: Zobrazí krátku toast hlášku v popupe.
++ */
++function showToast(message, variant = 'info') {
++  if (!message) {
++    return;
++  }
++  const toast = document.createElement('div');
++  toast.className = 'toast';
++  toast.dataset.variant = variant;
++  toast.textContent = message;
++  toastHost.appendChild(toast);
++  requestAnimationFrame(() => toast.classList.add('show'));
++  setTimeout(() => {
++    toast.classList.remove('show');
++    setTimeout(() => toast.remove(), 200);
++  }, 2600);
++}
+--- a/searches.js
++++ b/searches.js
+@@ -0,0 +1,157 @@
++import { initDb, backups } from './db.js';
++import { log } from './utils.js';
++
++export async function init({ root, switchTab, getSearchValue, toast }) {
++  await initDb();
++
++  const tbody = root.querySelector('[data-role="searches-rows"]');
++  const emptyState = root.querySelector('[data-role="searches-empty"]');
++  const badge = root.querySelector('.badge');
++  const manualButton = root.querySelector('[data-action="manual-backup"]');
++  const state = {
++    rows: [],
++    filter: getSearchValue()?.toLowerCase() || ''
++  };
++
++  /**
++   * Slovensky: Načíta záznamy z IndexedDB a obnoví tabuľku.
++   */
++  async function refresh() {
++    state.rows = await backups.get();
++    applyFilter(state.filter);
++  }
++
++  function applyFilter(raw) {
++    const term = (raw || '').toLowerCase();
++    state.filter = term;
++    const filtered = state.rows.filter((row) => {
++      if (!term) return true;
++      return (
++        row.title?.toLowerCase().includes(term) ||
++        row.questionText?.toLowerCase().includes(term) ||
++        row.category?.toLowerCase().includes(term)
++      );
++    });
++    renderRows(filtered);
++  }
++
++  function renderRows(rows) {
++    tbody.innerHTML = '';
++    if (!rows.length) {
++      emptyState.hidden = false;
++      return;
++    }
++    emptyState.hidden = true;
++    rows.forEach((row) => {
++      const tr = document.createElement('tr');
++      tr.innerHTML = `
++        <td>${escapeHtml(row.title)}</td>
++        <td>${escapeHtml(truncate(row.questionText, 80))}</td>
++        <td>${escapeHtml(row.category || '')}</td>
++        <td>${formatTimestamp(row.timestamp)}</td>
++        <td><button class="secondary" data-action="open" data-id="${row.id}">Open</button></td>
++      `;
++      tbody.appendChild(tr);
++    });
++  }
++
++  function escapeHtml(value) {
++    const div = document.createElement('div');
++    div.textContent = value || '';
++    return div.innerHTML;
++  }
++
++  function truncate(text, size) {
++    const value = text || '';
++    if (value.length <= size) {
++      return value;
++    }
++    return `${value.slice(0, size - 1)}…`;
++  }
++
++  function formatTimestamp(ts) {
++    if (!ts) {
++      return '—';
++    }
++    try {
++      return new Date(ts).toLocaleString();
++    } catch (error) {
++      return String(ts);
++    }
++  }
++
++  tbody.addEventListener('click', async (event) => {
++    const button = event.target.closest('button[data-action="open"]');
++    if (!button) {
++      return;
++    }
++    const id = button.dataset.id;
++    await log('info', 'ui', 'Backup selected from table', { id });
++    await chrome.storage.local.set({ ui_selected_backup_id: id });
++    window.dispatchEvent(new CustomEvent('mychatgpt-backup-selected', { detail: { id } }));
++    await switchTab('backup');
++  });
++
++  if (manualButton) {
++    manualButton.addEventListener('click', async () => {
++      manualButton.disabled = true;
++      try {
++        await log('info', 'ui', 'Manual backup requested via popup');
++        const response = await chrome.runtime.sendMessage({ type: 'manualBackup' });
++        if (response?.stored) {
++          const code = typeof response.id === 'string' ? response.id.slice(0, 8) : 'saved';
++          toast?.(`Backup stored (${code})`, 'success');
++          await refresh();
++        } else if (response?.wouldStore) {
++          toast?.('LIST_ONLY prevents storing. Toggle ALLOW_LOCAL_BACKUP_WHEN_LIST_ONLY.', 'warning');
++        } else if (response?.qualified === false) {
++          toast?.('Conversation did not meet short-chat qualifiers.', 'warning');
++        } else if (response?.reason === 'meta-missing' || response?.reason === 'qa-missing') {
++          toast?.('Could not read chat content. Try again after the page loads.', 'warning');
++        } else if (response?.reason === 'cooldown') {
++          toast?.('Runner cooldown active; try again in a moment.', 'info');
++        } else if (response?.reason === 'safe-url') {
++          toast?.('URL marked as safe. Update SAFE_URL_PATTERNS to allow backup.', 'info');
++        } else if (response?.error === 'no-active-chat-tab') {
++          toast?.('Open chatgpt.com tab to run manual backup.', 'error');
++        } else {
++          toast?.('Manual backup did not store any entry.', 'info');
++        }
++      } catch (error) {
++        toast?.('Manual backup failed. See Debug logs.', 'error');
++        console.error(error);
++      } finally {
++        manualButton.disabled = false;
++      }
++    });
++  }
++
++  window.addEventListener('mychatgpt-backups-changed', refresh);
++  chrome.runtime.onMessage.addListener((message) => {
++    if (message?.type === 'mychatgpt-backups-changed') {
++      refresh();
++    }
++  });
++  chrome.storage.onChanged.addListener((changes, area) => {
++    if (area !== 'local' || !changes.settings) {
++      return;
++    }
++    syncBadge(changes.settings.newValue);
++  });
++
++  await refresh();
++  await syncBadge();
++  return {
++    onShow: refresh,
++    onSearch: applyFilter
++  };
++
++  async function syncBadge(overrides) {
++    const data = overrides || (await chrome.storage.local.get(['settings'])).settings;
++    const isListOnly = (data?.LIST_ONLY ?? true) === true;
++    if (!badge) {
++      return;
++    }
++    badge.textContent = isListOnly ? 'LIST ONLY' : 'PATCH READY';
++  }
++}
+--- a/searches.html
++++ b/searches.html
+@@ -0,0 +1,25 @@
++<section class="tab-card" data-tab-root="searches">
++  <div class="flex-between">
++    <div class="inline-group">
++      <h2>Stored Backups</h2>
++      <span class="badge">LIST ONLY</span>
++    </div>
++    <button data-action="manual-backup">Backup current chat (manual)</button>
++  </div>
++  <p class="tab-copy">Filter through locally saved short chats. Select a row to open its backup.</p>
++  <div class="table-wrap">
++    <table>
++      <thead>
++        <tr>
++          <th>Title</th>
++          <th>Question</th>
++          <th>Category</th>
++          <th>Timestamp</th>
++          <th></th>
++        </tr>
++      </thead>
++      <tbody data-role="searches-rows"></tbody>
++    </table>
++  </div>
++  <div class="empty-state" data-role="searches-empty">No backups stored yet. Run a scan or add one manually.</div>
++</section>
+--- a/backup.js
++++ b/backup.js
+@@ -0,0 +1,298 @@
++import { initDb, backups, categories } from './db.js';
++import { sanitizeHTML, log } from './utils.js';
++
++export async function init({ root, toast }) {
++  await initDb();
++
++  const listRoot = root.querySelector('[data-role="backup-list"]');
++  const emptyState = root.querySelector('[data-role="backup-empty"]');
++  const refreshBtn = root.querySelector('[data-action="refresh-backups"]');
++  const previewPanel = root.querySelector('[data-role="backup-preview"]');
++  const previewTitle = root.querySelector('[data-field="preview-title"]');
++  const previewMeta = root.querySelector('[data-field="preview-meta"]');
++  const previewFrame = root.querySelector('[data-field="preview-frame"]');
++  const closePreviewBtn = root.querySelector('[data-action="close-preview"]');
++  const exportBtn = root.querySelector('[data-action="export-backup"]');
++  const deleteBtn = root.querySelector('[data-action="delete-backup"]');
++
++  let entries = [];
++  let catalog = [];
++  let selectedId = null;
++  let settings = await loadSettings();
++
++  /**
++   * Slovensky: Znovu načíta zálohy aj kategórie zo storage.
++   */
++  async function refreshAll() {
++    entries = await backups.get();
++    catalog = await categories.list();
++    renderList();
++    syncSelection();
++  }
++
++  function renderList() {
++    listRoot.innerHTML = '';
++    if (!entries.length) {
++      emptyState.hidden = false;
++      previewPanel.hidden = true;
++      return;
++    }
++    emptyState.hidden = true;
++    entries.forEach((entry) => {
++      listRoot.appendChild(renderRow(entry));
++    });
++  }
++
++  function renderRow(entry) {
++    const container = document.createElement('div');
++    container.className = 'backup-item';
++    container.dataset.id = entry.id;
++
++    const main = document.createElement('div');
++    main.className = 'backup-item-main';
++    const titleEl = document.createElement('div');
++    titleEl.className = 'backup-item-title';
++    titleEl.textContent = entry.title || '(no title)';
++    const metaEl = document.createElement('div');
++    metaEl.className = 'backup-item-meta';
++    const timestamp = formatTimestamp(entry.timestamp);
++    metaEl.textContent = `${timestamp}${entry.category ? ` · ${entry.category}` : ''}`;
++    main.appendChild(titleEl);
++    main.appendChild(metaEl);
++
++    const actions = document.createElement('div');
++    actions.className = 'backup-item-actions';
++    const select = document.createElement('select');
++    select.dataset.action = 'category';
++    buildCategoryOptions(select, entry.category);
++    const preview = document.createElement('button');
++    preview.className = 'secondary';
++    preview.dataset.action = 'preview';
++    preview.textContent = 'Preview';
++    actions.appendChild(select);
++    actions.appendChild(preview);
++
++    container.appendChild(main);
++    container.appendChild(actions);
++    if (selectedId === entry.id) {
++      container.classList.add('selected');
++    }
++    return container;
++  }
++
++  function buildCategoryOptions(select, current) {
++    select.innerHTML = '';
++    catalog.forEach((item) => {
++      const option = document.createElement('option');
++      option.value = item.name;
++      option.textContent = item.name;
++      if (item.name === current) {
++        option.selected = true;
++      }
++      select.appendChild(option);
++    });
++  }
++
++  function syncSelection() {
++    if (!selectedId) {
++      previewPanel.hidden = true;
++      return;
++    }
++    const entry = entries.find((item) => item.id === selectedId);
++    if (!entry) {
++      selectedId = null;
++      previewPanel.hidden = true;
++      return;
++    }
++    openPreview(entry);
++  }
++
++  function openPreview(entry) {
++    selectedId = entry.id;
++    listRoot.querySelectorAll('.backup-item').forEach((row) => {
++      row.classList.toggle('selected', row.dataset.id === entry.id);
++    });
++    previewTitle.textContent = entry.title || '(no title)';
++    previewMeta.textContent = buildPreviewMeta(entry);
++    previewFrame.setAttribute('sandbox', '');
++    previewFrame.srcdoc = buildPreviewHtml(entry.answerHTML);
++    previewPanel.hidden = false;
++  }
++
++  function buildPreviewMeta(entry) {
++    const timestamp = formatTimestamp(entry.timestamp);
++    const pieces = [timestamp];
++    if (entry.category) {
++      pieces.push(entry.category);
++    }
++    if (entry.convoId) {
++      pieces.push(`ID:${entry.convoId}`);
++    }
++    return pieces.join(' · ');
++  }
++
++  function buildPreviewHtml(html) {
++    const safe = sanitizeHTML(html);
++    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{margin:0;padding:18px;font:15px/1.6 system-ui;background:#f8fafc;color:#0f172a;} .answer{border:1px solid rgba(148, 163, 184, 0.4);border-radius:12px;padding:16px;background:#fff;overflow:auto;} a{color:#1d4ed8;} pre{background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;overflow:auto;} code{background:rgba(15,23,42,.08);padding:2px 4px;border-radius:4px;}</style></head><body><article class="answer">${safe}</article></body></html>`;
++  }
++
++  function formatTimestamp(ts) {
++    if (!ts) {
++      return '—';
++    }
++    try {
++      return new Date(ts).toLocaleString();
++    } catch (error) {
++      return String(ts);
++    }
++  }
++
++  async function updateCategory(id, next) {
++    const entry = entries.find((item) => item.id === id);
++    if (!entry) {
++      return;
++    }
++    const updated = { ...entry, category: next };
++    await backups.add(updated);
++    entry.category = next;
++    await log('info', 'ui', 'Backup category updated', { id, category: next });
++    if (selectedId === id) {
++      previewMeta.textContent = buildPreviewMeta(updated);
++      previewFrame.srcdoc = buildPreviewHtml(updated.answerHTML);
++    }
++    window.dispatchEvent(new Event('mychatgpt-backups-changed'));
++    chrome.runtime.sendMessage({ type: 'mychatgpt-backups-changed' }).catch(() => {
++      // Slovensky: Žiadny poslucháč mimo popupu, takže chybu ignorujeme.
++    });
++  }
++
++  async function deleteBackup(id) {
++    const entry = entries.find((item) => item.id === id);
++    if (!entry) {
++      return;
++    }
++    const requireConfirm = settings?.CONFIRM_BEFORE_DELETE !== false;
++    if (requireConfirm) {
++      const confirmed = window.confirm('Delete local backup?');
++      if (!confirmed) {
++        return;
++      }
++    }
++    await backups.delete(id);
++    entries = entries.filter((item) => item.id !== id);
++    selectedId = selectedId === id ? null : selectedId;
++    await log('info', 'ui', 'Backup deleted', { id });
++    toast?.('Backup deleted', 'info');
++    renderList();
++    syncSelection();
++    window.dispatchEvent(new Event('mychatgpt-backups-changed'));
++    chrome.runtime.sendMessage({ type: 'mychatgpt-backups-changed' }).catch(() => {
++      // Slovensky: Popup môže byť jediný poslucháč, ignorujeme chybu.
++    });
++  }
++
++  function exportBackup(entry) {
++    const safeHtml = sanitizeHTML(entry.answerHTML);
++    const html = buildExportHtml(entry, safeHtml);
++    const blob = new Blob([html], { type: 'text/html' });
++    const url = URL.createObjectURL(blob);
++    const anchor = document.createElement('a');
++    const safeTitle = (entry.title || 'backup').replace(/[^a-z0-9-]+/gi, '-');
++    const ts = new Date(entry.timestamp || Date.now()).toISOString().replace(/[:.]/g, '-');
++    anchor.href = url;
++    anchor.download = `${safeTitle}-${ts}.html`;
++    anchor.click();
++    URL.revokeObjectURL(url);
++    toast?.('Export downloaded', 'success');
++  }
++
++  listRoot.addEventListener('change', async (event) => {
++    const select = event.target.closest('select[data-action="category"]');
++    if (!select) {
++      return;
++    }
++    const row = select.closest('.backup-item');
++    const id = row?.dataset?.id;
++    if (!id) {
++      return;
++    }
++    await updateCategory(id, select.value);
++    renderList();
++  });
++
++  listRoot.addEventListener('click', (event) => {
++    const row = event.target.closest('.backup-item');
++    if (!row) {
++      return;
++    }
++    const id = row.dataset.id;
++    if (!id) {
++      return;
++    }
++    if (event.target.closest('button[data-action="preview"]')) {
++      const entry = entries.find((item) => item.id === id);
++      if (entry) {
++        openPreview(entry);
++      }
++    }
++  });
++
++  refreshBtn?.addEventListener('click', refreshAll);
++  closePreviewBtn?.addEventListener('click', () => {
++    selectedId = null;
++    previewPanel.hidden = true;
++    listRoot.querySelectorAll('.backup-item').forEach((row) => row.classList.remove('selected'));
++  });
++
++  exportBtn?.addEventListener('click', () => {
++    const entry = entries.find((item) => item.id === selectedId);
++    if (entry) {
++      exportBackup(entry);
++    }
++  });
++
++  deleteBtn?.addEventListener('click', () => {
++    if (selectedId) {
++      deleteBackup(selectedId);
++    }
++  });
++
++  window.addEventListener('mychatgpt-backups-changed', refreshAll);
++  chrome.runtime.onMessage.addListener((message) => {
++    if (message?.type === 'mychatgpt-backups-changed') {
++      refreshAll();
++    }
++  });
++
++  chrome.storage.onChanged.addListener((changes, area) => {
++    if (area === 'local' && changes.settings) {
++      settings = { ...settings, ...(changes.settings.newValue || {}) };
++    }
++  });
++
++  await refreshAll();
++
++  return {
++    onShow: refreshAll
++  };
++}
++
++async function loadSettings() {
++  const stored = await chrome.storage.local.get(['settings']);
++  return stored.settings || {};
++}
++
++function buildExportHtml(entry, safeHtml) {
++  const timestamp = new Date(entry.timestamp || Date.now()).toISOString();
++  const escapedTitle = escapeHtml(entry.title || 'Backup');
++  const escapedQuestion = escapeHtml(entry.questionText || '');
++  const escapedCategory = escapeHtml(entry.category || '');
++  const escapedConvo = escapeHtml(entry.convoId || '');
++  return `<!doctype html><html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>${escapedTitle} – ${timestamp}</title><style>body{max-width:880px;margin:2rem auto;font:16px/1.6 system-ui;background:#f8fafc;color:#0f172a;} header{margin-bottom:1.5rem;} .meta{font-size:.875rem;color:#475569;margin:0.25rem 0;} .answer{border:1px solid #cbd5f5;padding:1rem;border-radius:12px;background:#fff;} footer{margin-top:2rem;font-size:.85rem;color:#475569;}</style></head><body><header><h1>${escapedTitle}</h1><p class="meta">Saved: ${timestamp}</p><p class="meta">Category: ${escapedCategory || 'n/a'} · Conversation: ${escapedConvo || 'n/a'}</p></header><section><h2>Question</h2><p>${escapedQuestion}</p><h2>Answer</h2><article class="answer">${safeHtml}</article></section><footer><small>Exported from MyChatGPT</small></footer></body></html>`;
++}
++
++function escapeHtml(value) {
++  const div = document.createElement('div');
++  div.textContent = value || '';
++  return div.innerHTML;
++}
+--- a/backup.html
++++ b/backup.html
+@@ -0,0 +1,26 @@
++<section class="tab-card" data-tab-root="backup">
++  <div class="flex-between">
++    <h2>Backup Library</h2>
++    <button class="secondary" data-action="refresh-backups">Refresh</button>
++  </div>
++  <p class="tab-copy">Browse stored short chats, adjust categories, preview answers, or export snapshots.</p>
++  <div class="backup-layout">
++    <div class="backup-list" data-role="backup-list">
++      <div class="empty-state" data-role="backup-empty">No backups yet. Run a scan or add one manually.</div>
++    </div>
++    <div class="backup-preview-panel" data-role="backup-preview" hidden>
++      <div class="backup-preview-header">
++        <div>
++          <h3 data-field="preview-title"></h3>
++          <p class="backup-preview-meta" data-field="preview-meta"></p>
++        </div>
++        <button class="secondary" data-action="close-preview">Close</button>
++      </div>
++      <iframe class="backup-preview" sandbox data-field="preview-frame"></iframe>
++      <div class="flex-between">
++        <button data-action="export-backup">Export HTML</button>
++        <button class="secondary" data-action="delete-backup">Delete</button>
++      </div>
++    </div>
++  </div>
++</section>
+--- a/styles.css
++++ b/styles.css
+@@ -0,0 +1,387 @@
++:root {
++  color-scheme: light dark;
++  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
++  --surface: #ffffff;
++  --surface-elevated: #f4f5f8;
++  --surface-muted: #eaebf1;
++  --text: #222222;
++  --text-muted: #555555;
++  --accent: #1d4ed8;
++  --accent-soft: rgba(29, 78, 216, 0.16);
++  --border: rgba(17, 24, 39, 0.12);
++  --shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
++}
++
++@media (prefers-color-scheme: dark) {
++  :root {
++    --surface: #0f172a;
++    --surface-elevated: #111c36;
++    --surface-muted: #1e293b;
++    --text: #e2e8f0;
++    --text-muted: #94a3b8;
++    --accent: #60a5fa;
++    --accent-soft: rgba(96, 165, 250, 0.22);
++    --border: rgba(148, 163, 184, 0.18);
++    --shadow: 0 16px 40px rgba(15, 23, 42, 0.28);
++  }
++}
++
++body {
++  margin: 0;
++  min-width: 380px;
++  min-height: 480px;
++  background: var(--surface);
++  color: var(--text);
++  display: flex;
++  flex-direction: column;
++}
++
++.popup-header {
++  padding: 16px;
++  display: flex;
++  flex-direction: column;
++  gap: 12px;
++  background: var(--surface-elevated);
++  box-shadow: var(--shadow);
++  z-index: 5;
++}
++
++.popup-header input[type='search'] {
++  width: 100%;
++  padding: 10px 12px;
++  border-radius: 10px;
++  border: 1px solid var(--border);
++  background: var(--surface);
++  color: inherit;
++}
++
++.tab-nav {
++  display: grid;
++  grid-template-columns: repeat(4, minmax(0, 1fr));
++  gap: 8px;
++}
++
++.tab-button {
++  border: 1px solid transparent;
++  border-radius: 999px;
++  padding: 8px 12px;
++  background: transparent;
++  color: var(--text-muted);
++  font-weight: 600;
++  font-size: 13px;
++  cursor: pointer;
++  transition: background 0.2s ease, color 0.2s ease, border 0.2s ease;
++}
++
++.tab-button[aria-selected='true'] {
++  background: var(--accent-soft);
++  color: var(--accent);
++  border-color: var(--accent);
++}
++
++main#tab-content {
++  flex: 1;
++  overflow-y: auto;
++  padding: 16px;
++  display: flex;
++  flex-direction: column;
++  gap: 16px;
++}
++
++.tab-card {
++  background: var(--surface-elevated);
++  border: 1px solid var(--border);
++  border-radius: 16px;
++  padding: 16px;
++  display: flex;
++  flex-direction: column;
++  gap: 12px;
++}
++
++.tab-card h2 {
++  margin: 0;
++  font-size: 16px;
++}
++
++.table-wrap {
++  border-radius: 12px;
++  overflow: hidden;
++  border: 1px solid var(--border);
++}
++
++.table-wrap table {
++  width: 100%;
++  border-collapse: collapse;
++  font-size: 13px;
++}
++
++.table-wrap thead {
++  background: var(--surface-muted);
++  color: var(--text-muted);
++}
++
++.table-wrap th,
++.table-wrap td {
++  padding: 10px 12px;
++  text-align: left;
++  border-bottom: 1px solid var(--border);
++}
++
++.table-wrap tbody tr:hover {
++  background: var(--accent-soft);
++}
++
++.button,
++button,
++input[type='submit'] {
++  appearance: none;
++  border-radius: 10px;
++  border: 1px solid transparent;
++  padding: 8px 12px;
++  font-weight: 600;
++  font-size: 13px;
++  cursor: pointer;
++  background: var(--accent);
++  color: #fff;
++  transition: opacity 0.2s ease, transform 0.1s ease;
++}
++
++button.secondary {
++  background: transparent;
++  color: var(--accent);
++  border-color: var(--accent);
++}
++
++button:disabled {
++  opacity: 0.5;
++  cursor: not-allowed;
++}
++
++.input-grid {
++  display: grid;
++  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
++  gap: 12px;
++}
++
++.setting-field {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++}
++
++.setting-field label {
++  font-size: 12px;
++  font-weight: 600;
++  color: var(--text-muted);
++  text-transform: uppercase;
++  letter-spacing: 0.08em;
++}
++
++.setting-field input,
++.setting-field textarea,
++.setting-field select {
++  border-radius: 8px;
++  border: 1px solid var(--border);
++  background: var(--surface);
++  color: inherit;
++  padding: 8px 10px;
++  font-size: 13px;
++}
++
++.setting-field textarea {
++  resize: vertical;
++  min-height: 60px;
++}
++
++.log-list {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++  max-height: 240px;
++  overflow-y: auto;
++}
++
++.log-entry {
++  padding: 8px 10px;
++  border-radius: 8px;
++  background: var(--surface-muted);
++  font-family: 'JetBrains Mono', 'Fira Code', monospace;
++  font-size: 12px;
++  border: 1px solid var(--border);
++}
++
++.badge {
++  display: inline-flex;
++  align-items: center;
++  gap: 4px;
++  padding: 2px 8px;
++  border-radius: 999px;
++  font-size: 11px;
++  text-transform: uppercase;
++  letter-spacing: 0.08em;
++  background: var(--accent-soft);
++  color: var(--accent);
++}
++
++.inline-group {
++  display: inline-flex;
++  align-items: center;
++  gap: 8px;
++  flex-wrap: wrap;
++}
++
++.flex-between {
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
++  gap: 12px;
++}
++
++iframe.backup-preview {
++  width: 100%;
++  min-height: 240px;
++  border: 1px solid var(--border);
++  border-radius: 12px;
++  background: var(--surface);
++}
++
++.backup-layout {
++  display: flex;
++  flex-direction: column;
++  gap: 16px;
++}
++
++@media (min-width: 720px) {
++  .backup-layout {
++    flex-direction: row;
++    align-items: flex-start;
++  }
++}
++
++.backup-list {
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  flex: 1 1 0;
++}
++
++.backup-preview-panel {
++  flex: 1 1 0;
++  display: flex;
++  flex-direction: column;
++  gap: 12px;
++  border: 1px solid var(--border);
++  border-radius: 12px;
++  padding: 16px;
++  background: var(--surface);
++}
++
++.backup-preview-header {
++  display: flex;
++  justify-content: space-between;
++  gap: 12px;
++  align-items: flex-start;
++}
++
++.backup-preview-meta {
++  margin: 4px 0 0;
++  font-size: 12px;
++  color: var(--text-muted);
++}
++
++.backup-item {
++  display: flex;
++  justify-content: space-between;
++  gap: 12px;
++  border: 1px solid var(--border);
++  border-radius: 12px;
++  padding: 12px;
++  background: var(--surface);
++  align-items: center;
++}
++
++.backup-item.selected {
++  border-color: var(--accent);
++  box-shadow: 0 0 0 1px var(--accent) inset;
++}
++
++.backup-item-main {
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++  flex: 1;
++}
++
++.backup-item-title {
++  font-weight: 600;
++  font-size: 14px;
++}
++
++.backup-item-meta {
++  font-size: 12px;
++  color: var(--text-muted);
++}
++
++.backup-item-actions {
++  display: flex;
++  gap: 8px;
++  align-items: center;
++}
++
++.backup-item-actions select {
++  min-width: 140px;
++}
++
++.empty-state {
++  padding: 24px;
++  border-radius: 12px;
++  background: var(--surface-muted);
++  color: var(--text-muted);
++  text-align: center;
++  font-size: 14px;
++}
++
++#toast-host {
++  position: fixed;
++  bottom: 16px;
++  left: 50%;
++  transform: translateX(-50%);
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  z-index: 999;
++  pointer-events: none;
++}
++
++.toast {
++  background: var(--text);
++  color: var(--surface);
++  padding: 10px 14px;
++  border-radius: 12px;
++  box-shadow: var(--shadow);
++  opacity: 0;
++  transform: translateY(8px);
++  transition: opacity 0.2s ease, transform 0.2s ease;
++  font-size: 13px;
++}
++
++.toast.show {
++  opacity: 1;
++  transform: translateY(0);
++}
++
++.toast[data-variant='success'] {
++  background: #15803d;
++}
++
++.toast[data-variant='error'] {
++  background: #dc2626;
++}
++
++.toast[data-variant='warning'] {
++  background: #b45309;
++}
++
++.toast[data-variant='info'] {
++  background: var(--text);
++}
+--- a/utils.js
++++ b/utils.js
+@@ -0,0 +1,208 @@
++const LOG_KEY = 'debug_logs';
++const LOG_LIMIT = 500;
++
++/**
++ * Slovensky: Zapíše udalosť do lokálneho logu s FIFO limitom.
++ */
++export async function log(level, scope, msg, meta = null) {
++  try {
++    const entry = {
++      ts: Date.now(),
++      level,
++      scope,
++      msg,
++      meta: meta ?? null
++    };
++    const stored = await chrome.storage.local.get([LOG_KEY]);
++    const current = Array.isArray(stored[LOG_KEY]) ? stored[LOG_KEY] : [];
++    const updated = [...current, entry].slice(-LOG_LIMIT);
++    await chrome.storage.local.set({ [LOG_KEY]: updated });
++  } catch (error) {
++    console.error('MyChatGPT log failure', error);
++  }
++}
++
++export function csvToArray(csv) {
++  if (!csv) {
++    return [];
++  }
++  return csv
++    .split(',')
++    .map((token) => token.trim())
++    .filter((token) => token.length > 0);
++}
++
++export function arrayToCsv(values) {
++  if (!Array.isArray(values)) {
++    return '';
++  }
++  return values.map((value) => String(value).trim()).filter(Boolean).join(',');
++}
++
++export function minutesSince(input) {
++  if (!input) {
++    return Number.POSITIVE_INFINITY;
++  }
++  const timestamp = typeof input === 'number' ? input : Date.parse(input);
++  if (!Number.isFinite(timestamp)) {
++    return Number.POSITIVE_INFINITY;
++  }
++  return (Date.now() - timestamp) / 60000;
++}
++
++export function uuidv4() {
++  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
++    return crypto.randomUUID();
++  }
++  // Fallback pre staršie prehliadače.
++  const template = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx';
++  return template.replace(/[xy]/g, (c) => {
++    const r = (Math.random() * 16) | 0;
++    const v = c === 'x' ? r : (r & 0x3) | 0x8;
++    return v.toString(16);
++  });
++}
++
++const ALLOWED_TAGS = new Set([
++  'a',
++  'article',
++  'blockquote',
++  'br',
++  'code',
++  'div',
++  'em',
++  'figure',
++  'figcaption',
++  'h1',
++  'h2',
++  'h3',
++  'h4',
++  'h5',
++  'h6',
++  'hr',
++  'img',
++  'li',
++  'ol',
++  'p',
++  'pre',
++  'section',
++  'span',
++  'strong',
++  'sub',
++  'sup',
++  'table',
++  'tbody',
++  'td',
++  'th',
++  'thead',
++  'tr',
++  'ul'
++]);
++
++const GLOBAL_ATTRS = new Set(['class', 'aria-label', 'aria-live', 'role', 'data-language']);
++const TAG_ATTRS = {
++  a: new Set(['href', 'title', 'rel', 'target']),
++  img: new Set(['src', 'alt', 'title', 'width', 'height']),
++  code: new Set(['class']),
++  pre: new Set(['class']),
++  div: new Set(['data-codeblock-language', 'data-language']),
++  span: new Set(['data-codeblock-language', 'data-language'])
++};
++
++const EMPTY_SET = new Set();
++
++export function sanitizeHTML(html) {
++  if (!html) {
++    return '';
++  }
++  if (typeof DOMParser === 'undefined') {
++    return fallbackSanitize(html);
++  }
++
++  const parser = new DOMParser();
++  const doc = parser.parseFromString(`<div>${html}</div>`, 'text/html');
++  doc.querySelectorAll('script, style, link, meta, title').forEach((el) => el.remove());
++
++  doc.body.querySelectorAll('*').forEach((element) => {
++    const tag = element.tagName.toLowerCase();
++    if (!ALLOWED_TAGS.has(tag)) {
++      const fragment = doc.createDocumentFragment();
++      while (element.firstChild) {
++        fragment.appendChild(element.firstChild);
++      }
++      element.replaceWith(fragment);
++      return;
++    }
++
++    [...element.attributes].forEach((attr) => {
++      const name = attr.name.toLowerCase();
++      if (name.startsWith('on') || name === 'style' || name === 'srcdoc') {
++        element.removeAttribute(attr.name);
++        return;
++      }
++      const allowedForTag = TAG_ATTRS[tag] || EMPTY_SET;
++      if (!allowedForTag.has(name) && !GLOBAL_ATTRS.has(name)) {
++        element.removeAttribute(attr.name);
++        return;
++      }
++      if (name === 'href' && !isSafeLink(attr.value)) {
++        element.removeAttribute(attr.name);
++        return;
++      }
++      if (name === 'src') {
++        if (tag === 'img' && !isSafeImageSrc(attr.value)) {
++          const alt = element.getAttribute('alt') || '';
++          const replacement = doc.createElement('span');
++          replacement.textContent = alt;
++          element.replaceWith(replacement);
++        }
++      }
++    });
++  });
++
++  return doc.body.innerHTML;
++}
++
++function isSafeLink(value) {
++  if (!value) {
++    return false;
++  }
++  const trimmed = value.trim();
++  if (!trimmed) {
++    return false;
++  }
++  if (trimmed.startsWith('#') || trimmed.startsWith('/') || trimmed.startsWith('?') || trimmed.startsWith('./')) {
++    return true;
++  }
++  try {
++    const url = new URL(trimmed, 'https://example.com');
++    if (url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'mailto:' || url.protocol === 'tel:') {
++      return true;
++    }
++  } catch (_error) {
++    return false;
++  }
++  return false;
++}
++
++function isSafeImageSrc(value) {
++  if (!value) {
++    return false;
++  }
++  const trimmed = value.trim();
++  if (trimmed.startsWith('data:image/')) {
++    return true;
++  }
++  try {
++    const url = new URL(trimmed, 'https://example.com');
++    return url.protocol === 'https:' || url.protocol === 'http:';
++  } catch (_error) {
++    return false;
++  }
++}
++
++function fallbackSanitize(input) {
++  return String(input)
++    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
++    .replace(/on\w+=\"[^\"]*\"/gi, '');
++}
+--- a/settings.js
++++ b/settings.js
+@@ -0,0 +1,248 @@
++import { initDb, categories } from './db.js';
++import { csvToArray, arrayToCsv, log } from './utils.js';
++
++const DEFAULT_SETTINGS = {
++  LIST_ONLY: true,
++  ALLOW_LOCAL_BACKUP_WHEN_LIST_ONLY: false,
++  DRY_RUN: true,
++  CONFIRM_BEFORE_DELETE: true,
++  AUTO_SCAN: true,
++  COOLDOWN_MIN: 5,
++  MAX_MESSAGES: 2,
++  USER_MESSAGES_MAX: 2,
++  MIN_AGE_MINUTES: 2,
++  DELETE_LIMIT: 10,
++  SAFE_URL_PATTERNS: ['/workspaces', '/projects', '/new-project']
++};
++
++const FIELD_DEFS = [
++  { key: 'LIST_ONLY', label: 'LIST_ONLY', type: 'checkbox', group: 'safety' },
++  {
++    key: 'ALLOW_LOCAL_BACKUP_WHEN_LIST_ONLY',
++    label: 'ALLOW_LOCAL_BACKUP_WHEN_LIST_ONLY',
++    type: 'checkbox',
++    group: 'safety'
++  },
++  { key: 'DRY_RUN', label: 'DRY_RUN', type: 'checkbox', group: 'safety' },
++  { key: 'CONFIRM_BEFORE_DELETE', label: 'CONFIRM_BEFORE_DELETE', type: 'checkbox', group: 'safety' },
++  { key: 'AUTO_SCAN', label: 'AUTO_SCAN', type: 'checkbox', group: 'automation' },
++  { key: 'COOLDOWN_MIN', label: 'COOLDOWN_MIN', type: 'number', min: 0, group: 'automation' },
++  { key: 'MAX_MESSAGES', label: 'MAX_MESSAGES', type: 'number', min: 1, group: 'heuristics' },
++  { key: 'USER_MESSAGES_MAX', label: 'USER_MESSAGES_MAX', type: 'number', min: 1, group: 'heuristics' },
++  { key: 'MIN_AGE_MINUTES', label: 'MIN_AGE_MINUTES', type: 'number', min: 0, group: 'heuristics' },
++  { key: 'DELETE_LIMIT', label: 'DELETE_LIMIT', type: 'number', min: 1, group: 'heuristics' },
++  { key: 'SAFE_URL_PATTERNS', label: 'SAFE_URL_PATTERNS', type: 'textarea', group: 'heuristics' }
++];
++
++function toDisplayValue(key, value) {
++  if (key === 'SAFE_URL_PATTERNS') {
++    if (Array.isArray(value)) {
++      return arrayToCsv(value);
++    }
++    return arrayToCsv(csvToArray(value || ''));
++  }
++  return value;
++}
++
++function normalizeSettings(raw) {
++  const merged = { ...DEFAULT_SETTINGS, ...(raw || {}) };
++  if (!Array.isArray(merged.SAFE_URL_PATTERNS)) {
++    merged.SAFE_URL_PATTERNS = csvToArray(merged.SAFE_URL_PATTERNS || '');
++  }
++  return merged;
++}
++
++export async function init({ root }) {
++  await initDb();
++
++  const groups = {
++    safety: root.querySelector('[data-group="safety"]'),
++    heuristics: root.querySelector('[data-group="heuristics"]'),
++    automation: root.querySelector('[data-group="automation"]')
++  };
++  const categoryList = root.querySelector('[data-role="category-list"]');
++  const categoryForm = root.querySelector('[data-role="category-form"]');
++
++  let settings = await loadSettings();
++  let catalog = await categories.list();
++
++  FIELD_DEFS.forEach((field) => {
++    const container = document.createElement('div');
++    container.className = 'setting-field';
++
++    const label = document.createElement('label');
++    label.textContent = field.label;
++
++    let input;
++    if (field.type === 'textarea') {
++      input = document.createElement('textarea');
++    } else {
++      input = document.createElement('input');
++      input.type = field.type;
++      if (field.type === 'number' && field.min !== undefined) {
++        input.min = String(field.min);
++      }
++      if (field.type === 'checkbox') {
++        input.checked = Boolean(settings[field.key]);
++      }
++    }
++
++    if (field.type !== 'checkbox') {
++      const displayValue = toDisplayValue(field.key, settings[field.key]);
++      input.value = displayValue !== undefined && displayValue !== null ? String(displayValue) : '';
++    }
++
++    input.dataset.settingKey = field.key;
++
++    container.appendChild(label);
++    container.appendChild(input);
++
++    groups[field.group].appendChild(container);
++  });
++
++  /**
++   * Slovensky: Spracuje zmeny polí a uloží ich do storage.
++   */
++  root.addEventListener('change', async (event) => {
++    const target = event.target;
++    if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
++      return;
++    }
++    const key = target.dataset.settingKey;
++    if (!key) {
++      return;
++    }
++
++    let value;
++    if (target.type === 'checkbox') {
++      value = target.checked;
++    } else if (target.type === 'number') {
++      value = Number.parseInt(target.value, 10) || 0;
++    } else {
++      value = target.value;
++    }
++    if (key === 'SAFE_URL_PATTERNS') {
++      const arr = csvToArray(value);
++      target.value = arrayToCsv(arr);
++      value = arr;
++    }
++
++    settings = normalizeSettings({ ...settings, [key]: value });
++    await chrome.storage.local.set({ settings });
++    await log('info', 'ui', 'Setting updated', { key, value });
++  });
++
++  categoryForm.addEventListener('submit', async (event) => {
++    event.preventDefault();
++    const data = new FormData(categoryForm);
++    const name = (data.get('category') || '').toString().trim();
++    if (!name) {
++      return;
++    }
++    try {
++      await categories.add(name);
++      catalog = await categories.list();
++      categoryForm.reset();
++      renderCategories();
++      await log('info', 'ui', 'Category added', { name });
++    } catch (error) {
++      console.warn(error);
++    }
++  });
++
++  categoryList.addEventListener('click', async (event) => {
++    const removeBtn = event.target.closest('button[data-action="delete-category"]');
++    const renameBtn = event.target.closest('button[data-action="rename-category"]');
++    if (removeBtn) {
++      const id = removeBtn.dataset.id;
++      await categories.delete(id);
++      catalog = catalog.filter((item) => item.id !== id);
++      renderCategories();
++      window.dispatchEvent(new Event('mychatgpt-backups-changed'));
++      await log('info', 'ui', 'Category deleted', { id });
++    } else if (renameBtn) {
++      const id = renameBtn.dataset.id;
++      const current = catalog.find((item) => item.id === id);
++      const nextName = prompt('Rename category', current?.name || '');
++      if (!nextName || !nextName.trim()) {
++        return;
++      }
++      await categories.rename(id, nextName.trim());
++      catalog = await categories.list();
++      renderCategories();
++      window.dispatchEvent(new Event('mychatgpt-backups-changed'));
++      await log('info', 'ui', 'Category renamed', { id, name: nextName.trim() });
++    }
++  });
++
++  chrome.storage.onChanged.addListener((changes, area) => {
++    if (area !== 'local' || !changes.settings) {
++      return;
++    }
++    settings = normalizeSettings(changes.settings.newValue);
++    syncInputs();
++  });
++
++  renderCategories();
++  syncInputs();
++
++  return {
++    onShow: async () => {
++      settings = await loadSettings();
++      catalog = await categories.list();
++      syncInputs();
++      renderCategories();
++    }
++  };
++
++  function syncInputs() {
++    FIELD_DEFS.forEach((field) => {
++      const input = root.querySelector(`[data-setting-key="${field.key}"]`);
++      if (!input) {
++        return;
++      }
++      if (field.type === 'checkbox') {
++        input.checked = Boolean(settings[field.key]);
++      } else {
++        const value = toDisplayValue(field.key, settings[field.key]);
++        input.value = value !== undefined && value !== null ? String(value) : '';
++      }
++    });
++  }
++
++  function renderCategories() {
++    categoryList.innerHTML = '';
++    catalog
++      .slice()
++      .sort((a, b) => a.name.localeCompare(b.name))
++      .forEach((item) => {
++        const li = document.createElement('li');
++        li.className = 'flex-between';
++        const span = document.createElement('span');
++        span.textContent = item.name;
++        const actions = document.createElement('div');
++        const rename = document.createElement('button');
++        rename.className = 'secondary';
++        rename.dataset.action = 'rename-category';
++        rename.dataset.id = item.id;
++        rename.textContent = 'Rename';
++        rename.type = 'button';
++        const del = document.createElement('button');
++        del.className = 'secondary';
++        del.dataset.action = 'delete-category';
++        del.dataset.id = item.id;
++        del.textContent = 'Delete';
++        del.type = 'button';
++        actions.appendChild(rename);
++        actions.appendChild(del);
++        li.appendChild(span);
++        li.appendChild(actions);
++        categoryList.appendChild(li);
++      });
++  }
++}
++
++async function loadSettings() {
++  const stored = await chrome.storage.local.get(['settings']);
++  return normalizeSettings(stored.settings);
++}
+--- a/README.md
++++ b/README.md
+@@ -0,0 +1,34 @@
++# MyChatGPT – MV3 Extension
++
++MyChatGPT keeps your ChatGPT account tidy while storing short “search-like” chats locally. The extension watches for short conversations created by the official ChatGPT browser companion, backs them up to IndexedDB, and—when you explicitly allow it—can soft-hide them using the same API the web client uses.
++
++## Key ideas
++- Local-first safety: backups live in IndexedDB (`mychatgpt-db`); nothing ever leaves your machine.
++- Safe defaults: `LIST_ONLY` and `DRY_RUN` ship as `true`, so no PATCH requests fire unless you disable both *and* confirm.
++- Transparent logging: the Debug tab streams the last 500 log entries from `chrome.storage.local`.
++- Modular UI: popup offers Searches, Backup, Settings, and Debug tabs with dark-mode aware styling.
++
++## Loading the extension
++1. Clone or download this repository.
++2. In Chrome/Brave, open `chrome://extensions/`.
++3. Toggle on **Developer mode**.
++4. Click **Load unpacked** and select the project directory.
++5. Pin the “MyChatGPT” extension if you want quick access to the popup.
++
++## How to test KROK 2
++1. Load the unpacked extension, then open a short ChatGPT conversation (≤2 visible messages, ≥2 minutes old).
++2. Keep the popup open on **Searches**. When you focus the chat tab, the Debug tab should log `Scan started` and either `Backup stored` or the disqualification reason.
++3. Click **Backup current chat (manual)** to force a capture; with default settings the toast shows the LIST_ONLY guard unless you flip `ALLOW_LOCAL_BACKUP_WHEN_LIST_ONLY` or disable `LIST_ONLY` entirely.
++4. Visit the **Backup** tab to see the newest entry, change its category, preview the sanitized answer, and export the HTML snapshot.
++5. Toggle `LIST_ONLY` off in **Settings** and repeat the manual backup to confirm that records persist when the guard rails allow it.
++
++## Current limitations
++- DOM scraping relies on data attributes from chatgpt.com; major UI changes can break extraction until heuristics are updated.
++- Runner never issues PATCH/DELETE calls—`DRY_RUN` remains in place and only local backups/logs are produced.
++- No automated tests yet; verify flows manually through the popup and Debug tab.
++
++## Development notes
++- Manifest V3, background service worker written as an ES module.
++- IndexedDB stores `backups` and `categories`; the latter is seeded with `Programovanie`, `Kryptomeny`, `HW`, and `Zdravie` on first run.
++- Comments and docstrings live in Slovak per the Analytic Programming protocol.
++- No external dependencies or build steps; everything is plain JS + HTML + CSS.

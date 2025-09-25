@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "MyChatGPT",
+  "version": "0.2.5",
+  "description": "Keep ChatGPT history tidy with local backups, safe defaults, and transparent logging.",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "MyChatGPT",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "assets/icon-16.png",
+      "48": "assets/icon-48.png",
+      "128": "assets/icon-128.png"
+    }
+  },
+  "permissions": [
+    "offscreen",
+    "alarms",
+    "tabs",
+    "scripting",
+    "storage",
+    "clipboardRead",
+    "clipboardWrite",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*"
+  ],
+  "icons": {
+    "16": "assets/icon-16.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*"],
+      "matches": ["https://chatgpt.com/*"]
+    },
+    {
+      "resources": ["utils.js"],
+      "matches": ["https://chatgpt.com/*"]
+    }
+  ]
+}

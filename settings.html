@@ -1,0 +1,36 @@
+<section class="tab-card" data-tab-root="settings">
+  <h2>Settings</h2>
+  <p class="tab-copy">Tune automation and safety defaults. Changes persist immediately.</p>
+
+  <div class="tab-card">
+    <h3>Safety</h3>
+    <div class="input-grid" data-group="safety"></div>
+  </div>
+
+  <div class="tab-card">
+    <h3>Heuristics</h3>
+    <div class="input-grid" data-group="heuristics"></div>
+  </div>
+
+  <div class="tab-card">
+    <h3>Automation</h3>
+    <div class="input-grid" data-group="automation"></div>
+  </div>
+
+  <div class="tab-card">
+    <h3>Diagnostics</h3>
+    <div class="input-grid" data-group="diagnostics"></div>
+    <p class="tab-copy">
+      Tune logging verbosity and extractor probes. Diagnostic data stays local unless exported.
+    </p>
+  </div>
+
+  <div class="tab-card">
+    <h3>Categories</h3>
+    <form data-role="category-form" class="flex-between">
+      <input type="text" name="category" placeholder="New category" required />
+      <button type="submit">Add</button>
+    </form>
+    <ul data-role="category-list"></ul>
+  </div>
+</section>

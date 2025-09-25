@@ -1,0 +1,26 @@
+<section class="tab-card" data-tab-root="backup">
+  <div class="flex-between">
+    <h2>Backup Library</h2>
+    <button class="secondary" data-action="refresh-backups">Refresh</button>
+  </div>
+  <p class="tab-copy">Browse stored short chats, adjust categories, preview answers, or export snapshots.</p>
+  <div class="backup-layout">
+    <div class="backup-list" data-role="backup-list">
+      <div class="empty-state" data-role="backup-empty">No backups yet. Run a scan or add one manually.</div>
+    </div>
+    <div class="backup-preview-panel" data-role="backup-preview" hidden>
+      <div class="backup-preview-header">
+        <div>
+          <h3 data-field="preview-title"></h3>
+          <p class="backup-preview-meta" data-field="preview-meta"></p>
+        </div>
+        <button class="secondary" data-action="close-preview">Close</button>
+      </div>
+      <iframe class="backup-preview" sandbox data-field="preview-frame"></iframe>
+      <div class="flex-between">
+        <button data-action="export-backup">Export HTML</button>
+        <button class="secondary" data-action="delete-backup">Delete</button>
+      </div>
+    </div>
+  </div>
+</section>

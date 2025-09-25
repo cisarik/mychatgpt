@@ -1,0 +1,25 @@
+<section class="tab-card" data-tab-root="searches">
+  <div class="flex-between">
+    <div class="inline-group">
+      <h2>Stored Backups</h2>
+      <span class="badge">LIST ONLY</span>
+    </div>
+    <button data-action="manual-backup">Backup current chat (manual)</button>
+  </div>
+  <p class="tab-copy">Filter through locally saved short chats. Select a row to open its backup.</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Title</th>
+          <th>Question</th>
+          <th>Category</th>
+          <th>Timestamp</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody data-role="searches-rows"></tbody>
+    </table>
+  </div>
+  <div class="empty-state" data-role="searches-empty">No backups stored yet. Run a scan or add one manually.</div>
+</section>

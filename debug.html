@@ -1,0 +1,47 @@
+<section class="tab-card" data-tab-root="debug">
+  <div class="flex-between">
+    <h2>Diagnostics</h2>
+    <div>
+      <button data-action="scan-now">Scan Now</button>
+      <button data-action="force-inject">Force inject content script</button>
+      <button data-action="run-probe">Run extractor self-test (active tab)</button>
+    </div>
+  </div>
+  <p class="tab-copy" data-role="inject-status"></p>
+  <p class="tab-copy">
+    Service worker logs live in chrome://extensions -> MyChatGPT -> "Service worker" -> Inspect.
+  </p>
+  <div class="flex-between">
+    <label>
+      Tail level
+      <select data-role="log-level-filter">
+        <option value="TRACE">TRACE</option>
+        <option value="DEBUG">DEBUG</option>
+        <option value="INFO" selected>INFO</option>
+        <option value="WARN">WARN</option>
+        <option value="ERROR">ERROR</option>
+      </select>
+    </label>
+    <div>
+      <button class="secondary" data-action="clear-logs">Clear logs</button>
+      <button class="secondary" data-action="export-logs">Export JSON</button>
+    </div>
+  </div>
+  <div class="log-list" data-role="log-tail"></div>
+  <div class="flex-between">
+    <small data-role="last-scan">No scans yet.</small>
+  </div>
+  <div class="tab-card" data-role="probe-container">
+    <div class="flex-between">
+      <h3>Extractor Self-Test</h3>
+      <button class="secondary" data-action="copy-probe" disabled>Copy JSON</button>
+    </div>
+    <pre class="code-block" data-role="probe-output">Run the probe to inspect extractor status.</pre>
+  </div>
+  <div class="tab-card" data-role="snapshot-container" hidden>
+    <details>
+      <summary>Last extractor snapshot</summary>
+      <pre class="code-block" data-role="snapshot-output"></pre>
+    </details>
+  </div>
+</section>
