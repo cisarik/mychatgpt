@@ -149,6 +149,114 @@
         </footer>
       </form>
     </dialog>
+    <div class="tab-card" data-role="undo-tools" hidden>
+      <div class="flex-between">
+        <h4>Undo queue</h4>
+        <button class="secondary" data-action="undo-open-confirm" disabled>Confirm UNDO (PATCH visible:true)</button>
+      </div>
+      <p class="tab-copy" data-role="undo-hint"></p>
+      <form class="inline-group" data-role="undo-manual-form">
+        <input type="text" name="convoId" placeholder="Conversation ID" required />
+        <input type="url" name="url" placeholder="Optional URL" />
+        <input type="text" name="title" placeholder="Optional title" />
+        <button type="submit">Add to queue</button>
+      </form>
+      <div class="inline-group">
+        <button class="secondary" data-action="undo-load-recent">Load recent hidden</button>
+        <button class="secondary" data-action="undo-clear-queue">Clear queue</button>
+      </div>
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Convo</th>
+              <th>URL</th>
+              <th>Queued</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody data-role="undo-rows"></tbody>
+        </table>
+      </div>
+      <div class="tab-card" data-role="undo-results-card" hidden>
+        <div class="flex-between">
+          <strong>Last UNDO batch</strong>
+          <button class="secondary" data-action="undo-copy-results" disabled>Copy JSON</button>
+        </div>
+        <ul data-role="undo-results-list"></ul>
+      </div>
+      <dialog data-role="undo-confirm-dialog">
+        <form method="dialog" class="modal-body">
+          <header class="flex-between">
+            <strong>Confirm UNDO</strong>
+            <button type="submit" value="cancel" class="secondary">Cancel</button>
+          </header>
+          <p data-role="undo-confirm-summary"></p>
+          <ul data-role="undo-confirm-list"></ul>
+          <p data-role="undo-confirm-limits"></p>
+          <p class="tab-copy" data-role="undo-confirm-warning" hidden></p>
+          <label>
+            <input type="checkbox" data-role="undo-confirm-ack" /> Restore visibility (PATCH visible:true) for selected entries.
+          </label>
+          <footer class="flex-between">
+            <button type="submit" value="cancel" class="secondary">Back</button>
+            <button value="confirm" data-action="undo-confirm-submit">Send UNDO batch</button>
+          </footer>
+        </form>
+      </dialog>
+    </div>
+  </div>
+  <div class="tab-card" data-role="audit-card">
+    <div class="flex-between">
+      <h3>Audit trail</h3>
+      <div class="inline-group">
+        <button class="secondary" data-action="audit-refresh">Refresh</button>
+        <button class="secondary" data-action="audit-clear">Clear</button>
+        <button class="secondary" data-action="audit-export-csv">Export CSV</button>
+        <button class="secondary" data-action="audit-export-json">Export JSON</button>
+      </div>
+    </div>
+    <div class="inline-group audit-filters">
+      <label>
+        Tail
+        <input type="number" min="1" value="100" data-role="audit-limit" />
+      </label>
+      <label>
+        Operation
+        <select data-role="audit-filter-op">
+          <option value="">Any</option>
+          <option value="hide">hide</option>
+          <option value="undo">undo</option>
+        </select>
+      </label>
+      <label>
+        Status
+        <input type="number" data-role="audit-filter-status" placeholder="Any" />
+      </label>
+      <label>
+        Reason
+        <input type="text" data-role="audit-filter-reason" placeholder="Filter by reason code" />
+      </label>
+    </div>
+    <div class="table-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Op</th>
+            <th>Convo</th>
+            <th>Title</th>
+            <th>Status</th>
+            <th>OK</th>
+            <th>Reason</th>
+            <th>Note</th>
+            <th>Link</th>
+          </tr>
+        </thead>
+        <tbody data-role="audit-rows"></tbody>
+      </table>
+    </div>
   </div>
   <div class="tab-card" data-role="probe-container">
     <div class="flex-between">

@@ -399,6 +399,17 @@ export const ReasonCodes = Object.freeze({
   PATCH_BRIDGE_TIMEOUT: 'patch_bridge_timeout',
   PATCH_BRIDGE_ERROR: 'patch_bridge_error',
   PATCH_HTTP_ERROR_PREFIX: 'patch_http_error_',
+  UNDO_OK: 'undo_ok',
+  UNDO_BLOCKED_BY_SAFETY: 'undo_blocked_by_safety',
+  UNDO_BLOCKED_BY_WHITELIST: 'undo_blocked_by_whitelist',
+  UNDO_BLOCKED_BY_RATE_LIMIT: 'undo_blocked_by_rate_limit',
+  UNDO_BLOCKED_BY_BATCH_LIMIT: 'undo_blocked_by_batch_limit',
+  UNDO_BLOCKED_BY_DUPLICATE: 'undo_blocked_by_duplicate',
+  UNDO_BLOCKED_BY_DELETE_LIMIT: 'undo_blocked_by_delete_limit',
+  UNDO_BRIDGE_TIMEOUT: 'undo_bridge_timeout',
+  UNDO_BRIDGE_ERROR: 'undo_bridge_error',
+  UNDO_HTTP_ERROR_PREFIX: 'undo_http_error_',
+  UNDO_BATCH_COMPLETED: 'undo_batch_completed',
   BRIDGE_CONNECTIVITY_OK: 'bridge_connectivity_ok',
   BRIDGE_CONNECTIVITY_FAILED: 'bridge_connectivity_failed',
   LIVE_BATCH_COMPLETED: 'live_batch_completed'
@@ -413,6 +424,17 @@ export function buildPatchHttpReason(status) {
     return `${ReasonCodes.PATCH_HTTP_ERROR_PREFIX}unknown`;
   }
   return `${ReasonCodes.PATCH_HTTP_ERROR_PREFIX}${code}`;
+}
+
+/**
+ * Slovensky: Zostaví reason kód pre HTTP odpoveď UNDO PATCH požiadavky.
+ */
+export function buildUndoHttpReason(status) {
+  const code = Number.parseInt(status, 10);
+  if (!Number.isFinite(code)) {
+    return `${ReasonCodes.UNDO_HTTP_ERROR_PREFIX}unknown`;
+  }
+  return `${ReasonCodes.UNDO_HTTP_ERROR_PREFIX}${code}`;
 }
 
 /**

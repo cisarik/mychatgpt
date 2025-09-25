@@ -14,6 +14,8 @@ const REPORT_CSV_COLUMNS = [
   'reasons',
   'ts'
 ];
+const AUDIT_CSV_COLUMNS = ['ts_iso', 'op', 'convoId', 'url', 'status', 'ok', 'reasonCode', 'title'];
+const DEFAULT_UNDO_BATCH_LIMIT = 5;
 
 export async function init({ root }) {
   const tailEl = root.querySelector('[data-role="log-tail"]');
@@ -70,6 +72,34 @@ export async function init({ root }) {
   const liveConfirmWarning = liveCard?.querySelector('[data-role="live-confirm-warning"]');
   const liveConfirmAck = liveCard?.querySelector('[data-role="live-confirm-ack"]');
   const liveConfirmSubmit = liveCard?.querySelector('[data-action="live-confirm-submit"]');
+  const undoToolsCard = liveCard?.querySelector('[data-role="undo-tools"]');
+  const undoHint = undoToolsCard?.querySelector('[data-role="undo-hint"]');
+  const undoManualForm = undoToolsCard?.querySelector('[data-role="undo-manual-form"]');
+  const undoRows = undoToolsCard?.querySelector('[data-role="undo-rows"]');
+  const undoLoadButton = undoToolsCard?.querySelector('[data-action="undo-load-recent"]');
+  const undoClearButton = undoToolsCard?.querySelector('[data-action="undo-clear-queue"]');
+  const undoOpenConfirmButton = undoToolsCard?.querySelector('[data-action="undo-open-confirm"]');
+  const undoResultsCard = undoToolsCard?.querySelector('[data-role="undo-results-card"]');
+  const undoResultsList = undoToolsCard?.querySelector('[data-role="undo-results-list"]');
+  const undoCopyButton = undoToolsCard?.querySelector('[data-action="undo-copy-results"]');
+  const undoCopyButtonDefaultLabel = undoCopyButton?.textContent || 'Copy JSON';
+  const undoConfirmDialog = undoToolsCard?.querySelector('[data-role="undo-confirm-dialog"]');
+  const undoConfirmSummary = undoToolsCard?.querySelector('[data-role="undo-confirm-summary"]');
+  const undoConfirmList = undoToolsCard?.querySelector('[data-role="undo-confirm-list"]');
+  const undoConfirmLimits = undoToolsCard?.querySelector('[data-role="undo-confirm-limits"]');
+  const undoConfirmWarning = undoToolsCard?.querySelector('[data-role="undo-confirm-warning"]');
+  const undoConfirmAck = undoToolsCard?.querySelector('[data-role="undo-confirm-ack"]');
+  const undoConfirmSubmit = undoToolsCard?.querySelector('[data-action="undo-confirm-submit"]');
+  const auditCard = root.querySelector('[data-role="audit-card"]');
+  const auditRows = auditCard?.querySelector('[data-role="audit-rows"]');
+  const auditLimitInput = auditCard?.querySelector('[data-role="audit-limit"]');
+  const auditFilterOp = auditCard?.querySelector('[data-role="audit-filter-op"]');
+  const auditFilterStatus = auditCard?.querySelector('[data-role="audit-filter-status"]');
+  const auditFilterReason = auditCard?.querySelector('[data-role="audit-filter-reason"]');
+  const auditRefreshButton = auditCard?.querySelector('[data-action="audit-refresh"]');
+  const auditClearButton = auditCard?.querySelector('[data-action="audit-clear"]');
+  const auditExportCsvButton = auditCard?.querySelector('[data-action="audit-export-csv"]');
+  const auditExportJsonButton = auditCard?.querySelector('[data-action="audit-export-json"]');
 
   let tailTimer = null;
   let currentLevel = levelSelect?.value || 'INFO';
@@ -82,6 +112,12 @@ export async function init({ root }) {
   let liveSelection = new Set();
   let liveResults = null;
   let liveResultsMeta = null;
+  let undoQueue = [];
+  let undoResults = null;
+  let undoResultsMeta = null;
+  let auditEntries = [];
+  let auditLimit = Number.parseInt(auditLimitInput?.value || '', 10) || 100;
+  let auditFilters = { op: '', status: '', reason: '' };
 
   async function refreshAll() {
     await Promise.all([
@@ -90,7 +126,8 @@ export async function init({ root }) {
       refreshSnapshot(),
       refreshReport(),
       refreshPlan(),
-      refreshLive()
+      refreshLive(),
+      refreshAudit()
     ]);
   }
 
@@ -215,7 +252,27 @@ export async function init({ root }) {
     renderLiveSelection();
     updateSelectionHint();
     renderLiveResults();
+    updateUndoVisibility();
+    renderUndoQueue();
+    renderUndoResults();
+    refreshUndoHint();
     updateLiveControls();
+  }
+
+  async function refreshAudit() {
+    if (!auditCard) {
+      return;
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'AUDIT_TAIL', limit: auditLimit });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'audit-tail-failed');
+      }
+      auditEntries = Array.isArray(response.entries) ? response.entries : [];
+      renderAudit();
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   /**
@@ -251,6 +308,375 @@ export async function init({ root }) {
       items,
       totals: { planned }
     };
+  }
+
+  function getUndoLimits() {
+    const batchLimit = Number.isFinite(liveSettings?.UNDO_BATCH_LIMIT)
+      ? liveSettings.UNDO_BATCH_LIMIT
+      : DEFAULT_UNDO_BATCH_LIMIT;
+    const rateLimit = Number.isFinite(liveSettings?.LIVE_PATCH_RATE_LIMIT_PER_MIN)
+      ? liveSettings.LIVE_PATCH_RATE_LIMIT_PER_MIN
+      : 0;
+    return { batchLimit, rateLimit };
+  }
+
+  function updateUndoVisibility() {
+    if (!undoToolsCard) {
+      return;
+    }
+    const visible = liveSettings?.SHOW_UNDO_TOOLS !== false;
+    undoToolsCard.hidden = !visible;
+    if (!visible) {
+      undoHint && (undoHint.textContent = '');
+    }
+  }
+
+  function refreshUndoHint() {
+    if (!undoHint || !undoToolsCard || undoToolsCard.hidden) {
+      return;
+    }
+    if (!liveSettings) {
+      undoHint.hidden = false;
+      undoHint.textContent = 'Loading Live Mode settings…';
+      return;
+    }
+    if (!isLiveModeArmedLocal()) {
+      undoHint.hidden = false;
+      undoHint.textContent = 'Guard rails active: enable Live Mode to allow UNDO operations.';
+      return;
+    }
+    if (!undoQueue.length) {
+      undoHint.hidden = false;
+      undoHint.textContent = 'No items queued for UNDO yet.';
+      return;
+    }
+    const limits = getUndoLimits();
+    const batchText = limits.batchLimit > 0 ? limits.batchLimit : 'unlimited';
+    const rateText = limits.rateLimit > 0 ? limits.rateLimit : 'unlimited';
+    undoHint.hidden = false;
+    undoHint.textContent = `Queued ${undoQueue.length} item(s). Batch limit ≤ ${batchText}. Rate/min ${rateText}.`;
+  }
+
+  function createUndoKey(convoId, url) {
+    const id = (convoId || '').trim();
+    if (id) {
+      return id;
+    }
+    const link = (url || '').trim();
+    return link;
+  }
+
+  function queueUndoItems(items) {
+    if (!Array.isArray(items)) {
+      return;
+    }
+    let changed = false;
+    items.forEach((item) => {
+      if (!item) {
+        return;
+      }
+      const convoId = (item.convoId || '').trim();
+      const url = (item.url || '').trim();
+      const key = createUndoKey(convoId, url);
+      if (!key) {
+        return;
+      }
+      if (undoQueue.some((entry) => entry.key === key)) {
+        return;
+      }
+      undoQueue.push({
+        key,
+        convoId,
+        url,
+        title: item.title || '',
+        queuedAt: Number.isFinite(item.ts) ? item.ts : Date.now()
+      });
+      changed = true;
+    });
+    if (changed) {
+      undoQueue.sort((a, b) => (a.queuedAt || 0) - (b.queuedAt || 0));
+      renderUndoQueue();
+      refreshUndoHint();
+      updateLiveControls();
+    }
+  }
+
+  function removeUndoItemByKey(key) {
+    if (!key) {
+      return;
+    }
+    const next = undoQueue.filter((item) => item.key !== key);
+    if (next.length !== undoQueue.length) {
+      undoQueue = next;
+      renderUndoQueue();
+      refreshUndoHint();
+      updateLiveControls();
+    }
+  }
+
+  function renderUndoQueue() {
+    if (!undoRows) {
+      return;
+    }
+    undoRows.innerHTML = '';
+    if (!undoToolsCard || undoToolsCard.hidden) {
+      return;
+    }
+    if (!undoQueue.length) {
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 5;
+      cell.textContent = 'Undo queue is empty.';
+      row.appendChild(cell);
+      undoRows.appendChild(row);
+      return;
+    }
+    undoQueue.forEach((item) => {
+      const row = document.createElement('tr');
+      row.dataset.key = item.key;
+      row.appendChild(renderCell(item.title?.trim() ? item.title : '(no title)'));
+      row.appendChild(renderCell(formatConvoId(item.convoId)));
+      row.appendChild(renderLinkCell(item.url));
+      row.appendChild(renderCell(formatReportTimestamp(item.queuedAt)));
+      const actions = document.createElement('td');
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.dataset.action = 'undo-remove';
+      removeBtn.textContent = 'Remove';
+      actions.appendChild(removeBtn);
+      row.appendChild(actions);
+      undoRows.appendChild(row);
+    });
+  }
+
+  function getUndoItems() {
+    if (!undoQueue.length) {
+      return [];
+    }
+    return undoQueue.map((item) => ({
+      convoId: item.convoId,
+      url: item.url,
+      title: item.title
+    }));
+  }
+
+  function renderUndoResults() {
+    renderBatchResults({
+      container: undoResultsCard,
+      listEl: undoResultsList,
+      copyButton: undoCopyButton,
+      results: undoResults
+    });
+  }
+
+  function getUndoResultsJson() {
+    if (!Array.isArray(undoResults) || !undoResults.length) {
+      return '';
+    }
+    const payload = {
+      ts: Date.now(),
+      results: undoResults,
+      meta: undoResultsMeta
+    };
+    return JSON.stringify(payload, null, 2);
+  }
+
+  function pruneUndoQueueAfterResults(results) {
+    if (!Array.isArray(results) || !results.length) {
+      return;
+    }
+    const failedKeys = new Set(
+      results
+        .filter((item) => !item?.ok)
+        .map((item) => createUndoKey(item?.convoId || '', item?.url || ''))
+        .filter(Boolean)
+    );
+    undoQueue = undoQueue.filter((entry) => failedKeys.has(entry.key));
+    renderUndoQueue();
+    refreshUndoHint();
+    updateLiveControls();
+  }
+
+  function renderAudit() {
+    if (!auditRows) {
+      return;
+    }
+    auditRows.innerHTML = '';
+    if (!Array.isArray(auditEntries) || !auditEntries.length) {
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 9;
+      cell.textContent = 'No audit entries yet.';
+      row.appendChild(cell);
+      auditRows.appendChild(row);
+      return;
+    }
+    const filtered = getFilteredAuditEntries();
+    if (!filtered.length) {
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 9;
+      cell.textContent = 'No audit entries match the current filters.';
+      row.appendChild(cell);
+      auditRows.appendChild(row);
+      return;
+    }
+    filtered
+      .slice()
+      .sort((a, b) => (b.ts || 0) - (a.ts || 0))
+      .forEach((entry) => {
+        const row = document.createElement('tr');
+        row.appendChild(renderCell(formatReportTimestamp(entry.ts)));
+        row.appendChild(renderCell(entry.op || '—'));
+        row.appendChild(renderCell(formatConvoId(entry.convoId)));
+        row.appendChild(renderCell(entry.title || '(no title)'));
+        const status = entry?.response?.status;
+        row.appendChild(renderCell(status === null || status === undefined ? '—' : String(status)));
+        row.appendChild(renderCell(entry?.response?.ok ? 'yes' : 'no'));
+        row.appendChild(renderCell(entry.reasonCode || '—'));
+        row.appendChild(renderCell(entry.note || '—'));
+        const linkCell = document.createElement('td');
+        if (entry.url) {
+          const link = document.createElement('a');
+          link.href = entry.url;
+          link.target = '_blank';
+          link.rel = 'noreferrer noopener';
+          link.textContent = 'Open';
+          linkCell.appendChild(link);
+        } else {
+          linkCell.textContent = '—';
+        }
+        row.appendChild(linkCell);
+        auditRows.appendChild(row);
+      });
+  }
+
+  function getFilteredAuditEntries() {
+    return (Array.isArray(auditEntries) ? auditEntries : []).filter((entry) => {
+      if (auditFilters.op && entry?.op !== auditFilters.op) {
+        return false;
+      }
+      if (auditFilters.status) {
+        const statusText = entry?.response?.status === null || entry?.response?.status === undefined
+          ? ''
+          : String(entry.response.status);
+        if (statusText !== auditFilters.status) {
+          return false;
+        }
+      }
+      if (auditFilters.reason) {
+        const reason = (entry?.reasonCode || '').toLowerCase();
+        if (!reason.includes(auditFilters.reason)) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  function buildAuditCsv(entries) {
+    const rows = Array.isArray(entries) ? entries : [];
+    const header = AUDIT_CSV_COLUMNS.join(',');
+    const lines = rows.map((entry) =>
+      AUDIT_CSV_COLUMNS.map((column) => csvEscape(resolveAuditCsvValue(entry, column))).join(',')
+    );
+    return [header, ...lines].join('\n');
+  }
+
+  function resolveAuditCsvValue(entry, column) {
+    if (!entry || typeof entry !== 'object') {
+      return '';
+    }
+    if (column === 'ts_iso') {
+      return Number.isFinite(entry.ts) ? new Date(entry.ts).toISOString() : '';
+    }
+    if (column === 'status') {
+      const status = entry?.response?.status;
+      return status === null || status === undefined ? '' : String(status);
+    }
+    if (column === 'ok') {
+      return entry?.response?.ok ? 'true' : 'false';
+    }
+    if (column === 'reasonCode') {
+      return entry.reasonCode || '';
+    }
+    if (column === 'convoId') {
+      return entry.convoId || '';
+    }
+    if (column === 'url') {
+      return entry.url || '';
+    }
+    if (column === 'title') {
+      return entry.title || '';
+    }
+    if (column === 'op') {
+      return entry.op || '';
+    }
+    return '';
+  }
+
+  async function promptAuditNoteForResult(item) {
+    if (!item?.auditId) {
+      return;
+    }
+    const context = item.title || item.convoId || item.url || 'entry';
+    const input = window.prompt(`Add audit note for ${context}`, item.note || '');
+    if (input === null) {
+      return;
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'AUDIT_ADD_NOTE',
+        id: item.auditId,
+        note: input
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'audit-note-failed');
+      }
+      await refreshAudit();
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  function renderBatchResults({ container, listEl, results, copyButton }) {
+    if (!container || !listEl) {
+      return;
+    }
+    if (!Array.isArray(results) || results.length === 0) {
+      container.hidden = true;
+      if (copyButton) {
+        copyButton.disabled = true;
+      }
+      return;
+    }
+    container.hidden = false;
+    listEl.innerHTML = '';
+    results.forEach((item) => {
+      const li = document.createElement('li');
+      const icon = iconForLiveResult(item);
+      const title = item.title || '(untitled)';
+      const convo = item.convoId || 'no-id';
+      const reason = item.reasonCode || (item.ok ? 'ok' : 'unknown');
+      const statusPart = item.status !== undefined && item.status !== null ? ` • status ${item.status}` : '';
+      const span = document.createElement('span');
+      span.textContent = `${icon} ${title} — ${convo} (${reason}${statusPart})`;
+      li.appendChild(span);
+      if (item.auditId) {
+        const noteButton = document.createElement('button');
+        noteButton.type = 'button';
+        noteButton.className = 'secondary';
+        noteButton.textContent = 'Add to Audit notes';
+        noteButton.addEventListener('click', () => {
+          promptAuditNoteForResult(item);
+        });
+        li.appendChild(noteButton);
+      }
+      listEl.appendChild(li);
+    });
+    if (copyButton) {
+      copyButton.disabled = false;
+    }
   }
 
   function isLiveModeArmedLocal() {
@@ -321,6 +747,13 @@ export async function init({ root }) {
     }
     if (liveCopyButton) {
       liveCopyButton.disabled = !liveResults || !Array.isArray(liveResults) || liveResults.length === 0;
+    }
+    if (undoOpenConfirmButton) {
+      const undoEnabled = !undoToolsCard?.hidden && isLiveModeArmedLocal() && undoQueue.length > 0;
+      undoOpenConfirmButton.disabled = !undoEnabled;
+    }
+    if (undoCopyButton) {
+      undoCopyButton.disabled = !Array.isArray(undoResults) || undoResults.length === 0;
     }
   }
 
@@ -450,7 +883,30 @@ export async function init({ root }) {
     } catch (error) {
       if (liveSelectionHint) {
         liveSelectionHint.hidden = false;
-        liveSelectionHint.textContent = `Failed to load plan: ${error?.message || 'unknown error'}`;
+      liveSelectionHint.textContent = `Failed to load plan: ${error?.message || 'unknown error'}`;
+      }
+    }
+  }
+
+  async function loadUndoRecentHidden() {
+    if (!undoToolsCard || undoToolsCard.hidden) {
+      return;
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'UNDO_GET_RECENT_HIDDEN',
+        limit: 20,
+        windowMs: 86400000
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'undo-recent-failed');
+      }
+      queueUndoItems(response.entries || []);
+    } catch (error) {
+      console.error(error);
+      if (undoHint) {
+        undoHint.hidden = false;
+        undoHint.textContent = `Failed to load recent hidden: ${error?.message || 'unknown error'}`;
       }
     }
   }
@@ -478,37 +934,19 @@ export async function init({ root }) {
     if (item?.ok) {
       return '✅';
     }
-    if (item?.reasonCode && item.reasonCode.startsWith('patch_blocked')) {
+    if (item?.reasonCode && (item.reasonCode.startsWith('patch_blocked') || item.reasonCode.startsWith('undo_blocked'))) {
       return '⚠️';
     }
     return '❌';
   }
 
   function renderLiveResults() {
-    if (!liveResultsCard || !liveResultsList) {
-      return;
-    }
-    if (!liveResults || !Array.isArray(liveResults) || liveResults.length === 0) {
-      liveResultsCard.hidden = true;
-      if (liveCopyButton) {
-        liveCopyButton.disabled = true;
-      }
-      return;
-    }
-    liveResultsCard.hidden = false;
-    liveResultsList.innerHTML = '';
-    liveResults.forEach((item) => {
-      const li = document.createElement('li');
-      const icon = iconForLiveResult(item);
-      const title = item.title || '(untitled)';
-      const reason = item.reasonCode || (item.ok ? 'patch_ok' : 'unknown');
-      const statusPart = item.status ? ` • status ${item.status}` : '';
-      li.textContent = `${icon} ${title} — ${item.convoId || 'no-id'} (${reason}${statusPart})`;
-      liveResultsList.appendChild(li);
+    renderBatchResults({
+      container: liveResultsCard,
+      listEl: liveResultsList,
+      copyButton: liveCopyButton,
+      results: liveResults
     });
-    if (liveCopyButton) {
-      liveCopyButton.disabled = false;
-    }
   }
 
   function getLiveResultsJson() {
@@ -605,6 +1043,88 @@ export async function init({ root }) {
     }
   }
 
+  function openUndoConfirmDialog() {
+    if (!undoConfirmDialog) {
+      return;
+    }
+    const items = getUndoItems();
+    const limits = getUndoLimits();
+    if (undoConfirmSummary) {
+      undoConfirmSummary.textContent = items.length
+        ? `Ready to restore ${items.length} conversation(s).`
+        : 'No undo candidates queued.';
+    }
+    if (undoConfirmList) {
+      undoConfirmList.innerHTML = '';
+      const preview = items.slice(0, 10);
+      preview.forEach((item) => {
+        const li = document.createElement('li');
+        const convo = item.convoId || 'no-id';
+        const title = item.title || '(untitled)';
+        li.textContent = `${title} — ${convo}`;
+        undoConfirmList.appendChild(li);
+      });
+      if (items.length > preview.length) {
+        const li = document.createElement('li');
+        li.textContent = `…and ${items.length - preview.length} more.`;
+        undoConfirmList.appendChild(li);
+      }
+    }
+    if (undoConfirmLimits) {
+      undoConfirmLimits.textContent = `Batch limit ≤ ${limits.batchLimit}. Rate/min ${limits.rateLimit || 'unlimited'}.`;
+    }
+    if (undoConfirmWarning) {
+      undoConfirmWarning.hidden = true;
+      undoConfirmWarning.textContent = '';
+    }
+    if (undoConfirmAck) {
+      undoConfirmAck.checked = false;
+    }
+    if (undoConfirmSubmit) {
+      undoConfirmSubmit.disabled = false;
+    }
+    try {
+      undoConfirmDialog.showModal();
+    } catch (_error) {
+      undoConfirmDialog.setAttribute('open', 'open');
+    }
+  }
+
+  async function copyUndoResultsToClipboard() {
+    if (!undoCopyButton) {
+      return;
+    }
+    const json = getUndoResultsJson();
+    if (!json) {
+      return;
+    }
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(json);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = json;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      undoCopyButton.textContent = 'Copied!';
+      setTimeout(() => {
+        undoCopyButton.textContent = undoCopyButtonDefaultLabel;
+      }, 1200);
+    } catch (error) {
+      console.error(error);
+      undoCopyButton.textContent = 'Copy failed';
+      setTimeout(() => {
+        undoCopyButton.textContent = undoCopyButtonDefaultLabel;
+      }, 1500);
+    }
+  }
+
   async function executeLiveBatch() {
     if (!liveConfirmDialog) {
       return;
@@ -657,6 +1177,7 @@ export async function init({ root }) {
       liveResultsMeta = response.meta || null;
       renderLiveResults();
       updateLiveControls();
+      await refreshAudit();
       liveConfirmDialog.close('confirm');
     } catch (error) {
       if (liveConfirmWarning) {
@@ -666,6 +1187,73 @@ export async function init({ root }) {
     } finally {
       if (liveConfirmSubmit) {
         liveConfirmSubmit.disabled = false;
+      }
+    }
+  }
+
+  async function executeUndoBatch() {
+    if (!undoConfirmDialog) {
+      return;
+    }
+    if (!isLiveModeArmedLocal()) {
+      if (undoConfirmWarning) {
+        undoConfirmWarning.hidden = false;
+        undoConfirmWarning.textContent = 'Live Mode is not armed. Enable it in Settings and reload.';
+      }
+      return;
+    }
+    const items = getUndoItems();
+    if (!items.length) {
+      if (undoConfirmWarning) {
+        undoConfirmWarning.hidden = false;
+        undoConfirmWarning.textContent = 'Queue at least one conversation to proceed.';
+      }
+      return;
+    }
+    if (!undoConfirmAck?.checked) {
+      if (undoConfirmWarning) {
+        undoConfirmWarning.hidden = false;
+        undoConfirmWarning.textContent = 'Please acknowledge the confirmation checkbox.';
+      }
+      undoConfirmAck?.focus();
+      return;
+    }
+    if (undoConfirmWarning) {
+      undoConfirmWarning.hidden = true;
+      undoConfirmWarning.textContent = '';
+    }
+    if (undoConfirmSubmit) {
+      undoConfirmSubmit.disabled = true;
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'LIVE_EXECUTE_UNDO_BATCH',
+        items,
+        confirmed: true
+      });
+      if (!response?.ok) {
+        if (undoConfirmWarning) {
+          const reason = response?.reason ? ` (${response.reason})` : '';
+          undoConfirmWarning.hidden = false;
+          undoConfirmWarning.textContent = `Undo batch blocked${reason}.`;
+        }
+        return;
+      }
+      undoResults = Array.isArray(response.results) ? response.results : [];
+      undoResultsMeta = response.meta || null;
+      pruneUndoQueueAfterResults(undoResults);
+      renderUndoResults();
+      updateLiveControls();
+      await refreshAudit();
+      undoConfirmDialog.close('confirm');
+    } catch (error) {
+      if (undoConfirmWarning) {
+        undoConfirmWarning.hidden = false;
+        undoConfirmWarning.textContent = `Undo batch failed: ${error?.message || 'unknown error'}`;
+      }
+    } finally {
+      if (undoConfirmSubmit) {
+        undoConfirmSubmit.disabled = false;
       }
     }
   }
@@ -862,12 +1450,17 @@ export async function init({ root }) {
     justification.className = 'secondary';
     justification.dataset.action = 'plan-view-justification';
     justification.textContent = 'View justification';
+    const queueUndo = document.createElement('button');
+    queueUndo.type = 'button';
+    queueUndo.dataset.action = 'plan-queue-undo';
+    queueUndo.textContent = 'Queue for UNDO';
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.dataset.action = 'plan-remove';
     remove.textContent = 'Remove from plan';
     cell.appendChild(diff);
     cell.appendChild(justification);
+    cell.appendChild(queueUndo);
     cell.appendChild(remove);
     return cell;
   }
@@ -1102,7 +1695,8 @@ export async function init({ root }) {
     const diffBtn = event.target.closest('button[data-action="plan-view-diff"]');
     const justificationBtn = event.target.closest('button[data-action="plan-view-justification"]');
     const removeBtn = event.target.closest('button[data-action="plan-remove"]');
-    if (!diffBtn && !justificationBtn && !removeBtn) {
+    const queueUndoBtn = event.target.closest('button[data-action="plan-queue-undo"]');
+    if (!diffBtn && !justificationBtn && !removeBtn && !queueUndoBtn) {
       return;
     }
     const row = event.target.closest('tr');
@@ -1141,6 +1735,10 @@ export async function init({ root }) {
       } catch (error) {
         console.error(error);
       }
+      return;
+    }
+    if (queueUndoBtn) {
+      queueUndoItems([item]);
     }
   });
 
@@ -1153,6 +1751,75 @@ export async function init({ root }) {
   planModal?.addEventListener('cancel', (event) => {
     event.preventDefault();
     closePlanModal();
+  });
+
+  undoManualForm?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const formData = new FormData(undoManualForm);
+    const convoId = (formData.get('convoId') || '').trim();
+    const url = (formData.get('url') || '').trim();
+    const title = (formData.get('title') || '').trim();
+    queueUndoItems([
+      {
+        convoId,
+        url,
+        title
+      }
+    ]);
+    undoManualForm.reset();
+  });
+
+  undoRows?.addEventListener('click', (event) => {
+    const removeBtn = event.target.closest('button[data-action="undo-remove"]');
+    if (!removeBtn) {
+      return;
+    }
+    const row = event.target.closest('tr');
+    if (!row) {
+      return;
+    }
+    const key = row.dataset.key;
+    removeUndoItemByKey(key);
+  });
+
+  undoLoadButton?.addEventListener('click', async () => {
+    await loadUndoRecentHidden();
+  });
+
+  undoClearButton?.addEventListener('click', () => {
+    if (!undoQueue.length) {
+      return;
+    }
+    undoQueue = [];
+    renderUndoQueue();
+    refreshUndoHint();
+    updateLiveControls();
+  });
+
+  undoOpenConfirmButton?.addEventListener('click', () => {
+    openUndoConfirmDialog();
+  });
+
+  undoConfirmSubmit?.addEventListener('click', (event) => {
+    event.preventDefault();
+    executeUndoBatch();
+  });
+
+  undoConfirmDialog?.addEventListener('close', () => {
+    if (undoConfirmAck) {
+      undoConfirmAck.checked = false;
+    }
+    if (undoConfirmWarning) {
+      undoConfirmWarning.hidden = true;
+      undoConfirmWarning.textContent = '';
+    }
+    if (!(typeof undoConfirmDialog.showModal === 'function')) {
+      undoConfirmDialog.removeAttribute('open');
+    }
+  });
+
+  undoCopyButton?.addEventListener('click', async () => {
+    await copyUndoResultsToClipboard();
   });
 
   liveTestButton?.addEventListener('click', () => {
@@ -1187,6 +1854,87 @@ export async function init({ root }) {
 
   liveCopyButton?.addEventListener('click', async () => {
     await copyLiveResultsToClipboard();
+  });
+
+  auditRefreshButton?.addEventListener('click', async () => {
+    await refreshAudit();
+  });
+
+  auditClearButton?.addEventListener('click', async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'AUDIT_CLEAR' });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'audit-clear-failed');
+      }
+      auditEntries = [];
+      renderAudit();
+    } catch (error) {
+      console.error(error);
+    }
+  });
+
+  auditExportCsvButton?.addEventListener('click', async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'AUDIT_EXPORT' });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'audit-export-failed');
+      }
+      const csv = buildAuditCsv(response.entries || []);
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'mychatgpt_audit_log.csv';
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error(error);
+    }
+  });
+
+  auditExportJsonButton?.addEventListener('click', async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'AUDIT_EXPORT' });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'audit-export-failed');
+      }
+      const blob = new Blob([JSON.stringify(response.entries || [], null, 2)], {
+        type: 'application/json'
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'mychatgpt_audit_log.json';
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error(error);
+    }
+  });
+
+  auditLimitInput?.addEventListener('change', async () => {
+    const value = Number.parseInt(auditLimitInput.value || '', 10);
+    if (!Number.isFinite(value) || value <= 0) {
+      auditLimitInput.value = String(auditLimit);
+      return;
+    }
+    auditLimit = value;
+    await refreshAudit();
+  });
+
+  auditFilterOp?.addEventListener('change', () => {
+    auditFilters.op = auditFilterOp.value || '';
+    renderAudit();
+  });
+
+  auditFilterStatus?.addEventListener('input', () => {
+    auditFilters.status = auditFilterStatus.value.trim();
+    renderAudit();
+  });
+
+  auditFilterReason?.addEventListener('input', () => {
+    auditFilters.reason = auditFilterReason.value.trim().toLowerCase();
+    renderAudit();
   });
 
   reportScanAllButton?.addEventListener('click', async () => {
@@ -1266,6 +2014,12 @@ export async function init({ root }) {
     }
     if (changes[SOFT_PLAN_STORAGE_KEY]) {
       refreshPlan();
+    }
+    if (changes.audit_log) {
+      refreshAudit();
+    }
+    if (changes.soft_delete_confirmed_history) {
+      refreshUndoHint();
     }
   });
 

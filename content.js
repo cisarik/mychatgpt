@@ -614,6 +614,9 @@
     }
 
     if (message.type === 'PATCH_VISIBILITY') {
+      const desiredVisibility =
+        typeof message.visible === 'boolean' ? message.visible : Boolean(message.makeVisible);
+      const endpointHint = typeof message.endpoint === 'string' ? message.endpoint.trim() : '';
       ensureBridgeInjected()
         .then((ready) => {
           if (!ready) {
@@ -623,7 +626,9 @@
           postToBridge('PATCH_VISIBILITY', {
             requestId: message.requestId,
             convoId: message.convoId,
-            makeVisible: Boolean(message.visible)
+            makeVisible: desiredVisibility,
+            visible: desiredVisibility,
+            endpoint: endpointHint || undefined
           });
           sendResponse({ ok: true });
         })

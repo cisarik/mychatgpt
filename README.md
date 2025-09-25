@@ -46,6 +46,13 @@ MyChatGPT keeps your ChatGPT account tidy while storing short “search-like” 
 - Live settings expose a host whitelist, per-minute rate limiter, and per-batch limit that is additionally gated by `DELETE_LIMIT`. The Debug card loads candidates from the DRY-RUN plan into a checkbox table; you must explicitly confirm the batch in a modal and acknowledge the final warning before any PATCH fires.
 - Successful items are logged with `patch_ok`, appended to `soft_delete_confirmed_history`, and summarized under **Last LIVE batch**. Blocked items surface reason codes such as `patch_blocked_by_whitelist`, `patch_blocked_by_rate_limit`, or `patch_bridge_timeout` so you know why they stayed local.
 
+## Undo (make visible:true) & Audit trail
+- Toggle **Settings → Safety → SHOW_UNDO_TOOLS** if you want to hide or reveal the new Undo card. The queue accepts manual entries (conversation ID, optional URL/title) and can auto-fill from the last 24 hours of `soft_delete_confirmed_history` via **Load recent hidden**.
+- Undo batches reuse the same guard rails as Live hides: `LIST_ONLY=false`, `DRY_RUN=false`, `LIVE_MODE_ENABLED=true`, whitelist checks, rate limiting, and the dedicated `UNDO_BATCH_LIMIT`. Every request sends `{is_visible:true}` through the page bridge and records the outcome locally.
+- Each Undo or hide action writes to the local audit log (`chrome.storage.local.audit_log`). The Debug → **Audit trail** card tails the last _N_ entries, filters by op/reason/status, and exports CSV/JSON with timestamps, URLs, status codes, and reason codes.
+- Add contextual notes directly from the Live/Undo result lists via **Add to Audit notes**. Notes persist in the audit log and export payloads so you can annotate why a change happened.
+- The popup now shows a 🕒 badge with the count of hidden conversations in the last 24 hours; clicking it jumps straight to Debug → Audit trail filtered to `op=hide` for quick review.
+
 ### Live Mode troubleshooting
 - `no_injection`: force-inject the content script from Debug or reload the chat tab; the bridge only loads on `https://chatgpt.com` in the top frame.
 - `patch_bridge_timeout`: ensure at least one active chatgpt.com tab is open and focused; the bridge fetch relies on the page context.

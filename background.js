@@ -9,6 +9,7 @@ import {
   minutesSince,
   ReasonCodes,
   buildPatchHttpReason,
+  buildUndoHttpReason,
   getPatchEndpoint,
   createStopwatch
 } from './utils.js';
@@ -37,7 +38,10 @@ const DEFAULT_SETTINGS = {
   LIVE_WHITELIST_HOSTS: ['chatgpt.com'],
   LIVE_PATCH_BATCH_LIMIT: 5,
   LIVE_PATCH_RATE_LIMIT_PER_MIN: 10,
-  LIVE_REQUIRE_EXPLICIT_CONFIRM: true
+  LIVE_REQUIRE_EXPLICIT_CONFIRM: true,
+  AUDIT_LOG_LIMIT: 1000,
+  UNDO_BATCH_LIMIT: 5,
+  SHOW_UNDO_TOOLS: true
 };
 
 const cooldownMemory = {
@@ -58,6 +62,10 @@ const REPORT_STORAGE_KEY = 'would_delete_report';
 const SOFT_DELETE_PLAN_KEY = 'soft_delete_plan';
 const SOFT_DELETE_CONFIRMED_HISTORY_KEY = 'soft_delete_confirmed_history';
 const SOFT_DELETE_CONFIRMED_HISTORY_LIMIT = 200;
+const AUDIT_LOG_STORAGE_KEY = 'audit_log';
+
+const DEFAULT_AUDIT_LIMIT = DEFAULT_SETTINGS.AUDIT_LOG_LIMIT;
+const DEFAULT_UNDO_BATCH_LIMIT = DEFAULT_SETTINGS.UNDO_BATCH_LIMIT;
 
 const BRIDGE_READY_TIMEOUT_MS = 2000;
 const BRIDGE_REQUEST_TIMEOUT_MS = 8000;
@@ -178,6 +186,13 @@ function createBridgeRequestId() {
   return `bridge-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function createAuditId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `audit-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 function awaitBridgeResponse(requestId, timeoutMs = BRIDGE_REQUEST_TIMEOUT_MS) {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -234,7 +249,8 @@ async function dispatchBridgePatch({ tabId, convoId, visible }) {
       type: 'PATCH_VISIBILITY',
       requestId,
       convoId,
-      visible
+      visible,
+      endpoint: getPatchEndpoint(convoId)
     });
   } catch (error) {
     settleBridgeResponse(requestId, {
@@ -245,6 +261,117 @@ async function dispatchBridgePatch({ tabId, convoId, visible }) {
     throw error;
   }
   return waitPromise;
+}
+
+function resolveAuditLimit(settings) {
+  const raw = Number.parseInt(settings?.AUDIT_LOG_LIMIT, 10);
+  if (!Number.isFinite(raw)) {
+    return DEFAULT_AUDIT_LIMIT;
+  }
+  return Math.max(1, Math.floor(raw));
+}
+
+function resolveUndoBatchLimit(settings) {
+  const raw = Number.parseInt(settings?.UNDO_BATCH_LIMIT, 10);
+  if (!Number.isFinite(raw)) {
+    return DEFAULT_UNDO_BATCH_LIMIT;
+  }
+  return Math.max(1, Math.floor(raw));
+}
+
+function sanitizeAuditNote(note) {
+  if (typeof note !== 'string') {
+    return '';
+  }
+  const trimmed = note.trim();
+  if (!trimmed) {
+    return '';
+  }
+  return trimmed.slice(0, 500);
+}
+
+function normalizeAuditEntry(entry) {
+  const now = Date.now();
+  const id = entry?.id || createAuditId();
+  const ts = Number.isFinite(entry?.ts) ? entry.ts : now;
+  const op = entry?.op === 'undo' ? 'undo' : 'hide';
+  const actor = entry?.actor === 'auto' ? 'auto' : 'user';
+  const request = entry?.request && typeof entry.request === 'object'
+    ? {
+        endpoint: typeof entry.request.endpoint === 'string' ? entry.request.endpoint : '',
+        body: entry.request.body ?? null
+      }
+    : { endpoint: '', body: null };
+  const response = entry?.response && typeof entry.response === 'object'
+    ? {
+        status: Number.isFinite(entry.response.status)
+          ? Math.floor(entry.response.status)
+          : entry.response.status === null
+          ? null
+          : Number.isFinite(Number.parseInt(entry.response.status, 10))
+          ? Math.floor(Number.parseInt(entry.response.status, 10))
+          : null,
+        ok: entry.response.ok === true
+      }
+    : { status: null, ok: false };
+  const normalized = {
+    id,
+    ts,
+    op,
+    actor,
+    convoId: typeof entry?.convoId === 'string' ? entry.convoId : '',
+    url: typeof entry?.url === 'string' ? entry.url : '',
+    title: typeof entry?.title === 'string' ? entry.title : '',
+    request,
+    response,
+    reasonCode: typeof entry?.reasonCode === 'string' ? entry.reasonCode : '',
+    note: sanitizeAuditNote(entry?.note)
+  };
+  return normalized;
+}
+
+async function auditAppend(entry, { settings } = {}) {
+  if (!entry) {
+    return null;
+  }
+  const normalized = normalizeAuditEntry(entry);
+  const stored = await chrome.storage.local.get([AUDIT_LOG_STORAGE_KEY]);
+  const existing = Array.isArray(stored[AUDIT_LOG_STORAGE_KEY]) ? stored[AUDIT_LOG_STORAGE_KEY] : [];
+  const limit = resolveAuditLimit(settings);
+  const updated = [...existing, normalized].slice(-limit);
+  await chrome.storage.local.set({ [AUDIT_LOG_STORAGE_KEY]: updated });
+  return normalized;
+}
+
+async function auditTail({ limit = 100 } = {}) {
+  const stored = await chrome.storage.local.get([AUDIT_LOG_STORAGE_KEY]);
+  const existing = Array.isArray(stored[AUDIT_LOG_STORAGE_KEY]) ? stored[AUDIT_LOG_STORAGE_KEY] : [];
+  if (!Number.isFinite(limit) || limit <= 0) {
+    return existing.slice();
+  }
+  return existing.slice(-Math.floor(limit));
+}
+
+async function auditClear() {
+  await chrome.storage.local.set({ [AUDIT_LOG_STORAGE_KEY]: [] });
+  return [];
+}
+
+async function auditAddNote({ id, note }) {
+  if (!id) {
+    return null;
+  }
+  const stored = await chrome.storage.local.get([AUDIT_LOG_STORAGE_KEY]);
+  const existing = Array.isArray(stored[AUDIT_LOG_STORAGE_KEY]) ? stored[AUDIT_LOG_STORAGE_KEY] : [];
+  const index = existing.findIndex((entry) => entry?.id === id);
+  if (index === -1) {
+    return null;
+  }
+  const updated = existing.slice();
+  const entry = { ...updated[index], note: sanitizeAuditNote(note) };
+  updated[index] = entry;
+  await chrome.storage.local.set({ [AUDIT_LOG_STORAGE_KEY]: updated });
+  return entry;
 }
 
 async function dispatchBridgeConnectivity({ tabId }) {
@@ -595,6 +722,39 @@ async function appendConfirmedHistory(items) {
   return updated;
 }
 
+async function loadConfirmedHistory() {
+  const stored = await chrome.storage.local.get([SOFT_DELETE_CONFIRMED_HISTORY_KEY]);
+  const history = Array.isArray(stored[SOFT_DELETE_CONFIRMED_HISTORY_KEY])
+    ? stored[SOFT_DELETE_CONFIRMED_HISTORY_KEY]
+    : [];
+  return history.slice();
+}
+
+function isHideHistoryEntry(entry) {
+  return Boolean(entry?.patch?.is_visible === false);
+}
+
+async function getRecentHidden({ limit = 10, windowMs = 86400000 } = {}) {
+  const history = await loadConfirmedHistory();
+  const cutoff = Date.now() - windowMs;
+  return history
+    .filter((entry) => Number.isFinite(entry?.ts) && entry.ts >= cutoff && isHideHistoryEntry(entry))
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0))
+    .slice(0, limit)
+    .map((entry) => ({
+      ts: entry.ts,
+      convoId: entry?.convoId || '',
+      url: entry?.url || '',
+      title: entry?.title || ''
+    }));
+}
+
+async function countRecentHidden({ windowMs = 86400000 } = {}) {
+  const history = await loadConfirmedHistory();
+  const cutoff = Date.now() - windowMs;
+  return history.filter((entry) => Number.isFinite(entry?.ts) && entry.ts >= cutoff && isHideHistoryEntry(entry)).length;
+}
+
 async function updateWouldDeleteReport({ url, meta, reasons, qualifies, snapshotId, settings }) {
   try {
     const limit = settings?.REPORT_LIMIT || 200;
@@ -689,9 +849,18 @@ function normalizeSettings(raw) {
   merged.LIVE_PATCH_RATE_LIMIT_PER_MIN = Number.isFinite(parsedRate)
     ? Math.max(0, Math.floor(parsedRate))
     : DEFAULT_SETTINGS.LIVE_PATCH_RATE_LIMIT_PER_MIN;
+  const parsedAudit = Number.parseInt(merged.AUDIT_LOG_LIMIT, 10);
+  merged.AUDIT_LOG_LIMIT = Number.isFinite(parsedAudit)
+    ? Math.max(1, Math.floor(parsedAudit))
+    : DEFAULT_SETTINGS.AUDIT_LOG_LIMIT;
+  const parsedUndoBatch = Number.parseInt(merged.UNDO_BATCH_LIMIT, 10);
+  merged.UNDO_BATCH_LIMIT = Number.isFinite(parsedUndoBatch)
+    ? Math.max(1, Math.floor(parsedUndoBatch))
+    : DEFAULT_SETTINGS.UNDO_BATCH_LIMIT;
   merged.LIVE_MODE_ENABLED = Boolean(merged.LIVE_MODE_ENABLED);
   merged.LIVE_REQUIRE_EXPLICIT_CONFIRM = merged.LIVE_REQUIRE_EXPLICIT_CONFIRM !== false;
   merged.INCLUDE_BACKUP_SNAPSHOT_ID = Boolean(merged.INCLUDE_BACKUP_SNAPSHOT_ID);
+  merged.SHOW_UNDO_TOOLS = merged.SHOW_UNDO_TOOLS !== false;
   return merged;
 }
 
@@ -869,43 +1038,83 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const results = [];
         const historyEntries = [];
         let dispatched = 0;
+        const actor = message?.actor === 'auto' ? 'auto' : 'user';
+
+        const recordOutcome = async ({ result, auditEntry }) => {
+          results.push(result);
+          try {
+            const storedAudit = await auditAppend(auditEntry, { settings });
+            if (storedAudit?.id) {
+              result.auditId = storedAudit.id;
+            }
+          } catch (error) {
+            await runnerWarn('Audit append failed', withReason('audit_append_failed', { error: error?.message || 'unknown' }));
+          }
+        };
+
         for (const item of rawItems) {
           const convoId = (item?.convoId || '').trim();
           const url = item?.url || '';
           const title = item?.title || '';
           const key = convoId || url;
-          if (!key || seen.has(key)) {
-            results.push({
-              convoId,
-              url,
-              title,
-              ok: false,
-              reasonCode: seen.has(key) ? ReasonCodes.PATCH_BLOCKED_BY_DUPLICATE : ReasonCodes.PATCH_BLOCKED_BY_SAFETY
-            });
-            seen.add(key);
+          const endpoint = getPatchEndpoint(convoId) || '';
+          const auditEntry = {
+            ts: Date.now(),
+            op: 'hide',
+            actor,
+            convoId,
+            url,
+            title,
+            request: { endpoint, body: { is_visible: false } },
+            response: { status: null, ok: false },
+            reasonCode: ''
+          };
+          const result = { convoId, url, title, ok: false };
+
+          if (!key) {
+            auditEntry.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_SAFETY;
+            result.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_SAFETY;
+            await recordOutcome({ result, auditEntry });
+            continue;
+          }
+          if (seen.has(key)) {
+            auditEntry.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_DUPLICATE;
+            result.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_DUPLICATE;
+            await recordOutcome({ result, auditEntry });
             continue;
           }
           seen.add(key);
           if (dispatched >= batchLimit) {
-            results.push({ convoId, url, title, ok: false, reasonCode: ReasonCodes.PATCH_BLOCKED_BY_BATCH_LIMIT });
+            auditEntry.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_BATCH_LIMIT;
+            result.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_BATCH_LIMIT;
+            await recordOutcome({ result, auditEntry });
             continue;
           }
           if (dispatched >= deleteLimit) {
-            results.push({ convoId, url, title, ok: false, reasonCode: ReasonCodes.PATCH_BLOCKED_BY_DELETE_LIMIT });
+            auditEntry.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_DELETE_LIMIT;
+            result.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_DELETE_LIMIT;
+            await recordOutcome({ result, auditEntry });
             continue;
           }
           if (!hostWhitelisted(url, settings)) {
-            results.push({ convoId, url, title, ok: false, reasonCode: ReasonCodes.PATCH_BLOCKED_BY_WHITELIST });
+            auditEntry.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_WHITELIST;
+            result.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_WHITELIST;
+            await recordOutcome({ result, auditEntry });
             continue;
           }
           if (!convoId) {
-            results.push({ convoId, url, title, ok: false, reasonCode: ReasonCodes.PATCH_BLOCKED_BY_SAFETY });
+            auditEntry.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_SAFETY;
+            result.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_SAFETY;
+            await recordOutcome({ result, auditEntry });
             continue;
           }
           if (!consumeRateToken(settings)) {
-            results.push({ convoId, url, title, ok: false, reasonCode: ReasonCodes.PATCH_BLOCKED_BY_RATE_LIMIT });
+            auditEntry.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_RATE_LIMIT;
+            result.reasonCode = ReasonCodes.PATCH_BLOCKED_BY_RATE_LIMIT;
+            await recordOutcome({ result, auditEntry });
             continue;
           }
+
           dispatched += 1;
           let patchResult;
           try {
@@ -917,8 +1126,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               error: error?.message || 'dispatch-failed'
             };
           }
+          auditEntry.response.status = patchResult?.status ?? null;
+          auditEntry.response.ok = Boolean(patchResult?.ok);
           if (patchResult?.ok) {
-            results.push({ convoId, url, title, ok: true, reasonCode: ReasonCodes.PATCH_OK, status: patchResult.status ?? null });
+            auditEntry.reasonCode = ReasonCodes.PATCH_OK;
+            result.ok = true;
+            result.reasonCode = ReasonCodes.PATCH_OK;
+            result.status = patchResult.status ?? null;
             historyEntries.push({
               ts: Date.now(),
               convoId,
@@ -928,29 +1142,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               result: 'ok'
             });
           } else if (patchResult?.reasonCode === ReasonCodes.PATCH_BRIDGE_TIMEOUT) {
-            results.push({ convoId, url, title, ok: false, reasonCode: ReasonCodes.PATCH_BRIDGE_TIMEOUT });
+            auditEntry.reasonCode = ReasonCodes.PATCH_BRIDGE_TIMEOUT;
+            result.reasonCode = ReasonCodes.PATCH_BRIDGE_TIMEOUT;
           } else if (patchResult?.status) {
             const reason = buildPatchHttpReason(patchResult.status);
-            results.push({
-              convoId,
-              url,
-              title,
-              ok: false,
-              reasonCode: reason,
-              status: patchResult.status,
-              error: patchResult?.error || null
-            });
+            auditEntry.reasonCode = reason;
+            result.reasonCode = reason;
+            result.status = patchResult.status;
+            if (patchResult?.error) {
+              result.error = patchResult.error;
+            }
           } else {
-            results.push({
-              convoId,
-              url,
-              title,
-              ok: false,
-              reasonCode: patchResult?.reasonCode || ReasonCodes.PATCH_BRIDGE_ERROR,
-              error: patchResult?.error || null
-            });
+            const reason = patchResult?.reasonCode || ReasonCodes.PATCH_BRIDGE_ERROR;
+            auditEntry.reasonCode = reason;
+            result.reasonCode = reason;
+            if (patchResult?.error) {
+              result.error = patchResult.error;
+            }
           }
+          await recordOutcome({ result, auditEntry });
         }
+
         if (historyEntries.length) {
           await appendConfirmedHistory(historyEntries);
         }
@@ -964,6 +1176,278 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } catch (error) {
         await runnerWarn('LIVE_EXECUTE_BATCH failed', withReason('live_execute_failed', { error: error?.message }));
         sendResponse({ ok: false, reason: error?.message || 'live-execute-failed' });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === 'LIVE_EXECUTE_UNDO_BATCH') {
+    (async () => {
+      try {
+        const settings = await getSettings();
+        if (!isLiveModeArmed(settings)) {
+          await runnerWarn('Undo batch blocked by safety guard', withReason(ReasonCodes.UNDO_BLOCKED_BY_SAFETY));
+          sendResponse({ ok: false, reason: ReasonCodes.UNDO_BLOCKED_BY_SAFETY });
+          return;
+        }
+        if (settings.LIVE_REQUIRE_EXPLICIT_CONFIRM && !message?.confirmed) {
+          await runnerWarn('Undo batch blocked: confirmation missing', withReason(ReasonCodes.UNDO_BLOCKED_BY_SAFETY));
+          sendResponse({ ok: false, reason: ReasonCodes.UNDO_BLOCKED_BY_SAFETY });
+          return;
+        }
+        const rawItems = Array.isArray(message?.items) ? message.items : [];
+        if (!rawItems.length) {
+          sendResponse({ ok: false, reason: 'no-items' });
+          return;
+        }
+        const tab = await findLiveChatTab();
+        if (!tab) {
+          sendResponse({ ok: false, reason: 'no_active_chat_tab_for_patch' });
+          return;
+        }
+        await injectContentScriptIfNeeded(tab.id);
+        const bridgeReady = await ensureBridgeReadyInTab(tab.id);
+        if (!bridgeReady) {
+          sendResponse({ ok: false, reason: 'bridge_injection_failed' });
+          return;
+        }
+        const batchLimit = resolveUndoBatchLimit(settings);
+        const seen = new Set();
+        const results = [];
+        const historyEntries = [];
+        let dispatched = 0;
+        const actor = message?.actor === 'auto' ? 'auto' : 'user';
+
+        const recordOutcome = async ({ result, auditEntry }) => {
+          results.push(result);
+          try {
+            const storedAudit = await auditAppend(auditEntry, { settings });
+            if (storedAudit?.id) {
+              result.auditId = storedAudit.id;
+            }
+          } catch (error) {
+            await runnerWarn('Audit append failed', withReason('audit_append_failed', { error: error?.message || 'unknown' }));
+          }
+        };
+
+        for (const item of rawItems) {
+          const convoId = (item?.convoId || '').trim();
+          const url = item?.url || '';
+          const title = item?.title || '';
+          const key = convoId || url;
+          const endpoint = getPatchEndpoint(convoId) || '';
+          const auditEntry = {
+            ts: Date.now(),
+            op: 'undo',
+            actor,
+            convoId,
+            url,
+            title,
+            request: { endpoint, body: { is_visible: true } },
+            response: { status: null, ok: false },
+            reasonCode: ''
+          };
+          const result = { convoId, url, title, ok: false };
+
+          if (!key) {
+            auditEntry.reasonCode = ReasonCodes.UNDO_BLOCKED_BY_SAFETY;
+            result.reasonCode = ReasonCodes.UNDO_BLOCKED_BY_SAFETY;
+            await recordOutcome({ result, auditEntry });
+            continue;
+          }
+          if (seen.has(key)) {
+            auditEntry.reasonCode = ReasonCodes.UNDO_BLOCKED_BY_DUPLICATE;
+            result.reasonCode = ReasonCodes.UNDO_BLOCKED_BY_DUPLICATE;
+            await recordOutcome({ result, auditEntry });
+            continue;
+          }
+          seen.add(key);
+          if (dispatched >= batchLimit) {
+            auditEntry.reasonCode = ReasonCodes.UNDO_BLOCKED_BY_BATCH_LIMIT;
+            result.reasonCode = ReasonCodes.UNDO_BLOCKED_BY_BATCH_LIMIT;
+            await recordOutcome({ result, auditEntry });
+            continue;
+          }
+          if (!hostWhitelisted(url, settings)) {
+            auditEntry.reasonCode = ReasonCodes.UNDO_BLOCKED_BY_WHITELIST;
+            result.reasonCode = ReasonCodes.UNDO_BLOCKED_BY_WHITELIST;
+            await recordOutcome({ result, auditEntry });
+            continue;
+          }
+          if (!convoId) {
+            auditEntry.reasonCode = ReasonCodes.UNDO_BLOCKED_BY_SAFETY;
+            result.reasonCode = ReasonCodes.UNDO_BLOCKED_BY_SAFETY;
+            await recordOutcome({ result, auditEntry });
+            continue;
+          }
+          if (!consumeRateToken(settings)) {
+            auditEntry.reasonCode = ReasonCodes.UNDO_BLOCKED_BY_RATE_LIMIT;
+            result.reasonCode = ReasonCodes.UNDO_BLOCKED_BY_RATE_LIMIT;
+            await recordOutcome({ result, auditEntry });
+            continue;
+          }
+
+          dispatched += 1;
+          let patchResult;
+          try {
+            patchResult = await dispatchBridgePatch({ tabId: tab.id, convoId, visible: true });
+          } catch (error) {
+            patchResult = {
+              ok: false,
+              reasonCode: ReasonCodes.PATCH_BRIDGE_ERROR,
+              error: error?.message || 'dispatch-failed'
+            };
+          }
+          auditEntry.response.status = patchResult?.status ?? null;
+          auditEntry.response.ok = Boolean(patchResult?.ok);
+          if (patchResult?.ok) {
+            auditEntry.reasonCode = ReasonCodes.UNDO_OK;
+            result.ok = true;
+            result.reasonCode = ReasonCodes.UNDO_OK;
+            result.status = patchResult.status ?? null;
+            historyEntries.push({
+              ts: Date.now(),
+              convoId,
+              url,
+              title,
+              after: { is_visible: true },
+              result: 'ok'
+            });
+          } else if (patchResult?.reasonCode === ReasonCodes.PATCH_BRIDGE_TIMEOUT) {
+            auditEntry.reasonCode = ReasonCodes.UNDO_BRIDGE_TIMEOUT;
+            result.reasonCode = ReasonCodes.UNDO_BRIDGE_TIMEOUT;
+          } else if (patchResult?.reasonCode === ReasonCodes.PATCH_BRIDGE_ERROR) {
+            auditEntry.reasonCode = ReasonCodes.UNDO_BRIDGE_ERROR;
+            result.reasonCode = ReasonCodes.UNDO_BRIDGE_ERROR;
+            if (patchResult?.error) {
+              result.error = patchResult.error;
+            }
+          } else if (patchResult?.status) {
+            const reason = buildUndoHttpReason(patchResult.status);
+            auditEntry.reasonCode = reason;
+            result.reasonCode = reason;
+            result.status = patchResult.status;
+            if (patchResult?.error) {
+              result.error = patchResult.error;
+            }
+          } else {
+            const rawReason = typeof patchResult?.reasonCode === 'string' ? patchResult.reasonCode : '';
+            const reason = rawReason && rawReason.startsWith('undo_') ? rawReason : ReasonCodes.UNDO_BRIDGE_ERROR;
+            auditEntry.reasonCode = reason;
+            result.reasonCode = reason;
+            if (patchResult?.error) {
+              result.error = patchResult.error;
+            }
+          }
+          await recordOutcome({ result, auditEntry });
+        }
+
+        if (historyEntries.length) {
+          await appendConfirmedHistory(historyEntries);
+        }
+        await runnerInfo('Live undo batch completed', withReason(ReasonCodes.UNDO_BATCH_COMPLETED, {
+          requested: rawItems.length,
+          dispatched,
+          restored: historyEntries.length,
+          tabId: tab.id
+        }));
+        sendResponse({ ok: true, results, meta: { requested: rawItems.length, dispatched } });
+      } catch (error) {
+        await runnerWarn('LIVE_EXECUTE_UNDO_BATCH failed', withReason('undo_execute_failed', { error: error?.message }));
+        sendResponse({ ok: false, reason: error?.message || 'undo-execute-failed' });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === 'AUDIT_TAIL') {
+    (async () => {
+      try {
+        const limitRaw = Number.parseInt(message?.limit, 10);
+        const entries = await auditTail({ limit: Number.isFinite(limitRaw) ? limitRaw : undefined });
+        sendResponse({ ok: true, entries });
+      } catch (error) {
+        await runnerWarn('AUDIT_TAIL failed', withReason('audit_tail_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message || 'audit-tail-failed' });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === 'AUDIT_CLEAR') {
+    (async () => {
+      try {
+        await auditClear();
+        sendResponse({ ok: true });
+      } catch (error) {
+        await runnerWarn('AUDIT_CLEAR failed', withReason('audit_clear_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message || 'audit-clear-failed' });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === 'AUDIT_EXPORT') {
+    (async () => {
+      try {
+        const entries = await auditTail({ limit: 0 });
+        sendResponse({ ok: true, entries });
+      } catch (error) {
+        await runnerWarn('AUDIT_EXPORT failed', withReason('audit_export_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message || 'audit-export-failed' });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === 'AUDIT_ADD_NOTE') {
+    (async () => {
+      try {
+        const updated = await auditAddNote({ id: message?.id, note: message?.note });
+        if (!updated) {
+          sendResponse({ ok: false, error: 'not-found' });
+          return;
+        }
+        sendResponse({ ok: true, entry: updated });
+      } catch (error) {
+        await runnerWarn('AUDIT_ADD_NOTE failed', withReason('audit_note_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message || 'audit-note-failed' });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === 'UNDO_GET_RECENT_HIDDEN') {
+    (async () => {
+      try {
+        const limitRaw = Number.parseInt(message?.limit, 10);
+        const windowMs = Number.isFinite(message?.windowMs)
+          ? Math.max(0, Math.floor(message.windowMs))
+          : 86400000;
+        const entries = await getRecentHidden({
+          limit: Number.isFinite(limitRaw) ? Math.max(1, limitRaw) : 10,
+          windowMs
+        });
+        sendResponse({ ok: true, entries });
+      } catch (error) {
+        await runnerWarn('UNDO_GET_RECENT_HIDDEN failed', withReason('undo_recent_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message || 'undo-recent-failed' });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === 'UNDO_RECENT_HIDDEN_COUNT') {
+    (async () => {
+      try {
+        const windowMs = Number.isFinite(message?.windowMs)
+          ? Math.max(0, Math.floor(message.windowMs))
+          : 86400000;
+        const count = await countRecentHidden({ windowMs });
+        sendResponse({ ok: true, count });
+      } catch (error) {
+        await runnerWarn('UNDO_RECENT_HIDDEN_COUNT failed', withReason('undo_recent_count_failed', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message || 'undo-recent-count-failed' });
       }
     })();
     return true;

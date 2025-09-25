@@ -32,6 +32,9 @@ const tabButtons = Array.from(document.querySelectorAll('.tab-button'));
 const toastHost = createToastHost();
 const badgeButton = document.getElementById('would-delete-badge');
 const badgeCount = badgeButton?.querySelector('[data-role="badge-count"]');
+const recentHiddenButton = document.getElementById('recent-hidden-badge');
+const recentHiddenCount = recentHiddenButton?.querySelector('[data-role="recent-hidden-count"]');
+const CONFIRMED_HISTORY_KEY = 'soft_delete_confirmed_history';
 
 let activeTab = null;
 
@@ -41,7 +44,9 @@ let activeTab = null;
   bindNav();
   bindSearch();
   bindBadge();
+  bindRecentHiddenBadge();
   await syncBadge();
+  await syncRecentHiddenBadge();
   await switchTab('searches');
 })();
 
@@ -101,6 +106,17 @@ function bindBadge() {
   });
 }
 
+function bindRecentHiddenBadge() {
+  if (!recentHiddenButton) {
+    return;
+  }
+  recentHiddenButton.addEventListener('click', async () => {
+    await switchTab('debug');
+    const handler = handlersCache.get('debug');
+    handler?.focusAuditTrail?.({ op: 'hide' });
+  });
+}
+
 async function syncBadge() {
   try {
     const response = await chrome.runtime.sendMessage({ type: 'PLAN_GET' });
@@ -118,6 +134,33 @@ async function syncBadge() {
   });
 }
 
+async function syncRecentHiddenBadge() {
+  if (!recentHiddenButton || !recentHiddenCount) {
+    return;
+  }
+  await refreshRecentHiddenCount();
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes[CONFIRMED_HISTORY_KEY]) {
+      return;
+    }
+    refreshRecentHiddenCount();
+  });
+}
+
+async function refreshRecentHiddenCount() {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'UNDO_RECENT_HIDDEN_COUNT',
+      windowMs: 86400000
+    });
+    if (response?.ok) {
+      applyRecentHiddenCount(response.count);
+    }
+  } catch (error) {
+    console.error(error);
+  }
+}
+
 /**
  * Slovensky: Aktualizuje odznak s počtom plánovaných DRY-RUN zásahov.
  */
@@ -128,6 +171,15 @@ function applyBadge(plan) {
   const normalized = normalizePlan(plan);
   badgeCount.textContent = String(normalized.totals.planned);
   badgeButton.hidden = normalized.totals.planned === 0;
+}
+
+function applyRecentHiddenCount(count) {
+  if (!recentHiddenButton || !recentHiddenCount) {
+    return;
+  }
+  const value = Number.isFinite(count) ? Math.max(0, count) : 0;
+  recentHiddenCount.textContent = String(value);
+  recentHiddenButton.hidden = value === 0;
 }
 
 function normalizePlan(plan) {

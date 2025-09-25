@@ -24,7 +24,10 @@ const DEFAULT_SETTINGS = {
   LIVE_WHITELIST_HOSTS: ['chatgpt.com'],
   LIVE_PATCH_BATCH_LIMIT: 5,
   LIVE_PATCH_RATE_LIMIT_PER_MIN: 10,
-  LIVE_REQUIRE_EXPLICIT_CONFIRM: true
+  LIVE_REQUIRE_EXPLICIT_CONFIRM: true,
+  AUDIT_LOG_LIMIT: 1000,
+  UNDO_BATCH_LIMIT: 5,
+  SHOW_UNDO_TOOLS: true
 };
 
 const FIELD_DEFS = [
@@ -52,7 +55,9 @@ const FIELD_DEFS = [
     min: 0,
     group: 'safety'
   },
+  { key: 'UNDO_BATCH_LIMIT', label: 'UNDO_BATCH_LIMIT', type: 'number', min: 1, group: 'safety' },
   { key: 'LIVE_WHITELIST_HOSTS', label: 'LIVE_WHITELIST_HOSTS', type: 'textarea', group: 'safety' },
+  { key: 'SHOW_UNDO_TOOLS', label: 'SHOW_UNDO_TOOLS', type: 'checkbox', group: 'safety' },
   { key: 'AUTO_SCAN', label: 'AUTO_SCAN', type: 'checkbox', group: 'automation' },
   { key: 'COOLDOWN_MIN', label: 'COOLDOWN_MIN', type: 'number', min: 0, group: 'automation' },
   { key: 'MAX_MESSAGES', label: 'MAX_MESSAGES', type: 'number', min: 1, group: 'heuristics' },
@@ -120,8 +125,17 @@ function normalizeSettings(raw) {
   merged.LIVE_PATCH_RATE_LIMIT_PER_MIN = Number.isFinite(parsedRate)
     ? Math.max(0, Math.floor(parsedRate))
     : DEFAULT_SETTINGS.LIVE_PATCH_RATE_LIMIT_PER_MIN;
+  const parsedAudit = Number.parseInt(merged.AUDIT_LOG_LIMIT, 10);
+  merged.AUDIT_LOG_LIMIT = Number.isFinite(parsedAudit)
+    ? Math.max(1, Math.floor(parsedAudit))
+    : DEFAULT_SETTINGS.AUDIT_LOG_LIMIT;
+  const parsedUndo = Number.parseInt(merged.UNDO_BATCH_LIMIT, 10);
+  merged.UNDO_BATCH_LIMIT = Number.isFinite(parsedUndo)
+    ? Math.max(1, Math.floor(parsedUndo))
+    : DEFAULT_SETTINGS.UNDO_BATCH_LIMIT;
   merged.LIVE_MODE_ENABLED = Boolean(merged.LIVE_MODE_ENABLED);
   merged.LIVE_REQUIRE_EXPLICIT_CONFIRM = merged.LIVE_REQUIRE_EXPLICIT_CONFIRM !== false;
+  merged.SHOW_UNDO_TOOLS = merged.SHOW_UNDO_TOOLS !== false;
   merged.INCLUDE_BACKUP_SNAPSHOT_ID = Boolean(merged.INCLUDE_BACKUP_SNAPSHOT_ID);
   return merged;
 }

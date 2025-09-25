@@ -34,7 +34,7 @@
   }
 
   async function handlePatchVisibility(payload) {
-    const { convoId, makeVisible, requestId } = payload || {};
+    const { convoId, makeVisible, visible, requestId, endpoint } = payload || {};
     const result = {
       requestId,
       convoId: typeof convoId === 'string' ? convoId : '',
@@ -50,8 +50,16 @@
       post(BRIDGE_PATCH_RESULT, result);
       return;
     }
-    const candidates = buildEndpointCandidates(result.convoId);
-    const desiredVisibility = Boolean(makeVisible);
+    const candidates = [];
+    if (typeof endpoint === 'string' && endpoint.trim()) {
+      candidates.push(endpoint.trim());
+    }
+    buildEndpointCandidates(result.convoId).forEach((candidate) => {
+      if (candidate && !candidates.includes(candidate)) {
+        candidates.push(candidate);
+      }
+    });
+    const desiredVisibility = typeof visible === 'boolean' ? visible : Boolean(makeVisible);
     const body = JSON.stringify({ is_visible: desiredVisibility });
     for (const candidate of candidates) {
       if (!candidate || /\s/.test(candidate)) {
