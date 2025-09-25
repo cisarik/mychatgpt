@@ -228,6 +228,24 @@ export function minutesSince(input) {
   return (Date.now() - timestamp) / 60000;
 }
 
+export async function measureAsync(fn) {
+  if (typeof fn !== 'function') {
+    throw new TypeError('measureAsync requires a function');
+  }
+  const usePerf = typeof performance !== 'undefined' && typeof performance.now === 'function';
+  const start = usePerf ? performance.now() : Date.now();
+  const computeElapsed = () => {
+    const end = usePerf ? performance.now() : Date.now();
+    return end - start;
+  };
+  try {
+    const value = await fn();
+    return { elapsedMs: computeElapsed(), value, error: null };
+  } catch (error) {
+    return { elapsedMs: computeElapsed(), value: undefined, error };
+  }
+}
+
 export function uuidv4() {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -398,6 +416,8 @@ export const ReasonCodes = Object.freeze({
   PATCH_BLOCKED_BY_DELETE_LIMIT: 'patch_blocked_by_delete_limit',
   PATCH_BRIDGE_TIMEOUT: 'patch_bridge_timeout',
   PATCH_BRIDGE_ERROR: 'patch_bridge_error',
+  ENDPOINT_NOT_SUPPORTED: 'endpoint_not_supported',
+  AUTH_MISSING: 'auth_missing',
   PATCH_HTTP_ERROR_PREFIX: 'patch_http_error_',
   UNDO_OK: 'undo_ok',
   UNDO_BLOCKED_BY_SAFETY: 'undo_blocked_by_safety',

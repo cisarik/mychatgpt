@@ -11,7 +11,8 @@ import {
   buildPatchHttpReason,
   buildUndoHttpReason,
   getPatchEndpoint,
-  createStopwatch
+  createStopwatch,
+  measureAsync
 } from './utils.js';
 
 const SETTINGS_KEY = 'settings';
@@ -77,6 +78,34 @@ const liveRateLimiter = {
   tokens: 0,
   capacity: DEFAULT_SETTINGS.LIVE_PATCH_RATE_LIMIT_PER_MIN
 };
+
+const PATCH_DIAG_CACHE_LIMIT = 50;
+const patchDiagCache = new Map();
+
+function rememberPatchDiag(diag) {
+  const requestId = typeof diag?.requestId === 'string' ? diag.requestId : null;
+  if (!requestId) {
+    return;
+  }
+  if (patchDiagCache.size >= PATCH_DIAG_CACHE_LIMIT) {
+    const [firstKey] = patchDiagCache.keys();
+    if (firstKey) {
+      patchDiagCache.delete(firstKey);
+    }
+  }
+  patchDiagCache.set(requestId, diag);
+}
+
+function consumePatchDiag(requestId) {
+  if (!requestId) {
+    return null;
+  }
+  const diag = patchDiagCache.get(requestId) || null;
+  if (requestId) {
+    patchDiagCache.delete(requestId);
+  }
+  return diag;
+}
 
 const runnerTrace = (msg, meta = {}) => logTrace(RUNNER_SCOPE, msg, meta);
 const runnerDebug = (msg, meta = {}) => logDebug(RUNNER_SCOPE, msg, meta);
@@ -203,10 +232,39 @@ function awaitBridgeResponse(requestId, timeoutMs = BRIDGE_REQUEST_TIMEOUT_MS) {
   });
 }
 
+function mergeDiagIntoPayload(payload, diag) {
+  if (!diag || !payload || typeof payload !== 'object') {
+    return payload;
+  }
+  if (!('status' in payload) && Number.isFinite(diag.status)) {
+    payload.status = diag.status;
+  }
+  if (!('method' in payload) && typeof diag.method === 'string') {
+    payload.method = diag.method;
+  }
+  if (!('endpoint' in payload) && typeof diag.endpoint === 'string') {
+    payload.endpoint = diag.endpoint;
+  }
+  if (!('usedAuth' in payload) && typeof diag.usedAuth === 'boolean') {
+    payload.usedAuth = diag.usedAuth;
+  }
+  if (!('reasonCode' in payload) && typeof diag.reason === 'string') {
+    payload.reasonCode = diag.reason;
+  }
+  if (!('tried' in payload) && Array.isArray(diag.tried)) {
+    payload.tried = diag.tried;
+  }
+  return payload;
+}
+
 function settleBridgeResponse(requestId, payload) {
   const pending = liveBridgePending.get(requestId);
   if (!pending) {
     return false;
+  }
+  const diag = consumePatchDiag(requestId);
+  if (diag) {
+    mergeDiagIntoPayload(payload, diag);
   }
   clearTimeout(pending.timer);
   liveBridgePending.delete(requestId);
@@ -251,6 +309,28 @@ async function dispatchBridgePatch({ tabId, convoId, visible }) {
       convoId,
       visible,
       endpoint: getPatchEndpoint(convoId)
+    });
+  } catch (error) {
+    settleBridgeResponse(requestId, {
+      ok: false,
+      reasonCode: ReasonCodes.PATCH_BRIDGE_ERROR,
+      error: error?.message || 'sendMessage-failed'
+    });
+    throw error;
+  }
+  return waitPromise;
+}
+
+async function dispatchBridgeProbe({ tabId, convoId, dryRun, endpoint }) {
+  const requestId = createBridgeRequestId();
+  const waitPromise = awaitBridgeResponse(requestId, BRIDGE_REQUEST_TIMEOUT_MS);
+  try {
+    await sendMessageToTab(tabId, {
+      type: 'PATCH_ENDPOINT_PROBE',
+      requestId,
+      convoId,
+      dryRun: dryRun !== false,
+      endpoint
     });
   } catch (error) {
     settleBridgeResponse(requestId, {
@@ -913,10 +993,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message?.type === 'PATCH_PROBE_RESULT') {
+    if (message?.requestId) {
+      settleBridgeResponse(message.requestId, message.payload || {});
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message?.type === 'BRIDGE_CONNECTIVITY_RESULT') {
     if (message?.requestId) {
       settleBridgeResponse(message.requestId, message.payload || {});
     }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === 'PATCH_DIAG') {
+    rememberPatchDiag(message?.diag || {});
     sendResponse({ ok: true });
     return false;
   }
@@ -946,6 +1040,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           error: error?.message
         }));
         sendResponse({ ok: false, error: error?.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === 'LIVE_ENDPOINT_PROBE') {
+    (async () => {
+      const convoId = typeof message?.convoId === 'string' ? message.convoId.trim() : '';
+      if (!convoId) {
+        sendResponse({ ok: false, error: 'invalid-convo' });
+        return;
+      }
+      try {
+        const settings = await getSettings();
+        const tab = await findLiveChatTab();
+        if (!tab) {
+          sendResponse({ ok: false, error: 'no_active_chat_tab_for_patch' });
+          return;
+        }
+        await injectContentScriptIfNeeded(tab.id);
+        const ready = await ensureBridgeReadyInTab(tab.id);
+        if (!ready) {
+          sendResponse({ ok: false, error: 'bridge_injection_failed' });
+          return;
+        }
+        const dryRun = settings?.DRY_RUN !== false;
+        const endpoint = typeof message?.endpoint === 'string' ? message.endpoint.trim() : undefined;
+        const measurement = await measureAsync(() =>
+          dispatchBridgeProbe({ tabId: tab.id, convoId, dryRun, endpoint })
+        );
+        if (measurement.error) {
+          sendResponse({ ok: false, error: measurement.error?.message || 'probe-failed' });
+          return;
+        }
+        const probeResult = measurement.value && typeof measurement.value === 'object' ? measurement.value : {};
+        if (!Number.isFinite(probeResult.elapsedMs)) {
+          probeResult.elapsedMs = measurement.elapsedMs;
+        }
+        probeResult.totalElapsedMs = measurement.elapsedMs;
+        probeResult.dryRun = dryRun;
+        try {
+          await chrome.storage.local.set({ debug_last_endpoint_probe: { ts: Date.now(), result: probeResult } });
+        } catch (_error) {}
+        sendResponse({ ok: true, result: probeResult });
+      } catch (error) {
+        sendResponse({ ok: false, error: error?.message || 'probe-failed' });
       }
     })();
     return true;
@@ -1125,6 +1265,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               reasonCode: ReasonCodes.PATCH_BRIDGE_ERROR,
               error: error?.message || 'dispatch-failed'
             };
+          }
+          const attempts = Array.isArray(patchResult?.tried) ? patchResult.tried.slice(0, 3) : [];
+          if (attempts.length) {
+            result.tried = attempts;
+          }
+          if (typeof patchResult?.usedAuth === 'boolean') {
+            result.usedAuth = patchResult.usedAuth;
+          }
+          if (typeof patchResult?.endpoint === 'string') {
+            result.endpoint = patchResult.endpoint;
+          }
+          if (typeof patchResult?.method === 'string') {
+            result.method = patchResult.method;
+          }
+          const http405Reason = buildPatchHttpReason(405);
+          const saw405 = patchResult?.status === 405 || attempts.some((entry) => Number.parseInt(entry?.status, 10) === 405);
+          if (!patchResult?.ok && saw405) {
+            await runnerDebug('Visibility toggle rejected with 405', withReason(http405Reason, {
+              convoId,
+              endpoint: patchResult?.endpoint || null,
+              method: patchResult?.method || null,
+              attempts
+            }));
+          }
+          if (!patchResult?.ok && patchResult?.reasonCode === ReasonCodes.ENDPOINT_NOT_SUPPORTED) {
+            await runnerDebug('Endpoint autodetect failed', withReason(ReasonCodes.ENDPOINT_NOT_SUPPORTED, {
+              convoId,
+              attempts
+            }));
+          }
+          if (patchResult?.usedAuth === false) {
+            result.indicators = Array.isArray(result.indicators) ? result.indicators : [];
+            if (!result.indicators.includes(ReasonCodes.AUTH_MISSING)) {
+              result.indicators.push(ReasonCodes.AUTH_MISSING);
+            }
+            await runnerDebug('Authorization token missing for PATCH attempt', withReason(ReasonCodes.AUTH_MISSING, {
+              convoId,
+              endpoint: patchResult?.endpoint || null
+            }));
           }
           auditEntry.response.status = patchResult?.status ?? null;
           auditEntry.response.ok = Boolean(patchResult?.ok);

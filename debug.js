@@ -90,6 +90,11 @@ export async function init({ root }) {
   const undoConfirmWarning = undoToolsCard?.querySelector('[data-role="undo-confirm-warning"]');
   const undoConfirmAck = undoToolsCard?.querySelector('[data-role="undo-confirm-ack"]');
   const undoConfirmSubmit = undoToolsCard?.querySelector('[data-action="undo-confirm-submit"]');
+  const endpointProbeCard = liveCard?.querySelector('[data-role="endpoint-diagnostics"]');
+  const endpointProbeButton = endpointProbeCard?.querySelector('[data-action="endpoint-probe"]');
+  const endpointProbeInput = endpointProbeCard?.querySelector('[data-role="endpoint-probe-id"]');
+  const endpointProbeStatus = endpointProbeCard?.querySelector('[data-role="endpoint-probe-status"]');
+  const endpointProbeOutput = endpointProbeCard?.querySelector('[data-role="endpoint-probe-output"]');
   const auditCard = root.querySelector('[data-role="audit-card"]');
   const auditRows = auditCard?.querySelector('[data-role="audit-rows"]');
   const auditLimitInput = auditCard?.querySelector('[data-role="audit-limit"]');
@@ -252,6 +257,7 @@ export async function init({ root }) {
     renderLiveSelection();
     updateSelectionHint();
     renderLiveResults();
+    await loadLastEndpointProbe();
     updateUndoVisibility();
     renderUndoQueue();
     renderUndoResults();
@@ -662,6 +668,11 @@ export async function init({ root }) {
       const span = document.createElement('span');
       span.textContent = `${icon} ${title} — ${convo} (${reason}${statusPart})`;
       li.appendChild(span);
+      if (Number.parseInt(item?.status, 10) === 405) {
+        const hint = document.createElement('small');
+        hint.textContent = 'Endpoint/method mismatch - run Endpoint probe';
+        li.appendChild(hint);
+      }
       if (item.auditId) {
         const noteButton = document.createElement('button');
         noteButton.type = 'button';
@@ -947,6 +958,105 @@ export async function init({ root }) {
       copyButton: liveCopyButton,
       results: liveResults
     });
+  }
+
+  function setEndpointProbeStatus(message, isError = false) {
+    if (!endpointProbeStatus) {
+      return;
+    }
+    endpointProbeStatus.textContent = message || '';
+    if (isError) {
+      endpointProbeStatus.dataset.state = 'error';
+    } else if (message) {
+      endpointProbeStatus.dataset.state = 'ok';
+    } else {
+      delete endpointProbeStatus.dataset.state;
+    }
+  }
+
+  function renderEndpointProbeResult(result) {
+    if (!endpointProbeOutput) {
+      return;
+    }
+    if (!result || typeof result !== 'object') {
+      endpointProbeOutput.textContent = 'No endpoint probe yet.';
+      return;
+    }
+    const summary = {
+      ok: Boolean(result.ok),
+      dryRun: Boolean(result.dryRun),
+      usedAuth: typeof result.usedAuth === 'boolean' ? result.usedAuth : null,
+      firstOk: result.firstOk || null,
+      elapsedMs: Number.isFinite(result.elapsedMs) ? Math.round(result.elapsedMs) : null,
+      tried: Array.isArray(result.tried) ? result.tried.slice(0, 6) : []
+    };
+    endpointProbeOutput.textContent = JSON.stringify(summary, null, 2);
+  }
+
+  async function loadLastEndpointProbe() {
+    if (!endpointProbeOutput) {
+      return;
+    }
+    try {
+      const { debug_last_endpoint_probe: stored = null } = await chrome.storage.local.get([
+        'debug_last_endpoint_probe'
+      ]);
+      if (!stored?.result) {
+        renderEndpointProbeResult(null);
+        setEndpointProbeStatus('');
+        return;
+      }
+      renderEndpointProbeResult(stored.result);
+      if (Number.isFinite(stored.ts)) {
+        const when = new Date(stored.ts).toLocaleTimeString();
+        setEndpointProbeStatus(`Last probe ${when}`);
+      } else {
+        setEndpointProbeStatus('Last probe restored');
+      }
+    } catch (error) {
+      console.error(error);
+      setEndpointProbeStatus(`Failed to load probe: ${error?.message || 'unknown error'}`, true);
+    }
+  }
+
+  async function handleEndpointProbe() {
+    const convoId = (endpointProbeInput?.value || '').trim();
+    if (!convoId) {
+      setEndpointProbeStatus('Enter conversation ID', true);
+      return;
+    }
+    if (endpointProbeButton) {
+      endpointProbeButton.disabled = true;
+    }
+    setEndpointProbeStatus('Probing…');
+    if (endpointProbeOutput) {
+      endpointProbeOutput.textContent = '';
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'LIVE_ENDPOINT_PROBE', convoId });
+      if (!response?.ok) {
+        const message = response?.error || 'probe failed';
+        setEndpointProbeStatus(`Probe failed: ${message}`, true);
+        return;
+      }
+      const result = response.result || {};
+      const ms = Number.isFinite(result?.elapsedMs) ? Math.round(result.elapsedMs) : null;
+      const success = Boolean(result?.ok);
+      if (success) {
+        setEndpointProbeStatus(ms !== null ? `Probe OK (${ms} ms)` : 'Probe OK');
+      } else {
+        const reason = result?.reasonCode || result?.error || 'no endpoint matched';
+        const msSuffix = ms !== null ? ` (${ms} ms)` : '';
+        setEndpointProbeStatus(`Probe completed - ${reason}${msSuffix}`);
+      }
+      renderEndpointProbeResult(result);
+    } catch (error) {
+      setEndpointProbeStatus(`Probe error: ${error?.message || 'unknown error'}`, true);
+    } finally {
+      if (endpointProbeButton) {
+        endpointProbeButton.disabled = false;
+      }
+    }
   }
 
   function getLiveResultsJson() {
@@ -1854,6 +1964,17 @@ export async function init({ root }) {
 
   liveCopyButton?.addEventListener('click', async () => {
     await copyLiveResultsToClipboard();
+  });
+
+  endpointProbeButton?.addEventListener('click', async () => {
+    await handleEndpointProbe();
+  });
+
+  endpointProbeInput?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      handleEndpointProbe();
+    }
   });
 
   auditRefreshButton?.addEventListener('click', async () => {

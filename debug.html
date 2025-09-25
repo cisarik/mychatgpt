@@ -128,6 +128,17 @@
       </div>
       <ul data-role="live-results-list"></ul>
     </div>
+    <div class="tab-card" data-role="endpoint-diagnostics">
+      <div class="flex-between">
+        <h4>Endpoint diagnostics</h4>
+        <button data-action="endpoint-probe">Probe endpoint</button>
+      </div>
+      <div class="inline-group">
+        <input type="text" data-role="endpoint-probe-id" placeholder="Conversation ID" />
+        <small data-role="endpoint-probe-status"></small>
+      </div>
+      <pre data-role="endpoint-probe-output"></pre>
+    </div>
     <p class="tab-copy" data-role="live-selection-hint" hidden></p>
     <p class="tab-copy" data-role="live-batch-note" hidden></p>
     <dialog data-role="live-confirm-dialog">

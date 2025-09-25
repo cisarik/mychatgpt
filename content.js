@@ -16,6 +16,8 @@
   const BRIDGE_READY_EVENT = 'BRIDGE_READY';
   const BRIDGE_PATCH_RESULT = 'PATCH_RESULT';
   const BRIDGE_CONNECTIVITY_RESULT = 'CONNECTIVITY_RESULT';
+  const BRIDGE_PATCH_PROBE_RESULT = 'PATCH_PROBE_RESULT';
+  const BRIDGE_PATCH_DIAG = 'PATCH_DIAG';
 
   const BRIDGE_READY_FLAG = '__MYCHATGPT_BRIDGE_CONTENT_READY__';
   let bridgeReady = false;
@@ -124,6 +126,20 @@
     }
     if (data.type === BRIDGE_CONNECTIVITY_RESULT) {
       forwardBridgeResult('BRIDGE_CONNECTIVITY_RESULT', data.payload || {});
+      return;
+    }
+    if (data.type === BRIDGE_PATCH_DIAG) {
+      const diag = data.payload || {};
+      chrome.runtime.sendMessage({ type: 'PATCH_DIAG', diag }, () => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError && lastError.message) {
+          console.warn('MyChatGPT PATCH_DIAG relay error', lastError.message);
+        }
+      });
+      return;
+    }
+    if (data.type === BRIDGE_PATCH_PROBE_RESULT) {
+      forwardBridgeResult('PATCH_PROBE_RESULT', data.payload || {});
     }
   }
 
@@ -628,7 +644,8 @@
             convoId: message.convoId,
             makeVisible: desiredVisibility,
             visible: desiredVisibility,
-            endpoint: endpointHint || undefined
+            endpoint: endpointHint || undefined,
+            meta: { attempt: 'autodetect_v1' }
           });
           sendResponse({ ok: true });
         })
@@ -651,6 +668,28 @@
         })
         .catch((error) => {
           console.warn('MyChatGPT bridge connectivity dispatch failed', error);
+          sendResponse({ ok: false, error: error?.message || 'dispatch-error' });
+        });
+      return true;
+    }
+
+    if (message.type === 'PATCH_ENDPOINT_PROBE') {
+      ensureBridgeInjected()
+        .then((ready) => {
+          if (!ready) {
+            sendResponse({ ok: false, error: 'bridge-not-ready' });
+            return;
+          }
+          postToBridge('PATCH_ENDPOINT_PROBE', {
+            requestId: message.requestId,
+            convoId: message.convoId,
+            dryRun: message.dryRun !== false,
+            endpoint: typeof message.endpoint === 'string' ? message.endpoint.trim() : undefined
+          });
+          sendResponse({ ok: true });
+        })
+        .catch((error) => {
+          console.warn('MyChatGPT PATCH_ENDPOINT_PROBE dispatch failed', error);
           sendResponse({ ok: false, error: error?.message || 'dispatch-error' });
         });
       return true;

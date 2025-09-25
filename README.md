@@ -59,6 +59,16 @@ MyChatGPT keeps your ChatGPT account tidy while storing short “search-like” 
 - `patch_http_error_401/403`: refresh chatgpt.com to refresh cookies or reauthenticate before retrying.
 - To re-arm, flip any of `LIST_ONLY`, `DRY_RUN`, or `LIVE_MODE_ENABLED` back to `true`, then disable them in sequence once you are ready to run another live batch.
 
+## Endpoint autodetection & headers
+- Visibility toggles now iterate through multiple REST shapes: `PATCH /backend-api/conversation/{id}`, `PATCH /backend-api/conversations/{id}`, and POST fallbacks with the same JSON body. The bridge stops at the first `2xx` responder and logs each attempt.
+- When an access token is present, requests include `Authorization: Bearer <token>`, `content-type: application/json`, `X-Same-Domain: 1`, and `credentials: 'include'` so the page context mirrors the web client's auth setup.
+- Debug logs and the Endpoint diagnostics panel show which combinations were tried and the status codes that came back, making it easy to spot 405/404/403 responses.
+
+### Endpoint probe workflow
+- Open **Debug → Live Mode → Endpoint diagnostics**, enter a conversation ID, and click **Probe endpoint**.
+- With `DRY_RUN=true` the probe limits itself to `OPTIONS` and `HEAD` requests so visibility stays untouched; once Live Mode is armed it replays the detected method with the current `is_visible` value, keeping the conversation state intact.
+- The JSON output highlights whether an access token was attached, the first successful method/URL pair, and the first few attempts. Run it whenever live batches return HTTP `405`, `404`, or `403` to confirm which endpoint the server currently honors.
+
 ## Troubleshooting `no_injection`
 If you see `reasonCode=no_injection` in the logs, open the **Debug** tab, click **Force inject content script**, or reload the chat tab. Remember to reload the extension after any manifest changes.
 
