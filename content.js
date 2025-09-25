@@ -10,6 +10,129 @@
 
   const LOG_SCOPE = 'extractor';
 
+  const BRIDGE_ALLOWED_ORIGIN = 'https://chatgpt.com';
+  const BRIDGE_SOURCE = 'MYCHATGPT';
+  const BRIDGE_REPLY_SOURCE = 'MYCHATGPT_BRIDGE';
+  const BRIDGE_READY_EVENT = 'BRIDGE_READY';
+  const BRIDGE_PATCH_RESULT = 'PATCH_RESULT';
+  const BRIDGE_CONNECTIVITY_RESULT = 'CONNECTIVITY_RESULT';
+
+  const BRIDGE_READY_FLAG = '__MYCHATGPT_BRIDGE_CONTENT_READY__';
+  let bridgeReady = false;
+  let ensureBridgePromise = null;
+  const bridgeReadyWaiters = [];
+
+  function isBridgeContext() {
+    return window.top === window && window.location.origin === BRIDGE_ALLOWED_ORIGIN;
+  }
+
+  function notifyBridgeReady() {
+    bridgeReady = true;
+    while (bridgeReadyWaiters.length) {
+      const waiter = bridgeReadyWaiters.shift();
+      if (waiter) {
+        waiter(true);
+      }
+    }
+  }
+
+  function waitForBridgeReady(timeoutMs = 2000) {
+    if (bridgeReady) {
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        resolve(false);
+      }, timeoutMs);
+      bridgeReadyWaiters.push((ready) => {
+        clearTimeout(timer);
+        resolve(Boolean(ready));
+      });
+    });
+  }
+
+  function postToBridge(type, payload) {
+    if (!isBridgeContext()) {
+      return;
+    }
+    window.postMessage({ source: BRIDGE_SOURCE, type, payload }, '*');
+  }
+
+  async function ensureBridgeInjected() {
+    if (!isBridgeContext()) {
+      return false;
+    }
+    if (bridgeReady) {
+      return true;
+    }
+    if (ensureBridgePromise) {
+      return ensureBridgePromise;
+    }
+    ensureBridgePromise = new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'CONTENT_ENSURE_BRIDGE' }, (response) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          console.warn('MyChatGPT bridge inject error', lastError);
+          ensureBridgePromise = null;
+          resolve(false);
+          return;
+        }
+        if (!response?.ok) {
+          ensureBridgePromise = null;
+          resolve(false);
+          return;
+        }
+        waitForBridgeReady().then((ready) => {
+          ensureBridgePromise = null;
+          resolve(ready);
+        });
+      });
+    });
+    return ensureBridgePromise;
+  }
+
+  function forwardBridgeResult(type, payload) {
+    if (!payload || typeof payload.requestId === 'undefined') {
+      return;
+    }
+    chrome.runtime.sendMessage({ type, requestId: payload.requestId, payload }, () => {
+      const lastError = chrome.runtime.lastError;
+      if (lastError && lastError.message) {
+        console.warn('MyChatGPT bridge relay error', lastError.message);
+      }
+    });
+  }
+
+  function handleBridgeMessage(event) {
+    if (event.source !== window) {
+      return;
+    }
+    if (event.origin !== BRIDGE_ALLOWED_ORIGIN) {
+      return;
+    }
+    const data = event.data;
+    if (!data || data.source !== BRIDGE_REPLY_SOURCE) {
+      return;
+    }
+    if (data.type === BRIDGE_READY_EVENT) {
+      notifyBridgeReady();
+      return;
+    }
+    if (data.type === BRIDGE_PATCH_RESULT) {
+      forwardBridgeResult('PATCH_RESULT', data.payload || {});
+      return;
+    }
+    if (data.type === BRIDGE_CONNECTIVITY_RESULT) {
+      forwardBridgeResult('BRIDGE_CONNECTIVITY_RESULT', data.payload || {});
+    }
+  }
+
+  if (isBridgeContext() && !window[BRIDGE_READY_FLAG]) {
+    window[BRIDGE_READY_FLAG] = true;
+    window.addEventListener('message', handleBridgeMessage);
+    ensureBridgeInjected().catch(() => {});
+  }
+
   const USER_STRATEGIES = [
     createSelectorStrategy('user.data-role', '[data-message-author-role="user"]'),
     createSelectorStrategy('user.turn-article', 'article[data-testid="conversation-turn"][data-message-author-role="user"]'),
@@ -481,6 +604,51 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message.type !== 'string') {
       return undefined;
+    }
+
+    if (message.type === 'ENSURE_BRIDGE_READY') {
+      ensureBridgeInjected()
+        .then((ready) => sendResponse({ ok: Boolean(ready) }))
+        .catch(() => sendResponse({ ok: false }));
+      return true;
+    }
+
+    if (message.type === 'PATCH_VISIBILITY') {
+      ensureBridgeInjected()
+        .then((ready) => {
+          if (!ready) {
+            sendResponse({ ok: false, error: 'bridge-not-ready' });
+            return;
+          }
+          postToBridge('PATCH_VISIBILITY', {
+            requestId: message.requestId,
+            convoId: message.convoId,
+            makeVisible: Boolean(message.visible)
+          });
+          sendResponse({ ok: true });
+        })
+        .catch((error) => {
+          console.warn('MyChatGPT PATCH_VISIBILITY dispatch failed', error);
+          sendResponse({ ok: false, error: error?.message || 'dispatch-error' });
+        });
+      return true;
+    }
+
+    if (message.type === 'BRIDGE_CONNECTIVITY') {
+      ensureBridgeInjected()
+        .then((ready) => {
+          if (!ready) {
+            sendResponse({ ok: false, error: 'bridge-not-ready' });
+            return;
+          }
+          postToBridge('CONNECTIVITY_PROBE', { requestId: message.requestId });
+          sendResponse({ ok: true });
+        })
+        .catch((error) => {
+          console.warn('MyChatGPT bridge connectivity dispatch failed', error);
+          sendResponse({ ok: false, error: error?.message || 'dispatch-error' });
+        });
+      return true;
     }
 
     if (message.type === 'MYCHATGPT:getConversationMeta') {

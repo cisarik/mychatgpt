@@ -289,6 +289,9 @@ const TAG_ATTRS = {
 
 const EMPTY_SET = new Set();
 
+const PATCH_ENDPOINT_PREFIX = '/backend-api/conversation/';
+const LEGACY_PATCH_ENDPOINT_PREFIX = '/conversation/';
+
 export function sanitizeHTML(html) {
   if (!html) {
     return '';
@@ -383,4 +386,74 @@ function fallbackSanitize(input) {
   return String(input)
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/on\w+=\"[^\"]*\"/gi, '');
+}
+
+export const ReasonCodes = Object.freeze({
+  PATCH_OK: 'patch_ok',
+  PATCH_BLOCKED_BY_SAFETY: 'patch_blocked_by_safety',
+  PATCH_BLOCKED_BY_WHITELIST: 'patch_blocked_by_whitelist',
+  PATCH_BLOCKED_BY_RATE_LIMIT: 'patch_blocked_by_rate_limit',
+  PATCH_BLOCKED_BY_BATCH_LIMIT: 'patch_blocked_by_batch_limit',
+  PATCH_BLOCKED_BY_DUPLICATE: 'patch_blocked_by_duplicate',
+  PATCH_BLOCKED_BY_DELETE_LIMIT: 'patch_blocked_by_delete_limit',
+  PATCH_BRIDGE_TIMEOUT: 'patch_bridge_timeout',
+  PATCH_BRIDGE_ERROR: 'patch_bridge_error',
+  PATCH_HTTP_ERROR_PREFIX: 'patch_http_error_',
+  BRIDGE_CONNECTIVITY_OK: 'bridge_connectivity_ok',
+  BRIDGE_CONNECTIVITY_FAILED: 'bridge_connectivity_failed',
+  LIVE_BATCH_COMPLETED: 'live_batch_completed'
+});
+
+/**
+ * Slovensky: Zostaví reason kód pre HTTP odpoveď PATCH požiadavky.
+ */
+export function buildPatchHttpReason(status) {
+  const code = Number.parseInt(status, 10);
+  if (!Number.isFinite(code)) {
+    return `${ReasonCodes.PATCH_HTTP_ERROR_PREFIX}unknown`;
+  }
+  return `${ReasonCodes.PATCH_HTTP_ERROR_PREFIX}${code}`;
+}
+
+/**
+ * Slovensky: Vráti preferovanú PATCH cestu pre konverzáciu.
+ */
+export function getPatchEndpoint(convoId) {
+  const raw = typeof convoId === 'string' ? convoId.trim() : '';
+  if (!raw) {
+    return null;
+  }
+  const encoded = encodeURIComponent(raw);
+  return `${PATCH_ENDPOINT_PREFIX}${encoded}`;
+}
+
+/**
+ * Slovensky: Poskytne zoznam náhradných PATCH ciest (primárna + legacy).
+ */
+export function getPatchEndpointCandidates(convoId) {
+  const preferred = getPatchEndpoint(convoId);
+  if (!preferred) {
+    return [];
+  }
+  const legacy = `${LEGACY_PATCH_ENDPOINT_PREFIX}${encodeURIComponent(convoId.trim())}`;
+  if (legacy === preferred) {
+    return [preferred];
+  }
+  return [preferred, legacy];
+}
+
+/**
+ * Slovensky: Jednoduché stopky pre meranie latencie v milisekundách.
+ */
+export function createStopwatch() {
+  const baseNow = typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? () => performance.now()
+    : () => Date.now();
+  const startedAt = baseNow();
+  return {
+    startedAt,
+    elapsedMs() {
+      return baseNow() - startedAt;
+    }
+  };
 }

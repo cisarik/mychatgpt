@@ -49,6 +49,27 @@ export async function init({ root }) {
   const planModal = root.querySelector('[data-role="soft-plan-modal"]');
   const planModalTitle = root.querySelector('[data-role="plan-modal-title"]');
   const planModalContent = root.querySelector('[data-role="plan-modal-content"]');
+  const liveCard = root.querySelector('[data-role="live-mode-card"]');
+  const liveStatusBadge = liveCard?.querySelector('[data-role="live-arm-status"]');
+  const liveTestButton = liveCard?.querySelector('[data-action="live-test"]');
+  const liveTestResult = liveCard?.querySelector('[data-role="live-test-result"]');
+  const liveLoadButton = liveCard?.querySelector('[data-action="live-load-plan"]');
+  const liveOpenConfirmButton = liveCard?.querySelector('[data-action="live-open-confirm"]');
+  const liveSelectionContainer = liveCard?.querySelector('[data-role="live-selection-container"]');
+  const liveSelectionRows = liveCard?.querySelector('[data-role="live-selection-rows"]');
+  const liveSelectionHint = liveCard?.querySelector('[data-role="live-selection-hint"]');
+  const liveBatchNote = liveCard?.querySelector('[data-role="live-batch-note"]');
+  const liveResultsCard = liveCard?.querySelector('[data-role="live-results-card"]');
+  const liveResultsList = liveCard?.querySelector('[data-role="live-results-list"]');
+  const liveCopyButton = liveCard?.querySelector('[data-action="live-copy-results"]');
+  const liveCopyButtonDefaultLabel = liveCopyButton?.textContent || 'Copy JSON';
+  const liveConfirmDialog = liveCard?.querySelector('[data-role="live-confirm-dialog"]');
+  const liveConfirmSummary = liveCard?.querySelector('[data-role="live-confirm-summary"]');
+  const liveConfirmList = liveCard?.querySelector('[data-role="live-confirm-list"]');
+  const liveConfirmLimits = liveCard?.querySelector('[data-role="live-confirm-limits"]');
+  const liveConfirmWarning = liveCard?.querySelector('[data-role="live-confirm-warning"]');
+  const liveConfirmAck = liveCard?.querySelector('[data-role="live-confirm-ack"]');
+  const liveConfirmSubmit = liveCard?.querySelector('[data-action="live-confirm-submit"]');
 
   let tailTimer = null;
   let currentLevel = levelSelect?.value || 'INFO';
@@ -56,9 +77,21 @@ export async function init({ root }) {
   let injectStatusTimer = null;
   let latestReport = null;
   let latestPlan = null;
+  let liveSettings = null;
+  let liveCandidates = [];
+  let liveSelection = new Set();
+  let liveResults = null;
+  let liveResultsMeta = null;
 
   async function refreshAll() {
-    await Promise.all([refreshLogs(), refreshSummary(), refreshSnapshot(), refreshReport(), refreshPlan()]);
+    await Promise.all([
+      refreshLogs(),
+      refreshSummary(),
+      refreshSnapshot(),
+      refreshReport(),
+      refreshPlan(),
+      refreshLive()
+    ]);
   }
 
   async function refreshLogs() {
@@ -165,6 +198,26 @@ export async function init({ root }) {
     }
   }
 
+  async function refreshLive() {
+    if (!liveCard) {
+      return;
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'ensureSettings' });
+      if (response?.settings) {
+        liveSettings = response.settings;
+      }
+    } catch (error) {
+      console.error(error);
+    }
+    updateLiveArmStatus();
+    updateLiveNotes();
+    renderLiveSelection();
+    updateSelectionHint();
+    renderLiveResults();
+    updateLiveControls();
+  }
+
   /**
    * Slovensky: Normalizuje report pre jednoduchšie renderovanie.
    */
@@ -198,6 +251,423 @@ export async function init({ root }) {
       items,
       totals: { planned }
     };
+  }
+
+  function isLiveModeArmedLocal() {
+    if (!liveSettings) {
+      return false;
+    }
+    return !liveSettings.LIST_ONLY && !liveSettings.DRY_RUN && Boolean(liveSettings.LIVE_MODE_ENABLED);
+  }
+
+  function getLiveLimits() {
+    const batchLimit = Number.isFinite(liveSettings?.LIVE_PATCH_BATCH_LIMIT)
+      ? liveSettings.LIVE_PATCH_BATCH_LIMIT
+      : 0;
+    const deleteLimit = Number.isFinite(liveSettings?.DELETE_LIMIT) ? liveSettings.DELETE_LIMIT : batchLimit;
+    const effective = batchLimit && deleteLimit ? Math.min(batchLimit, deleteLimit) : batchLimit || deleteLimit;
+    const rateLimit = Number.isFinite(liveSettings?.LIVE_PATCH_RATE_LIMIT_PER_MIN)
+      ? liveSettings.LIVE_PATCH_RATE_LIMIT_PER_MIN
+      : 0;
+    const whitelist = Array.isArray(liveSettings?.LIVE_WHITELIST_HOSTS)
+      ? liveSettings.LIVE_WHITELIST_HOSTS
+      : [];
+    return {
+      batchLimit: batchLimit || 0,
+      deleteLimit: deleteLimit || 0,
+      effective: effective || Math.max(batchLimit || 0, deleteLimit || 0),
+      rateLimit,
+      whitelist
+    };
+  }
+
+  /**
+   * Slovensky: Aktualizuje badge s ozbrojeným stavom Live režimu.
+   */
+  function updateLiveArmStatus() {
+    if (!liveStatusBadge) {
+      return;
+    }
+    const armed = isLiveModeArmedLocal();
+    liveStatusBadge.textContent = armed ? 'ARMED (live)' : 'SAFE (dry-run)';
+  }
+
+  /**
+   * Slovensky: Zobrazí limity a whitelist pre Live režim.
+   */
+  function updateLiveNotes() {
+    if (!liveBatchNote) {
+      return;
+    }
+    if (!liveSettings) {
+      liveBatchNote.hidden = false;
+      liveBatchNote.textContent = 'Loading Live Mode settings…';
+      return;
+    }
+    const limits = getLiveLimits();
+    const hosts = limits.whitelist.length ? limits.whitelist.join(', ') : '—';
+    const rateText = limits.rateLimit > 0 ? limits.rateLimit : 'unlimited';
+    const batchText = limits.batchLimit > 0 ? limits.batchLimit : 'unlimited';
+    const deleteText = limits.deleteLimit > 0 ? limits.deleteLimit : 'unlimited';
+    const effectiveText = limits.effective > 0 ? limits.effective : Math.max(limits.batchLimit, limits.deleteLimit, 0) || 'unlimited';
+    liveBatchNote.hidden = false;
+    liveBatchNote.textContent = `Batch limit ≤ ${batchText} (DELETE limit ≤ ${deleteText}, effective ≤ ${effectiveText}). Rate limit/min: ${rateText}. Whitelist: ${hosts}.`;
+  }
+
+  function updateLiveControls() {
+    if (liveOpenConfirmButton) {
+      const enabled = isLiveModeArmedLocal() && liveSelection.size > 0;
+      liveOpenConfirmButton.disabled = !enabled;
+    }
+    if (liveCopyButton) {
+      liveCopyButton.disabled = !liveResults || !Array.isArray(liveResults) || liveResults.length === 0;
+    }
+  }
+
+  function updateSelectionHint() {
+    if (!liveSelectionHint) {
+      return;
+    }
+    if (!liveSettings) {
+      liveSelectionHint.hidden = false;
+      liveSelectionHint.textContent = 'Loading live mode settings…';
+      return;
+    }
+    if (!isLiveModeArmedLocal()) {
+      liveSelectionHint.hidden = false;
+      liveSelectionHint.textContent = 'Guard rails active: disable LIST_ONLY & DRY_RUN and enable LIVE_MODE in Settings to arm Live Mode.';
+      return;
+    }
+    if (!liveCandidates.length) {
+      liveSelectionHint.hidden = false;
+      liveSelectionHint.textContent = 'No LIVE batch candidates loaded yet.';
+      return;
+    }
+    const limits = getLiveLimits();
+    const effectiveLimit = limits.effective || limits.batchLimit || limits.deleteLimit || liveCandidates.length || 'unbounded';
+    liveSelectionHint.hidden = false;
+    liveSelectionHint.textContent = `Selected ${liveSelection.size} of ${liveCandidates.length} candidates (effective limit ≤ ${effectiveLimit}).`;
+  }
+
+  function renderLiveSelection() {
+    if (!liveSelectionRows || !liveSelectionContainer) {
+      return;
+    }
+    liveSelectionRows.innerHTML = '';
+    if (!liveCandidates.length) {
+      liveSelectionContainer.hidden = true;
+      return;
+    }
+    liveSelectionContainer.hidden = false;
+    liveCandidates.forEach((candidate) => {
+      const row = document.createElement('tr');
+      const selectCell = document.createElement('td');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = liveSelection.has(candidate.key);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) {
+          liveSelection.add(candidate.key);
+        } else {
+          liveSelection.delete(candidate.key);
+        }
+        updateSelectionHint();
+        updateLiveControls();
+      });
+      selectCell.appendChild(checkbox);
+
+      const titleCell = document.createElement('td');
+      titleCell.textContent = candidate.title || '—';
+
+      const convoCell = document.createElement('td');
+      convoCell.textContent = candidate.convoId || '—';
+
+      const urlCell = document.createElement('td');
+      if (candidate.url) {
+        const link = document.createElement('a');
+        link.href = candidate.url;
+        link.target = '_blank';
+        link.rel = 'noreferrer noopener';
+        link.textContent = candidate.url;
+        urlCell.appendChild(link);
+      } else {
+        urlCell.textContent = '—';
+      }
+
+      row.appendChild(selectCell);
+      row.appendChild(titleCell);
+      row.appendChild(convoCell);
+      row.appendChild(urlCell);
+      liveSelectionRows.appendChild(row);
+    });
+  }
+
+  function getSelectedItems() {
+    if (!liveCandidates.length) {
+      return [];
+    }
+    return liveCandidates
+      .filter((candidate) => liveSelection.has(candidate.key))
+      .map((candidate) => ({
+        convoId: candidate.convoId,
+        url: candidate.url,
+        title: candidate.title
+      }));
+  }
+
+  async function loadLiveCandidatesFromPlan() {
+    if (!liveCard) {
+      return;
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'PLAN_GET' });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'plan-load-failed');
+      }
+      const plan = normalizePlan(response.plan);
+      latestPlan = plan;
+      const dedup = new Map();
+      for (const item of plan.items) {
+        if (item?.qualifies === false) {
+          continue;
+        }
+        const key = (item?.convoId || '').trim() || (item?.url || '').trim();
+        if (!key || dedup.has(key)) {
+          continue;
+        }
+        dedup.set(key, {
+          key,
+          convoId: item?.convoId || '',
+          url: item?.url || '',
+          title: item?.title || ''
+        });
+      }
+      liveCandidates = Array.from(dedup.values());
+      liveSelection = new Set(liveCandidates.map((candidate) => candidate.key));
+      renderLiveSelection();
+      updateSelectionHint();
+      updateLiveControls();
+    } catch (error) {
+      if (liveSelectionHint) {
+        liveSelectionHint.hidden = false;
+        liveSelectionHint.textContent = `Failed to load plan: ${error?.message || 'unknown error'}`;
+      }
+    }
+  }
+
+  async function handleLiveTest() {
+    if (!liveTestResult) {
+      return;
+    }
+    liveTestResult.textContent = 'Testing…';
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'LIVE_TEST_CONNECTIVITY' });
+      if (response?.ok) {
+        const ms = Number.isFinite(response.elapsedMs) ? Math.round(response.elapsedMs) : null;
+        liveTestResult.textContent = ms !== null ? `OK (${ms} ms)` : 'OK';
+      } else {
+        const reason = response?.reason ? ` (${response.reason})` : '';
+        liveTestResult.textContent = `Error: ${response?.error || 'bridge-failed'}${reason}`;
+      }
+    } catch (error) {
+      liveTestResult.textContent = `Error: ${error?.message || 'bridge-failed'}`;
+    }
+  }
+
+  function iconForLiveResult(item) {
+    if (item?.ok) {
+      return '✅';
+    }
+    if (item?.reasonCode && item.reasonCode.startsWith('patch_blocked')) {
+      return '⚠️';
+    }
+    return '❌';
+  }
+
+  function renderLiveResults() {
+    if (!liveResultsCard || !liveResultsList) {
+      return;
+    }
+    if (!liveResults || !Array.isArray(liveResults) || liveResults.length === 0) {
+      liveResultsCard.hidden = true;
+      if (liveCopyButton) {
+        liveCopyButton.disabled = true;
+      }
+      return;
+    }
+    liveResultsCard.hidden = false;
+    liveResultsList.innerHTML = '';
+    liveResults.forEach((item) => {
+      const li = document.createElement('li');
+      const icon = iconForLiveResult(item);
+      const title = item.title || '(untitled)';
+      const reason = item.reasonCode || (item.ok ? 'patch_ok' : 'unknown');
+      const statusPart = item.status ? ` • status ${item.status}` : '';
+      li.textContent = `${icon} ${title} — ${item.convoId || 'no-id'} (${reason}${statusPart})`;
+      liveResultsList.appendChild(li);
+    });
+    if (liveCopyButton) {
+      liveCopyButton.disabled = false;
+    }
+  }
+
+  function getLiveResultsJson() {
+    if (!liveResults || !Array.isArray(liveResults) || liveResults.length === 0) {
+      return '';
+    }
+    const payload = {
+      ts: Date.now(),
+      results: liveResults,
+      meta: liveResultsMeta
+    };
+    return JSON.stringify(payload, null, 2);
+  }
+
+  function openLiveConfirmDialog() {
+    if (!liveConfirmDialog) {
+      return;
+    }
+    const items = getSelectedItems();
+    const limits = getLiveLimits();
+    if (liveConfirmSummary) {
+      liveConfirmSummary.textContent = items.length
+        ? `Ready to PATCH ${items.length} conversation(s).`
+        : 'No candidates selected.';
+    }
+    if (liveConfirmList) {
+      liveConfirmList.innerHTML = '';
+      const preview = items.slice(0, 10);
+      preview.forEach((item) => {
+        const li = document.createElement('li');
+        const convo = item.convoId || 'no-id';
+        const title = item.title || '(untitled)';
+        li.textContent = `${title} — ${convo}`;
+        liveConfirmList.appendChild(li);
+      });
+      if (items.length > preview.length) {
+        const li = document.createElement('li');
+        li.textContent = `…and ${items.length - preview.length} more.`;
+        liveConfirmList.appendChild(li);
+      }
+    }
+    if (liveConfirmLimits) {
+      liveConfirmLimits.textContent = `Effective limit ≤ ${limits.effective} (batch ≤ ${limits.batchLimit}, delete ≤ ${limits.deleteLimit}). Rate/min ${limits.rateLimit}.`;
+    }
+    if (liveConfirmWarning) {
+      liveConfirmWarning.hidden = true;
+      liveConfirmWarning.textContent = '';
+    }
+    if (liveConfirmAck) {
+      liveConfirmAck.checked = false;
+    }
+    if (liveConfirmSubmit) {
+      liveConfirmSubmit.disabled = false;
+    }
+    try {
+      liveConfirmDialog.showModal();
+    } catch (_error) {
+      liveConfirmDialog.setAttribute('open', 'open');
+    }
+  }
+
+  async function copyLiveResultsToClipboard() {
+    if (!liveCopyButton) {
+      return;
+    }
+    const json = getLiveResultsJson();
+    if (!json) {
+      return;
+    }
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(json);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = json;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      liveCopyButton.textContent = 'Copied!';
+      setTimeout(() => {
+        liveCopyButton.textContent = liveCopyButtonDefaultLabel;
+      }, 1200);
+    } catch (error) {
+      console.error(error);
+      liveCopyButton.textContent = 'Copy failed';
+      setTimeout(() => {
+        liveCopyButton.textContent = liveCopyButtonDefaultLabel;
+      }, 1500);
+    }
+  }
+
+  async function executeLiveBatch() {
+    if (!liveConfirmDialog) {
+      return;
+    }
+    if (!isLiveModeArmedLocal()) {
+      if (liveConfirmWarning) {
+        liveConfirmWarning.hidden = false;
+        liveConfirmWarning.textContent = 'Live Mode is not armed. Enable it in Settings and reload.';
+      }
+      return;
+    }
+    const items = getSelectedItems();
+    if (!items.length) {
+      if (liveConfirmWarning) {
+        liveConfirmWarning.hidden = false;
+        liveConfirmWarning.textContent = 'Select at least one candidate to proceed.';
+      }
+      return;
+    }
+    if (!liveConfirmAck?.checked) {
+      if (liveConfirmWarning) {
+        liveConfirmWarning.hidden = false;
+        liveConfirmWarning.textContent = 'Please acknowledge the confirmation checkbox.';
+      }
+      liveConfirmAck?.focus();
+      return;
+    }
+    if (liveConfirmWarning) {
+      liveConfirmWarning.hidden = true;
+      liveConfirmWarning.textContent = '';
+    }
+    if (liveConfirmSubmit) {
+      liveConfirmSubmit.disabled = true;
+    }
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'LIVE_EXECUTE_BATCH',
+        items,
+        confirmed: true
+      });
+      if (!response?.ok) {
+        if (liveConfirmWarning) {
+          const reason = response?.reason ? ` (${response.reason})` : '';
+          liveConfirmWarning.hidden = false;
+          liveConfirmWarning.textContent = `Batch blocked${reason}.`;
+        }
+        return;
+      }
+      liveResults = Array.isArray(response.results) ? response.results : [];
+      liveResultsMeta = response.meta || null;
+      renderLiveResults();
+      updateLiveControls();
+      liveConfirmDialog.close('confirm');
+    } catch (error) {
+      if (liveConfirmWarning) {
+        liveConfirmWarning.hidden = false;
+        liveConfirmWarning.textContent = `Batch failed: ${error?.message || 'unknown error'}`;
+      }
+    } finally {
+      if (liveConfirmSubmit) {
+        liveConfirmSubmit.disabled = false;
+      }
+    }
   }
 
   function renderReport(report) {
@@ -685,6 +1155,40 @@ export async function init({ root }) {
     closePlanModal();
   });
 
+  liveTestButton?.addEventListener('click', () => {
+    handleLiveTest();
+  });
+
+  liveLoadButton?.addEventListener('click', async () => {
+    await loadLiveCandidatesFromPlan();
+  });
+
+  liveOpenConfirmButton?.addEventListener('click', () => {
+    openLiveConfirmDialog();
+  });
+
+  liveConfirmSubmit?.addEventListener('click', (event) => {
+    event.preventDefault();
+    executeLiveBatch();
+  });
+
+  liveConfirmDialog?.addEventListener('close', () => {
+    if (liveConfirmAck) {
+      liveConfirmAck.checked = false;
+    }
+    if (liveConfirmWarning) {
+      liveConfirmWarning.hidden = true;
+      liveConfirmWarning.textContent = '';
+    }
+    if (!(typeof liveConfirmDialog.showModal === 'function')) {
+      liveConfirmDialog.removeAttribute('open');
+    }
+  });
+
+  liveCopyButton?.addEventListener('click', async () => {
+    await copyLiveResultsToClipboard();
+  });
+
   reportScanAllButton?.addEventListener('click', async () => {
     if (reportScanAllButton.disabled) {
       return;
@@ -753,6 +1257,9 @@ export async function init({ root }) {
     }
     if (changes.debug_last_extractor_dump) {
       refreshSnapshot();
+    }
+    if (changes.settings) {
+      refreshLive();
     }
     if (changes[REPORT_STORAGE_KEY]) {
       refreshReport();

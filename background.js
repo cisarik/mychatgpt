@@ -1,5 +1,17 @@
 import { initDb, backups } from './db.js';
-import { log, logTrace, logDebug, logInfo, logWarn, logError, minutesSince } from './utils.js';
+import {
+  log,
+  logTrace,
+  logDebug,
+  logInfo,
+  logWarn,
+  logError,
+  minutesSince,
+  ReasonCodes,
+  buildPatchHttpReason,
+  getPatchEndpoint,
+  createStopwatch
+} from './utils.js';
 
 const SETTINGS_KEY = 'settings';
 const DEFAULT_SETTINGS = {
@@ -20,7 +32,12 @@ const DEFAULT_SETTINGS = {
   TRACE_EXTRACTOR: false,
   TRACE_RUNNER: false,
   REDACT_TEXT_IN_DIAGNOSTICS: true,
-  DIAGNOSTICS_SAFE_SNAPSHOT: false
+  DIAGNOSTICS_SAFE_SNAPSHOT: false,
+  LIVE_MODE_ENABLED: false,
+  LIVE_WHITELIST_HOSTS: ['chatgpt.com'],
+  LIVE_PATCH_BATCH_LIMIT: 5,
+  LIVE_PATCH_RATE_LIMIT_PER_MIN: 10,
+  LIVE_REQUIRE_EXPLICIT_CONFIRM: true
 };
 
 const cooldownMemory = {
@@ -42,6 +59,17 @@ const SOFT_DELETE_PLAN_KEY = 'soft_delete_plan';
 const SOFT_DELETE_CONFIRMED_HISTORY_KEY = 'soft_delete_confirmed_history';
 const SOFT_DELETE_CONFIRMED_HISTORY_LIMIT = 200;
 
+const BRIDGE_READY_TIMEOUT_MS = 2000;
+const BRIDGE_REQUEST_TIMEOUT_MS = 8000;
+const LIVE_RATE_LIMIT_WINDOW_MS = 60000;
+
+const liveBridgePending = new Map();
+const liveRateLimiter = {
+  lastRefill: 0,
+  tokens: 0,
+  capacity: DEFAULT_SETTINGS.LIVE_PATCH_RATE_LIMIT_PER_MIN
+};
+
 const runnerTrace = (msg, meta = {}) => logTrace(RUNNER_SCOPE, msg, meta);
 const runnerDebug = (msg, meta = {}) => logDebug(RUNNER_SCOPE, msg, meta);
 const runnerInfo = (msg, meta = {}) => logInfo(RUNNER_SCOPE, msg, meta);
@@ -60,6 +88,198 @@ function delay(ms) {
 
 function withReason(reasonCode, extra = {}) {
   return { ...extra, reasonCode };
+}
+
+function isLiveModeArmed(settings) {
+  if (!settings) {
+    return false;
+  }
+  return !settings.LIST_ONLY && !settings.DRY_RUN && Boolean(settings.LIVE_MODE_ENABLED);
+}
+
+function hostWhitelisted(url, settings) {
+  if (typeof url !== 'string') {
+    return false;
+  }
+  if (url.trim() !== url) {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') {
+      return false;
+    }
+    if (parsed.hostname !== parsed.hostname.trim()) {
+      return false;
+    }
+    const allowed = Array.isArray(settings?.LIVE_WHITELIST_HOSTS)
+      ? settings.LIVE_WHITELIST_HOSTS
+      : DEFAULT_SETTINGS.LIVE_WHITELIST_HOSTS;
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname || '/';
+    if (!allowed.some((token) => token && host === token.toLowerCase())) {
+      return false;
+    }
+    if (!path.startsWith('/')) {
+      return false;
+    }
+    return !/\s/.test(path);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function ensureRateLimiter(settings) {
+  const capacity = Number.isFinite(settings?.LIVE_PATCH_RATE_LIMIT_PER_MIN)
+    ? settings.LIVE_PATCH_RATE_LIMIT_PER_MIN
+    : DEFAULT_SETTINGS.LIVE_PATCH_RATE_LIMIT_PER_MIN;
+  const now = Date.now();
+  if (liveRateLimiter.capacity !== capacity) {
+    liveRateLimiter.capacity = capacity;
+    liveRateLimiter.tokens = capacity;
+    liveRateLimiter.lastRefill = now;
+  }
+  if (capacity <= 0) {
+    liveRateLimiter.tokens = Number.POSITIVE_INFINITY;
+    liveRateLimiter.lastRefill = now;
+    return;
+  }
+  if (!liveRateLimiter.lastRefill) {
+    liveRateLimiter.lastRefill = now;
+    liveRateLimiter.tokens = capacity;
+    return;
+  }
+  const elapsed = now - liveRateLimiter.lastRefill;
+  if (elapsed >= LIVE_RATE_LIMIT_WINDOW_MS) {
+    liveRateLimiter.tokens = capacity;
+    liveRateLimiter.lastRefill = now;
+  }
+}
+
+function consumeRateToken(settings) {
+  ensureRateLimiter(settings);
+  if (liveRateLimiter.capacity <= 0) {
+    return true;
+  }
+  if (liveRateLimiter.tokens <= 0) {
+    return false;
+  }
+  liveRateLimiter.tokens -= 1;
+  if (!liveRateLimiter.lastRefill) {
+    liveRateLimiter.lastRefill = Date.now();
+  }
+  return true;
+}
+
+function createBridgeRequestId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `bridge-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function awaitBridgeResponse(requestId, timeoutMs = BRIDGE_REQUEST_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      liveBridgePending.delete(requestId);
+      resolve({ ok: false, reasonCode: ReasonCodes.PATCH_BRIDGE_TIMEOUT });
+    }, timeoutMs);
+    liveBridgePending.set(requestId, { resolve, timer });
+  });
+}
+
+function settleBridgeResponse(requestId, payload) {
+  const pending = liveBridgePending.get(requestId);
+  if (!pending) {
+    return false;
+  }
+  clearTimeout(pending.timer);
+  liveBridgePending.delete(requestId);
+  pending.resolve(payload);
+  return true;
+}
+
+function sendMessageToTab(tabId, message) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.tabs.sendMessage(tabId, message, (response) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          reject(new Error(lastError.message));
+          return;
+        }
+        resolve(response);
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+async function ensureBridgeReadyInTab(tabId) {
+  try {
+    const response = await sendMessageToTab(tabId, { type: 'ENSURE_BRIDGE_READY' });
+    return Boolean(response?.ok);
+  } catch (error) {
+    await runnerWarn('Bridge ensure message failed', withReason('bridge_inject_failed', { tabId, error: error?.message }));
+    return false;
+  }
+}
+
+async function dispatchBridgePatch({ tabId, convoId, visible }) {
+  const requestId = createBridgeRequestId();
+  const waitPromise = awaitBridgeResponse(requestId, BRIDGE_REQUEST_TIMEOUT_MS);
+  try {
+    await sendMessageToTab(tabId, {
+      type: 'PATCH_VISIBILITY',
+      requestId,
+      convoId,
+      visible
+    });
+  } catch (error) {
+    settleBridgeResponse(requestId, {
+      ok: false,
+      reasonCode: ReasonCodes.PATCH_BRIDGE_ERROR,
+      error: error?.message || 'sendMessage-failed'
+    });
+    throw error;
+  }
+  return waitPromise;
+}
+
+async function dispatchBridgeConnectivity({ tabId }) {
+  const requestId = createBridgeRequestId();
+  const waitPromise = awaitBridgeResponse(requestId, BRIDGE_REQUEST_TIMEOUT_MS);
+  try {
+    await sendMessageToTab(tabId, { type: 'BRIDGE_CONNECTIVITY', requestId });
+  } catch (error) {
+    settleBridgeResponse(requestId, {
+      ok: false,
+      reasonCode: ReasonCodes.BRIDGE_CONNECTIVITY_FAILED,
+      error: error?.message || 'sendMessage-failed'
+    });
+    throw error;
+  }
+  return waitPromise;
+}
+
+async function findLiveChatTab() {
+  const active = await getActiveChatTab();
+  if (active) {
+    return active;
+  }
+  try {
+    const tabs = await chrome.tabs.query({ url: [CHAT_URL_PATTERN] });
+    if (!Array.isArray(tabs) || !tabs.length) {
+      return null;
+    }
+    return tabs
+      .slice()
+      .sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+  } catch (error) {
+    await runnerWarn('Failed to enumerate live chat tabs', withReason('chat_tab_query_failed', { error: error?.message }));
+    return null;
+  }
 }
 
 function defaultReport() {
@@ -261,6 +481,7 @@ function buildSoftDeleteJustification(item, settings) {
 
 function buildSoftDeletePlanItem(item, settings) {
   const justification = buildSoftDeleteJustification(item, settings);
+  const endpoint = getPatchEndpoint(item.convoId) || `/conversation/${encodeURIComponent(item.convoId || '')}`;
   const planItem = {
     convoId: item.convoId || '',
     url: item.url || '',
@@ -272,7 +493,7 @@ function buildSoftDeletePlanItem(item, settings) {
     reasons: Array.isArray(item.reasons) ? item.reasons.slice() : [],
     patch: {
       method: 'PATCH',
-      endpoint: `/conversation/${item.convoId || ''}`,
+      endpoint,
       body: { is_visible: false }
     },
     justification,
@@ -446,6 +667,12 @@ function normalizeSettings(raw) {
       .map((token) => token.trim())
       .filter(Boolean);
   }
+  if (!Array.isArray(merged.LIVE_WHITELIST_HOSTS)) {
+    merged.LIVE_WHITELIST_HOSTS = String(merged.LIVE_WHITELIST_HOSTS || '')
+      .split(',')
+      .map((token) => token.trim())
+      .filter(Boolean);
+  }
   const parsedLimit = Number.parseInt(merged.REPORT_LIMIT, 10);
   merged.REPORT_LIMIT = Number.isFinite(parsedLimit)
     ? Math.max(1, Math.floor(parsedLimit))
@@ -454,6 +681,16 @@ function normalizeSettings(raw) {
   merged.COOLDOWN_MIN = Number.isFinite(parsedCooldown)
     ? Math.max(0, Math.floor(parsedCooldown))
     : DEFAULT_SETTINGS.COOLDOWN_MIN;
+  const parsedBatch = Number.parseInt(merged.LIVE_PATCH_BATCH_LIMIT, 10);
+  merged.LIVE_PATCH_BATCH_LIMIT = Number.isFinite(parsedBatch)
+    ? Math.max(1, Math.floor(parsedBatch))
+    : DEFAULT_SETTINGS.LIVE_PATCH_BATCH_LIMIT;
+  const parsedRate = Number.parseInt(merged.LIVE_PATCH_RATE_LIMIT_PER_MIN, 10);
+  merged.LIVE_PATCH_RATE_LIMIT_PER_MIN = Number.isFinite(parsedRate)
+    ? Math.max(0, Math.floor(parsedRate))
+    : DEFAULT_SETTINGS.LIVE_PATCH_RATE_LIMIT_PER_MIN;
+  merged.LIVE_MODE_ENABLED = Boolean(merged.LIVE_MODE_ENABLED);
+  merged.LIVE_REQUIRE_EXPLICIT_CONFIRM = merged.LIVE_REQUIRE_EXPLICIT_CONFIRM !== false;
   merged.INCLUDE_BACKUP_SNAPSHOT_ID = Boolean(merged.INCLUDE_BACKUP_SNAPSHOT_ID);
   return merged;
 }
@@ -498,7 +735,240 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'PATCH_RESULT') {
+    if (message?.requestId) {
+      settleBridgeResponse(message.requestId, message.payload || {});
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === 'BRIDGE_CONNECTIVITY_RESULT') {
+    if (message?.requestId) {
+      settleBridgeResponse(message.requestId, message.payload || {});
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === 'CONTENT_ENSURE_BRIDGE') {
+    (async () => {
+      const tabId = sender?.tab?.id;
+      if (typeof tabId !== 'number') {
+        sendResponse({ ok: false, error: 'no-tab' });
+        return;
+      }
+      try {
+        const execOptions = {
+          target: { tabId },
+          world: 'MAIN',
+          files: ['bridge.js']
+        };
+        if (typeof sender?.frameId === 'number') {
+          execOptions.target.frameIds = [sender.frameId];
+        }
+        await chrome.scripting.executeScript(execOptions);
+        sendResponse({ ok: true });
+      } catch (error) {
+        await runnerWarn('Bridge script injection failed', withReason('bridge_inject_failed', {
+          tabId,
+          frameId: sender?.frameId ?? null,
+          error: error?.message
+        }));
+        sendResponse({ ok: false, error: error?.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === 'LIVE_TEST_CONNECTIVITY') {
+    (async () => {
+      const timer = createStopwatch();
+      try {
+        const settings = await getSettings();
+        const tab = await findLiveChatTab();
+        if (!tab) {
+          sendResponse({ ok: false, error: 'no_active_chat_tab_for_patch' });
+          return;
+        }
+        await injectContentScriptIfNeeded(tab.id);
+        const ready = await ensureBridgeReadyInTab(tab.id);
+        if (!ready) {
+          sendResponse({ ok: false, error: 'bridge_injection_failed' });
+          return;
+        }
+        let result;
+        try {
+          result = await dispatchBridgeConnectivity({ tabId: tab.id });
+        } catch (error) {
+          result = { ok: false, reasonCode: ReasonCodes.BRIDGE_CONNECTIVITY_FAILED, error: error?.message };
+        }
+        const elapsedMs = Math.round(timer.elapsedMs());
+        if (!result?.ok) {
+          const reason = result?.reasonCode || ReasonCodes.BRIDGE_CONNECTIVITY_FAILED;
+          await runnerWarn('Live connectivity test failed', withReason(reason, {
+            error: result?.error || 'bridge-connectivity-failed',
+            tabId: tab.id,
+            elapsedMs
+          }));
+          sendResponse({ ok: false, error: result?.error || 'bridge-connectivity-failed', reason, elapsedMs });
+          return;
+        }
+        await runnerInfo('Live connectivity test succeeded', withReason(ReasonCodes.BRIDGE_CONNECTIVITY_OK, {
+          status: result.status ?? null,
+          tabId: tab.id,
+          elapsedMs,
+          armed: isLiveModeArmed(settings)
+        }));
+        sendResponse({ ok: true, status: result.status ?? null, elapsedMs });
+      } catch (error) {
+        await runnerWarn('LIVE_TEST_CONNECTIVITY failed', withReason('live_connectivity_error', { error: error?.message }));
+        sendResponse({ ok: false, error: error?.message || 'live-connectivity-error' });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === 'LIVE_EXECUTE_BATCH') {
+    (async () => {
+      try {
+        const settings = await getSettings();
+        if (!isLiveModeArmed(settings)) {
+          await runnerWarn('Live batch blocked by safety guard', withReason(ReasonCodes.PATCH_BLOCKED_BY_SAFETY));
+          sendResponse({ ok: false, reason: ReasonCodes.PATCH_BLOCKED_BY_SAFETY });
+          return;
+        }
+        if (settings.LIVE_REQUIRE_EXPLICIT_CONFIRM && !message?.confirmed) {
+          await runnerWarn('Live batch blocked: confirmation missing', withReason(ReasonCodes.PATCH_BLOCKED_BY_SAFETY));
+          sendResponse({ ok: false, reason: ReasonCodes.PATCH_BLOCKED_BY_SAFETY });
+          return;
+        }
+        if (!settings.CONFIRM_BEFORE_DELETE) {
+          await runnerWarn('CONFIRM_BEFORE_DELETE disabled for live batch', withReason('confirm_disabled_live', {}));
+        }
+        const rawItems = Array.isArray(message?.items) ? message.items : [];
+        if (!rawItems.length) {
+          sendResponse({ ok: false, reason: 'no-items' });
+          return;
+        }
+        const tab = await findLiveChatTab();
+        if (!tab) {
+          sendResponse({ ok: false, reason: 'no_active_chat_tab_for_patch' });
+          return;
+        }
+        await injectContentScriptIfNeeded(tab.id);
+        const bridgeReady = await ensureBridgeReadyInTab(tab.id);
+        if (!bridgeReady) {
+          sendResponse({ ok: false, reason: 'bridge_injection_failed' });
+          return;
+        }
+        const batchLimit = Math.max(1, Number.parseInt(settings.LIVE_PATCH_BATCH_LIMIT, 10) || DEFAULT_SETTINGS.LIVE_PATCH_BATCH_LIMIT);
+        const deleteLimit = Math.max(1, Number.parseInt(settings.DELETE_LIMIT, 10) || DEFAULT_SETTINGS.DELETE_LIMIT);
+        const seen = new Set();
+        const results = [];
+        const historyEntries = [];
+        let dispatched = 0;
+        for (const item of rawItems) {
+          const convoId = (item?.convoId || '').trim();
+          const url = item?.url || '';
+          const title = item?.title || '';
+          const key = convoId || url;
+          if (!key || seen.has(key)) {
+            results.push({
+              convoId,
+              url,
+              title,
+              ok: false,
+              reasonCode: seen.has(key) ? ReasonCodes.PATCH_BLOCKED_BY_DUPLICATE : ReasonCodes.PATCH_BLOCKED_BY_SAFETY
+            });
+            seen.add(key);
+            continue;
+          }
+          seen.add(key);
+          if (dispatched >= batchLimit) {
+            results.push({ convoId, url, title, ok: false, reasonCode: ReasonCodes.PATCH_BLOCKED_BY_BATCH_LIMIT });
+            continue;
+          }
+          if (dispatched >= deleteLimit) {
+            results.push({ convoId, url, title, ok: false, reasonCode: ReasonCodes.PATCH_BLOCKED_BY_DELETE_LIMIT });
+            continue;
+          }
+          if (!hostWhitelisted(url, settings)) {
+            results.push({ convoId, url, title, ok: false, reasonCode: ReasonCodes.PATCH_BLOCKED_BY_WHITELIST });
+            continue;
+          }
+          if (!convoId) {
+            results.push({ convoId, url, title, ok: false, reasonCode: ReasonCodes.PATCH_BLOCKED_BY_SAFETY });
+            continue;
+          }
+          if (!consumeRateToken(settings)) {
+            results.push({ convoId, url, title, ok: false, reasonCode: ReasonCodes.PATCH_BLOCKED_BY_RATE_LIMIT });
+            continue;
+          }
+          dispatched += 1;
+          let patchResult;
+          try {
+            patchResult = await dispatchBridgePatch({ tabId: tab.id, convoId, visible: false });
+          } catch (error) {
+            patchResult = {
+              ok: false,
+              reasonCode: ReasonCodes.PATCH_BRIDGE_ERROR,
+              error: error?.message || 'dispatch-failed'
+            };
+          }
+          if (patchResult?.ok) {
+            results.push({ convoId, url, title, ok: true, reasonCode: ReasonCodes.PATCH_OK, status: patchResult.status ?? null });
+            historyEntries.push({
+              ts: Date.now(),
+              convoId,
+              url,
+              title,
+              patch: { is_visible: false },
+              result: 'ok'
+            });
+          } else if (patchResult?.reasonCode === ReasonCodes.PATCH_BRIDGE_TIMEOUT) {
+            results.push({ convoId, url, title, ok: false, reasonCode: ReasonCodes.PATCH_BRIDGE_TIMEOUT });
+          } else if (patchResult?.status) {
+            const reason = buildPatchHttpReason(patchResult.status);
+            results.push({
+              convoId,
+              url,
+              title,
+              ok: false,
+              reasonCode: reason,
+              status: patchResult.status,
+              error: patchResult?.error || null
+            });
+          } else {
+            results.push({
+              convoId,
+              url,
+              title,
+              ok: false,
+              reasonCode: patchResult?.reasonCode || ReasonCodes.PATCH_BRIDGE_ERROR,
+              error: patchResult?.error || null
+            });
+          }
+        }
+        if (historyEntries.length) {
+          await appendConfirmedHistory(historyEntries);
+        }
+        await runnerInfo('Live patch batch completed', withReason(ReasonCodes.LIVE_BATCH_COMPLETED, {
+          requested: rawItems.length,
+          dispatched,
+          successes: historyEntries.length,
+          tabId: tab.id
+        }));
+        sendResponse({ ok: true, results, meta: { requested: rawItems.length, dispatched } });
+      } catch (error) {
+        await runnerWarn('LIVE_EXECUTE_BATCH failed', withReason('live_execute_failed', { error: error?.message }));
+        sendResponse({ ok: false, reason: error?.message || 'live-execute-failed' });
+      }
+    })();
+    return true;
+  }
+
   if (message?.type === 'scanNow') {
     handleScanRequest({
       trigger: 'manual-scan',

@@ -92,6 +92,64 @@
       </table>
     </div>
   </div>
+  <div class="tab-card" data-role="live-mode-card">
+    <div class="flex-between">
+      <h3>Live Mode (real PATCH)</h3>
+      <span class="badge" data-role="live-arm-status">SAFE (dry-run)</span>
+    </div>
+    <p class="tab-copy">
+      Live Mode vykoná reálne PATCH iba pri LIST_ONLY=false a DRY_RUN=false a po explicitnom potvrdení. Operácie sú lokálne limitované a logované.
+    </p>
+    <div class="inline-group">
+      <button data-action="live-test">Test page bridge</button>
+      <small data-role="live-test-result"></small>
+    </div>
+    <div class="inline-group">
+      <button class="secondary" data-action="live-load-plan">Load from DRY-RUN plan</button>
+      <button data-action="live-open-confirm" disabled>Confirm LIVE soft-delete (PATCH)</button>
+    </div>
+    <div class="table-scroll" data-role="live-selection-container" hidden>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Select</th>
+            <th>Title</th>
+            <th>Convo</th>
+            <th>URL</th>
+          </tr>
+        </thead>
+        <tbody data-role="live-selection-rows"></tbody>
+      </table>
+    </div>
+    <div class="tab-card" data-role="live-results-card" hidden>
+      <div class="flex-between">
+        <strong>Last LIVE batch</strong>
+        <button class="secondary" data-action="live-copy-results" disabled>Copy JSON</button>
+      </div>
+      <ul data-role="live-results-list"></ul>
+    </div>
+    <p class="tab-copy" data-role="live-selection-hint" hidden></p>
+    <p class="tab-copy" data-role="live-batch-note" hidden></p>
+    <dialog data-role="live-confirm-dialog">
+      <form method="dialog" class="modal-body">
+        <header class="flex-between">
+          <strong>Confirm LIVE soft-delete</strong>
+          <button type="submit" value="cancel" class="secondary">Cancel</button>
+        </header>
+        <p data-role="live-confirm-summary"></p>
+        <ul data-role="live-confirm-list"></ul>
+        <p data-role="live-confirm-limits"></p>
+        <p class="tab-copy" data-role="live-confirm-warning" hidden></p>
+        <label>
+          <input type="checkbox" data-role="live-confirm-ack" /> I understand this sends real PATCH requests.
+        </label>
+        <footer class="flex-between">
+          <button type="submit" value="cancel" class="secondary">Back</button>
+          <button value="confirm" data-action="live-confirm-submit">Send PATCH batch</button>
+        </footer>
+      </form>
+    </dialog>
+  </div>
   <div class="tab-card" data-role="probe-container">
     <div class="flex-between">
       <h3>Extractor Self-Test</h3>

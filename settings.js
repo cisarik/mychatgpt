@@ -19,7 +19,12 @@ const DEFAULT_SETTINGS = {
   TRACE_EXTRACTOR: false,
   TRACE_RUNNER: false,
   REDACT_TEXT_IN_DIAGNOSTICS: true,
-  DIAGNOSTICS_SAFE_SNAPSHOT: false
+  DIAGNOSTICS_SAFE_SNAPSHOT: false,
+  LIVE_MODE_ENABLED: false,
+  LIVE_WHITELIST_HOSTS: ['chatgpt.com'],
+  LIVE_PATCH_BATCH_LIMIT: 5,
+  LIVE_PATCH_RATE_LIMIT_PER_MIN: 10,
+  LIVE_REQUIRE_EXPLICIT_CONFIRM: true
 };
 
 const FIELD_DEFS = [
@@ -32,6 +37,22 @@ const FIELD_DEFS = [
   },
   { key: 'DRY_RUN', label: 'DRY_RUN', type: 'checkbox', group: 'safety' },
   { key: 'CONFIRM_BEFORE_DELETE', label: 'CONFIRM_BEFORE_DELETE', type: 'checkbox', group: 'safety' },
+  { key: 'LIVE_MODE_ENABLED', label: 'LIVE_MODE_ENABLED', type: 'checkbox', group: 'safety' },
+  {
+    key: 'LIVE_REQUIRE_EXPLICIT_CONFIRM',
+    label: 'LIVE_REQUIRE_EXPLICIT_CONFIRM',
+    type: 'checkbox',
+    group: 'safety'
+  },
+  { key: 'LIVE_PATCH_BATCH_LIMIT', label: 'LIVE_PATCH_BATCH_LIMIT', type: 'number', min: 1, group: 'safety' },
+  {
+    key: 'LIVE_PATCH_RATE_LIMIT_PER_MIN',
+    label: 'LIVE_PATCH_RATE_LIMIT_PER_MIN',
+    type: 'number',
+    min: 0,
+    group: 'safety'
+  },
+  { key: 'LIVE_WHITELIST_HOSTS', label: 'LIVE_WHITELIST_HOSTS', type: 'textarea', group: 'safety' },
   { key: 'AUTO_SCAN', label: 'AUTO_SCAN', type: 'checkbox', group: 'automation' },
   { key: 'COOLDOWN_MIN', label: 'COOLDOWN_MIN', type: 'number', min: 0, group: 'automation' },
   { key: 'MAX_MESSAGES', label: 'MAX_MESSAGES', type: 'number', min: 1, group: 'heuristics' },
@@ -70,7 +91,7 @@ const FIELD_DEFS = [
 ];
 
 function toDisplayValue(key, value) {
-  if (key === 'SAFE_URL_PATTERNS') {
+  if (key === 'SAFE_URL_PATTERNS' || key === 'LIVE_WHITELIST_HOSTS') {
     if (Array.isArray(value)) {
       return arrayToCsv(value);
     }
@@ -84,10 +105,23 @@ function normalizeSettings(raw) {
   if (!Array.isArray(merged.SAFE_URL_PATTERNS)) {
     merged.SAFE_URL_PATTERNS = csvToArray(merged.SAFE_URL_PATTERNS || '');
   }
+  if (!Array.isArray(merged.LIVE_WHITELIST_HOSTS)) {
+    merged.LIVE_WHITELIST_HOSTS = csvToArray(merged.LIVE_WHITELIST_HOSTS || '');
+  }
   const parsedLimit = Number.parseInt(merged.REPORT_LIMIT, 10);
   merged.REPORT_LIMIT = Number.isFinite(parsedLimit)
     ? Math.max(1, Math.floor(parsedLimit))
     : DEFAULT_SETTINGS.REPORT_LIMIT;
+  const parsedBatch = Number.parseInt(merged.LIVE_PATCH_BATCH_LIMIT, 10);
+  merged.LIVE_PATCH_BATCH_LIMIT = Number.isFinite(parsedBatch)
+    ? Math.max(1, Math.floor(parsedBatch))
+    : DEFAULT_SETTINGS.LIVE_PATCH_BATCH_LIMIT;
+  const parsedRate = Number.parseInt(merged.LIVE_PATCH_RATE_LIMIT_PER_MIN, 10);
+  merged.LIVE_PATCH_RATE_LIMIT_PER_MIN = Number.isFinite(parsedRate)
+    ? Math.max(0, Math.floor(parsedRate))
+    : DEFAULT_SETTINGS.LIVE_PATCH_RATE_LIMIT_PER_MIN;
+  merged.LIVE_MODE_ENABLED = Boolean(merged.LIVE_MODE_ENABLED);
+  merged.LIVE_REQUIRE_EXPLICIT_CONFIRM = merged.LIVE_REQUIRE_EXPLICIT_CONFIRM !== false;
   merged.INCLUDE_BACKUP_SNAPSHOT_ID = Boolean(merged.INCLUDE_BACKUP_SNAPSHOT_ID);
   return merged;
 }
@@ -176,7 +210,7 @@ export async function init({ root }) {
     } else {
       value = target.value;
     }
-    if (key === 'SAFE_URL_PATTERNS') {
+    if (key === 'SAFE_URL_PATTERNS' || key === 'LIVE_WHITELIST_HOSTS') {
       const arr = csvToArray(value);
       target.value = arrayToCsv(arr);
       value = arr;

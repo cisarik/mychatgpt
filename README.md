@@ -40,6 +40,18 @@ MyChatGPT keeps your ChatGPT account tidy while storing short “search-like” 
 - Use **Regenerate plan from current report** after an auto-scan to refresh the plan (respecting `REPORT_LIMIT` and deduplicated by conversation). **Simulate batch confirm (log-only)** only appends to `soft_delete_confirmed_history` and logs `dry_run_confirmed`; nothing hits the network.
 - Export the JSON plan for external review, clear the plan if you want to start over, and rely on the popup badge to track how many DRY-RUN deletions are staged.
 
+## Live Safe Mode (real PATCH with guard rails)
+- Arm Live Mode only when **all** safety toggles agree: set `LIST_ONLY=false`, `DRY_RUN=false`, and `LIVE_MODE_ENABLED=true`. The Debug badge switches from **SAFE (dry-run)** to **ARMED (live)** once every guard is off.
+- Real PATCH requests are dispatched via a page-context bridge (`bridge.js`) injected into chatgpt.com. Because the bridge runs in the main world it reuses the site's cookies, bypasses CORS, and never exposes credentials to the extension process.
+- Live settings expose a host whitelist, per-minute rate limiter, and per-batch limit that is additionally gated by `DELETE_LIMIT`. The Debug card loads candidates from the DRY-RUN plan into a checkbox table; you must explicitly confirm the batch in a modal and acknowledge the final warning before any PATCH fires.
+- Successful items are logged with `patch_ok`, appended to `soft_delete_confirmed_history`, and summarized under **Last LIVE batch**. Blocked items surface reason codes such as `patch_blocked_by_whitelist`, `patch_blocked_by_rate_limit`, or `patch_bridge_timeout` so you know why they stayed local.
+
+### Live Mode troubleshooting
+- `no_injection`: force-inject the content script from Debug or reload the chat tab; the bridge only loads on `https://chatgpt.com` in the top frame.
+- `patch_bridge_timeout`: ensure at least one active chatgpt.com tab is open and focused; the bridge fetch relies on the page context.
+- `patch_http_error_401/403`: refresh chatgpt.com to refresh cookies or reauthenticate before retrying.
+- To re-arm, flip any of `LIST_ONLY`, `DRY_RUN`, or `LIVE_MODE_ENABLED` back to `true`, then disable them in sequence once you are ready to run another live batch.
+
 ## Troubleshooting `no_injection`
 If you see `reasonCode=no_injection` in the logs, open the **Debug** tab, click **Force inject content script**, or reload the chat tab. Remember to reload the extension after any manifest changes.
 
