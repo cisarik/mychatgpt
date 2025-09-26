@@ -2,7 +2,7 @@ import {
   DeletionStrategyIds,
   DEFAULT_SETTINGS,
   getConvoUrl,
-  getConversationIdFromUrl,
+  getConvoIdFromUrl,
   normalizeChatUrl,
   normalizeSettings,
   now,
@@ -58,8 +58,8 @@ export function createUiAutomationDeletionStrategy(deps = {}) {
           break;
         }
         const rawUrl = urls[index];
-        const canonical = normalizeChatUrl(rawUrl) || getConvoUrl(getConversationIdFromUrl(rawUrl));
-        const convoId = getConversationIdFromUrl(canonical) || getConversationIdFromUrl(rawUrl) || '';
+        const canonical = normalizeChatUrl(rawUrl) || getConvoUrl(getConvoIdFromUrl(rawUrl));
+        const convoId = getConvoIdFromUrl(canonical) || getConvoIdFromUrl(rawUrl) || '';
         if (!canonical) {
           results.push({
             convoId,
@@ -102,10 +102,10 @@ async function attemptAutomation({ convoId, url, settings, maxRetries, debug }) 
     try {
       const tab = await ensureTabReady(url, settings.risky_step_timeout_ms, debug);
       await preloadSelectors(tab.id);
-      const guardOk = await guardConversationReady(tab.id, settings.risky_step_timeout_ms);
-      if (!guardOk) {
+      const guardStatus = await guardConversationReady(tab.id, settings.risky_step_timeout_ms);
+      if (!guardStatus?.ok) {
         lastError = {
-          reason: 'conversation_not_ready',
+          reason: guardStatus?.reason || 'conversation_not_ready',
           step: 'guard',
           attempt: attempt + 1
         };
@@ -274,19 +274,26 @@ async function guardConversationReady(tabId, timeoutMs) {
       }
       return selectors
         .waitForAppShell({ timeoutMs })
-        .then(() => selectors.waitForConversationView({ timeoutMs }))
-        .then(() => ({ ok: true }))
+        .then(async (shell) => ({
+          ok: true,
+          shell,
+          conversation: await selectors.waitForConversationView({ timeoutMs })
+        }))
         .catch((error) => {
           console.warn(`${prefix} Guard failed`, {
             message: error?.message || String(error),
             code: error?.code
           });
-          return { ok: false, reason: error?.message || 'guard_failed', code: error?.code };
+          return {
+            ok: false,
+            reason: error?.code || 'guard_failed',
+            message: error?.message || String(error)
+          };
         });
     },
     args: [{ timeoutMs, prefix: PREFIX }]
   });
-  return Boolean(response?.result?.ok);
+  return response?.result || { ok: false, reason: 'guard_failed' };
 }
 
 /** Slovensky: Prenos logiky na stránku. */
@@ -299,156 +306,264 @@ async function runDeletionAutomation(payload) {
     settings,
     prefix
   } = payload;
-  const start = Date.now();
-  const pageLog = (message, meta = undefined) => {
-    if (meta !== undefined) {
-      console.log(`${prefix} ${message}`, meta);
-    } else {
-      console.log(`${prefix} ${message}`);
-    }
-  };
-  const sleepFrame = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+
   const selectors = globalThis.RiskySelectors;
   if (!selectors) {
-    pageLog('Selectors unavailable');
+    console.warn(`${prefix} selectors unavailable`);
     return { ok: false, reason: 'selectors_missing', step: 'init' };
   }
-  const triggerClick = (node) => {
-    if (node instanceof HTMLElement) {
-      node.dispatchEvent(
-        new MouseEvent('click', { bubbles: true, cancelable: true, composed: true })
-      );
+
+  const dryRun = Boolean(settings?.dry_run);
+  const stepTimeout = Number.isFinite(settings?.risky_step_timeout_ms)
+    ? Math.max(500, settings.risky_step_timeout_ms)
+    : 8000;
+
+  const log = (level, message, meta) => {
+    if (meta !== undefined) {
+      console[level](`${prefix} ${message}`, meta);
+    } else {
+      console[level](`${prefix} ${message}`);
     }
   };
 
-  try {
-    pageLog('Probe start', { attempt });
-    pageLog(`Attempt ${attempt}: started`, { convoId, url });
-    if (jitter > 0) {
-      pageLog(`Applying jitter ${jitter}ms`);
-      await sleepFrame(jitter);
+  const toErrorMeta = (error) => {
+    if (!error) {
+      return { code: 'error', message: 'unknown' };
     }
-    if (!isLoggedIn()) {
-      pageLog('Login guard failed');
-      return { ok: false, reason: 'not_logged_in', step: 'guard-login' };
-    }
-    await dismissDraftBanner(pageLog);
-    const kebab = await selectors.findKebabButton(document, {
-      timeoutMs: settings.risky_step_timeout_ms
-    });
-    pageLog('FOUND kebab button', summarizeElement(kebab));
-    if (settings.dry_run) {
-      pageLog('DRY RUN: opening kebab menu for validation', summarizeElement(kebab));
-    }
-    triggerClick(kebab);
-    await sleepFrame(120);
-
-    const menuItem = await selectors.findDeleteMenuItem(document, {
-      timeoutMs: settings.risky_step_timeout_ms
-    });
-    pageLog('FOUND delete menu item', summarizeElement(menuItem));
-    if (settings.dry_run) {
-      pageLog('DRY RUN: opening delete confirmation for validation', summarizeElement(menuItem));
-      triggerClick(menuItem);
-    } else {
-      menuItem.click();
-    }
-
-    const confirmButton = await selectors.findConfirmDeleteButton(document, {
-      timeoutMs: settings.risky_step_timeout_ms
-    });
-    pageLog('FOUND confirm button', summarizeElement(confirmButton));
-
-    if (settings.dry_run) {
-      pageLog('DRY RUN: would confirm deletion', summarizeElement(confirmButton));
-      dismissDialog(confirmButton);
-      return { ok: true, reason: 'dry_run', step: 'confirm' };
-    }
-
-    confirmButton.click();
-    pageLog('Confirm click dispatched');
-
-    const verified = await verifyDeletion({ selectors, convoId, url, timeout: settings.risky_step_timeout_ms, sleepFrame, pageLog });
-    if (!verified) {
-      return { ok: false, reason: 'verify_timeout', step: 'verify' };
-    }
-    pageLog(`Deletion verified in ${Date.now() - start}ms`);
-    return { ok: true, reason: 'deleted', step: 'verify' };
-  } catch (error) {
-    const code = error?.code || 'error';
-    const reason = typeof error?.reason === 'string' ? error.reason : code;
-    pageLog('Automation error', {
-      code,
-      reason,
-      message: error?.message || String(error),
-      attempted: Array.isArray(error?.attempted) ? error.attempted : undefined
-    });
-    return {
-      ok: false,
-      reason,
-      step: error?.step || code,
-      details: error
+    const meta = {
+      code: error.code || error.reason || 'error',
+      message: error.message || error.code || error.reason || String(error)
     };
+    if (error.reason) {
+      meta.reason = error.reason;
+    }
+    if (Array.isArray(error.attempted) && error.attempted.length) {
+      meta.attempted = error.attempted;
+    }
+    if (Number.isFinite(error.timeoutMs)) {
+      meta.timeoutMs = error.timeoutMs;
+    }
+    return meta;
+  };
+
+  const failure = (step, error) => ({
+    ok: false,
+    reason: error?.reason || error?.code || 'automation_failed',
+    step,
+    details: toErrorMeta(error)
+  });
+
+  const timedStep = async (step, path, action) => {
+    const started = Date.now();
+    try {
+      const result = await action();
+      const duration = Date.now() - started;
+      const evidence = result?.evidence || result;
+      if (evidence !== undefined) {
+        log('log', `step=${step} path=${path} ok in ${duration}ms`, evidence);
+      } else {
+        log('log', `step=${step} path=${path} ok in ${duration}ms`);
+      }
+      return { ok: true, result, duration };
+    } catch (error) {
+      const duration = Date.now() - started;
+      log('warn', `step=${step} path=${path} failed in ${duration}ms`, toErrorMeta(error));
+      return { ok: false, error, duration };
+    }
+  };
+
+  const dispatchClick = (element) => {
+    element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
+  };
+
+  log('log', `attempt=${attempt} start`, { convoId, url });
+  if (Number.isFinite(jitter) && jitter > 0) {
+    log('log', 'step=jitter apply', { ms: jitter });
+    await selectors.sleep(jitter);
   }
+
+  if (!isLoggedIn()) {
+    log('warn', 'login guard failed');
+    return { ok: false, reason: 'not_logged_in', step: 'guard-login' };
+  }
+
+  await dismissDraftBanner((meta) => log('log', 'closing draft banner', meta));
+
+  const shellStep = await timedStep('guard', 'appShell', () => selectors.waitForAppShell({ timeoutMs: stepTimeout }));
+  if (!shellStep.ok) {
+    return failure('guard', shellStep.error);
+  }
+
+  const conversationStatus = await selectors.waitForConversationView({ timeoutMs: stepTimeout });
+  if (conversationStatus.ready) {
+    log('log', 'step=guard path=conversation ok', conversationStatus.evidence);
+  } else {
+    log('warn', 'step=guard path=conversation not-ready', {
+      attempted: conversationStatus.attempted,
+      timeoutMs: conversationStatus.timeoutMs
+    });
+  }
+
+  let path = 'header';
+  let kebabResult = null;
+
+  if (conversationStatus.ready) {
+    const headerAttempt = await timedStep('findKebab', 'header', () => selectors.findHeaderKebab({ timeoutMs: stepTimeout }));
+    if (headerAttempt.ok) {
+      kebabResult = headerAttempt.result;
+    }
+  } else {
+    log('log', 'step=findKebab path=header skipped', { reason: 'conversation_not_ready' });
+  }
+
+  if (!kebabResult) {
+    path = 'sidebar';
+    const ensureSidebar = await timedStep('ensureSidebar', path, () => selectors.ensureSidebarVisible({ timeoutMs: stepTimeout }));
+    if (!ensureSidebar.ok) {
+      return failure('findKebab', ensureSidebar.error);
+    }
+    const sidebarAttempt = await timedStep('findKebab', path, () => selectors.findSidebarSelectedItemByConvoId(convoId, { timeoutMs: stepTimeout }));
+    if (!sidebarAttempt.ok) {
+      return failure('findKebab', sidebarAttempt.error);
+    }
+    kebabResult = sidebarAttempt.result;
+  }
+
+  const kebab = kebabResult?.element;
+  if (!(kebab instanceof HTMLElement)) {
+    return failure('findKebab', { code: 'kebab_missing', message: 'Conversation kebab missing' });
+  }
+
+  await selectors.reveal(kebab);
+  log('log', `step=reveal path=${path}`, kebabResult.evidence);
+  if (dryRun) {
+    console.log(`${prefix} DRY RUN would click:`, kebabResult.evidence);
+  }
+  dispatchClick(kebab);
+  await selectors.sleep(150);
+
+  const menuResult = await timedStep('findMenu', path, () => selectors.findDeleteMenuItem({ timeoutMs: stepTimeout }));
+  if (!menuResult.ok) {
+    return failure('findMenu', menuResult.error);
+  }
+  const deleteButton = menuResult.result.element;
+  await selectors.reveal(deleteButton);
+  if (dryRun) {
+    console.log(`${prefix} DRY RUN would click:`, menuResult.result.evidence);
+    dispatchClick(deleteButton);
+  } else {
+    dispatchClick(deleteButton);
+  }
+  await selectors.sleep(150);
+
+  const confirmResult = await timedStep('findConfirm', path, () => selectors.findConfirmDeleteButton({ timeoutMs: stepTimeout }));
+  if (!confirmResult.ok) {
+    return failure('findConfirm', confirmResult.error);
+  }
+  const confirmButton = confirmResult.result.element;
+  await selectors.reveal(confirmButton);
+  if (dryRun) {
+    console.log(`${prefix} DRY RUN would click:`, confirmResult.result.evidence);
+    dismissDialog(confirmButton);
+    return { ok: true, reason: 'dry_run', step: 'confirm' };
+  }
+
+  dispatchClick(confirmButton);
+
+  const verifyStep = await timedStep('verify', path, async () => {
+    const outcome = await verifyDeletion({ selectors, convoId, url, timeout: stepTimeout });
+    if (!outcome.ok) {
+      throw { code: outcome.reason || 'verify_timeout', reason: outcome.reason || 'verify_timeout', timeoutMs: outcome.timeoutMs };
+    }
+    return outcome;
+  });
+
+  if (!verifyStep.ok) {
+    return failure('verify', verifyStep.error);
+  }
+
+  log('log', `attempt=${attempt} completed`, { reason: verifyStep.result.reason });
+  return { ok: true, reason: verifyStep.result.reason, step: 'verify' };
 }
 
 /** Slovensky: Overí, že konverzácia zmizla. */
-async function verifyDeletion({ selectors, convoId, url, timeout, sleepFrame, pageLog }) {
-  const deadline = Date.now() + Math.max(2000, timeout || 5000);
+async function verifyDeletion({ selectors, convoId, url, timeout }) {
+  const timeoutMs = Math.max(2000, Number.isFinite(timeout) ? timeout : 5000);
+  const deadline = Date.now() + timeoutMs;
   const targetPath = (() => {
     try {
-      const parsed = new URL(url);
-      return parsed.pathname;
+      return new URL(url, location.origin).pathname;
     } catch (_error) {
-      return `/c/${convoId}`;
+      return null;
     }
   })();
+  const convoRegex = convoId ? new RegExp(`/c/${convoId}(/|$)`) : null;
+
+  const isVisible = (element) => {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+
   while (Date.now() <= deadline) {
-    if (location.pathname !== targetPath) {
-      pageLog('URL changed, assuming success', { from: targetPath, to: location.pathname });
-      return true;
+    if (targetPath && location.pathname !== targetPath) {
+      return { ok: true, reason: 'url_changed', evidence: { from: targetPath, to: location.pathname } };
     }
-    const toast = selectors.byText(document.body, selectors.TOAST_REGEX || /(deleted|removed|odstránen|zmazan)/i);
-    if (toast && toast.closest('[role="status"],[role="alert"]')) {
-      pageLog('Toast detected', summarizeElement(toast));
-      return true;
+    if (convoRegex && !convoRegex.test(location.pathname)) {
+      return { ok: true, reason: 'url_changed', evidence: { to: location.pathname } };
     }
-    const header = document.querySelector('[data-testid="conversation-main"] header');
-    if (!header) {
-      pageLog('Conversation header missing, assuming removed');
-      return true;
+
+    const headerVisible = selectors
+      .queryAllDeep(document, 'main header[data-testid*="conversation" i]', 'main [data-testid*="conversation-header" i]')
+      .some(isVisible);
+    if (!headerVisible) {
+      return { ok: true, reason: 'header_missing' };
     }
-    await sleepFrame(160);
+
+    const toast = selectors.byTextDeep(document.body, selectors.TOAST_REGEX);
+    if (toast) {
+      const host = toast.closest('[role="alert"],[role="status"],[data-testid*="toast" i]') || toast;
+      return { ok: true, reason: 'toast', evidence: selectors.describeElement(host) };
+    }
+
+    await selectors.sleep(200);
   }
-  return false;
+
+  return { ok: false, reason: 'verify_timeout', timeoutMs };
 }
 
 /** Slovensky: Krátko zavrie modálne okno pri dry-run režime. */
 function dismissDialog(button) {
   const dialog = button?.closest('[role="dialog"],[role="alertdialog"]');
   if (!dialog) {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     return;
   }
   const closeButton = dialog.querySelector('button[aria-label*="close" i], button[aria-label*="cancel" i]');
-  if (closeButton) {
+  if (closeButton instanceof HTMLElement) {
     closeButton.click();
-    return;
+  } else {
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   }
-  dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
 }
 
 /** Slovensky: Pokus o zatvorenie baneru s draftom. */
-async function dismissDraftBanner(pageLog) {
+async function dismissDraftBanner(logger) {
   const banner = document.querySelector('[data-testid*="draft"]');
   if (!banner) {
     return;
   }
   const close = banner.querySelector('button, [role="button"]');
-  if (close) {
-    pageLog('Closing draft banner', summarizeElement(close));
-    close.click();
-    await new Promise((resolve) => setTimeout(resolve, 120));
+  if (!close || !(close instanceof HTMLElement)) {
+    return;
   }
+  if (typeof logger === 'function') {
+    logger(summarizeElement(close));
+  }
+  close.click();
+  await new Promise((resolve) => setTimeout(resolve, 120));
 }
 
 /** Slovensky: Overí prítomnosť prihlásenia. */

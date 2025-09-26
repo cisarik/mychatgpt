@@ -21,9 +21,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
   deletionStrategyId: DeletionStrategyIds.MANUAL_OPEN,
   risky_mode_enabled: false,
   risky_session_until: null,
-  risky_jitter_ms: [120, 380],
-  risky_step_timeout_ms: 5000,
-  risky_between_tabs_ms: 700,
+  risky_jitter_ms: [140, 420],
+  risky_step_timeout_ms: 8000,
+  risky_between_tabs_ms: 900,
   risky_max_retries: 2,
   dry_run: false
 });
@@ -318,24 +318,33 @@ export function normalizeChatUrl(url) {
 }
 
 /**
- * Slovensky: Z URL vytiahne ID konverzácie.
- * @param {string} url
+ * Slovensky: Koherentne extrahuje ID konverzácie z ľubovoľného href.
+ * @param {string} href
  * @returns {string|null}
  */
-export function getConversationIdFromUrl(url) {
-  if (!url) {
+export function getConvoIdFromUrl(href) {
+  if (!href) {
     return null;
   }
   try {
-    const parsed = new URL(url, 'https://chatgpt.com');
-    const pieces = parsed.pathname.split('/').filter(Boolean);
-    if (pieces[0] === 'c' && pieces[1]) {
-      return pieces[1];
+    const parsed = new URL(href, 'https://chatgpt.com');
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    if (segments[0] === 'c' && segments[1]) {
+      return segments[1];
     }
     return null;
   } catch (_error) {
     return null;
   }
+}
+
+/**
+ * Slovensky: Zachová kompatibilitu pre staršie volania.
+ * @param {string} url
+ * @returns {string|null}
+ */
+export function getConversationIdFromUrl(url) {
+  return getConvoIdFromUrl(url);
 }
 
 /**

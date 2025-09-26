@@ -1,576 +1,663 @@
 (() => {
-  const POLL_STEP_MS = 120;
-  const DEFAULT_TIMEOUT_MS = 5000;
-  const MENU_LABEL_REGEX = /(more|actions|options|menu)/i;
-  const DELETE_TEXT_PATTERNS = [
+  const POLL_STEP_MS = 150;
+  const DEFAULT_TIMEOUTS = Object.freeze({
+    appShell: 8000,
+    conversation: 8000,
+    finder: 6000
+  });
+  const WALK_STOP = Symbol('walk-stop');
+  const TOAST_REGEX = /(deleted|removed|odstránen|odstranen|zmazan|zmazané)/i;
+  const MENUITEM_PATTERNS = [
     /^(delete|delete chat|delete conversation|remove)$/i,
     /^(odstrániť|odstranit|zmazať|zmazat)$/i
   ];
-  const DELETE_TESTID_REGEX = /(delete|remove)/i;
-  const CONFIRM_TEXT_PATTERNS = [
+  const MENUITEM_TESTID_REGEX = /(delete|remove)/i;
+  const CONFIRM_PATTERNS = [
     /^(delete|confirm delete|yes, delete)$/i,
     /^(odstrániť|zmazať|áno, odstrániť|ano, odstranit)$/i
   ];
   const CONFIRM_TESTID_REGEX = /confirm/i;
-  const TOAST_REGEX = /(deleted|removed|odstránen|zmazan)/i;
+  const CONVO_HEADER_SELECTORS = [
+    'main [data-testid*="conversation" i] header',
+    'main header[data-testid*="conversation" i]',
+    'main [data-testid*="thread-header" i]',
+    '[data-testid*="conversation"] header',
+    '[data-testid*="thread"] header'
+  ];
+  const SIDEBAR_ROOT_SELECTORS = [
+    'nav[aria-label*="conversations" i]',
+    'nav [data-testid*="sidebar" i]',
+    'aside nav',
+    '[data-testid*="sidebar" i]'
+  ];
+  const KEBAB_FALLBACK_SELECTORS = [
+    'button[aria-label*="conversation actions" i]',
+    '[data-testid*="actions" i] button',
+    'button[aria-label*="more" i]',
+    'button[title*="more" i]',
+    'button[aria-label*="options" i]',
+    'button[title*="options" i]',
+    'button[data-testid*="actions" i]',
+    'button[data-testid*="menu" i]',
+    '[role="button"][aria-label*="more" i]',
+    '[role="button"][title*="more" i]'
+  ];
+  const SIDEBAR_ITEM_SELECTORS = [
+    '[data-testid*="conversation-item" i][data-selected="true"], [data-testid*="conversation-item" i].bg-token-sidebar-surface-selected',
+    'a[aria-current="page" i]',
+    'li[aria-selected="true" i]',
+    '[role="option"][aria-selected="true" i]'
+  ];
+  const TOGGLE_BUTTON_LABEL = /(sidebar|menu|toggle|panel)/i;
+
+  function now() {
+    return Date.now();
+  }
+
+  function sleep(ms) {
+    const safe = Math.max(0, Number.isFinite(ms) ? ms : 0);
+    return new Promise((resolve) => setTimeout(resolve, safe));
+  }
+
+  function withTimeout(promise, timeoutMs, code = 'timeout') {
+    const limit = Math.max(0, Number.isFinite(timeoutMs) ? timeoutMs : DEFAULT_TIMEOUTS.finder);
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject({ code, timeoutMs: limit });
+        }, limit);
+      })
+    ]).finally(() => clearTimeout(timer));
+  }
 
   /**
-   * Slovensky: Trpezlivo čaká na splnenie podmienky.
-   * @template T
-   * @param {() => (T | false | null | undefined | Promise<T | false | null | undefined>)} predicate
-   * @param {{timeoutMs?:number, stepMs?:number}=} options
-   * @returns {Promise<T>}
+   * Depth-first walk that includes open shadow roots.
+   * @param {Node|Document|ShadowRoot|null|undefined} root
+   * @param {(node: Node) => (void|symbol)} predicate
    */
-  async function waitFor(predicate, options = {}) {
-    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUT_MS;
-    const stepMs = Number.isFinite(options.stepMs) ? Math.max(16, options.stepMs) : POLL_STEP_MS;
-    const deadline = Date.now() + timeoutMs;
-    let lastError = null;
-    while (Date.now() <= deadline) {
-      try {
-        const value = await predicate();
-        if (value) {
-          return value;
-        }
-      } catch (error) {
-        lastError = error;
+  function walk(root, predicate) {
+    const start = normalizeRoot(root);
+    if (!start || typeof predicate !== 'function') {
+      return;
+    }
+    const visited = new Set();
+    const stack = [start];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node || visited.has(node)) {
+        continue;
       }
-      await delay(stepMs);
+      visited.add(node);
+      const signal = predicate(node);
+      if (signal === WALK_STOP) {
+        return;
+      }
+      const children = collectChildren(node);
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        stack.push(children[index]);
+      }
     }
-    if (lastError) {
-      throw lastError;
-    }
-    throw new Error('waitFor_timeout');
   }
 
-  /** Slovensky: Čaká krátku dobu. */
-  function delay(ms) {
-    return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms || 0)));
-  }
-
-  /** Slovensky: Vráti Regex inštanciu. */
-  function ensureRegex(value, flags = 'i') {
-    if (value instanceof RegExp) {
-      return value;
+  function collectChildren(node) {
+    if (!node) {
+      return [];
     }
-    return new RegExp(String(value), flags);
+    const output = [];
+    if (node instanceof Element) {
+      if (node.shadowRoot && node.shadowRoot.mode === 'open') {
+        output.push(node.shadowRoot);
+      }
+    }
+    if (node instanceof Element || node instanceof Document || node instanceof DocumentFragment || node instanceof ShadowRoot) {
+      for (let index = 0; index < node.childNodes.length; index += 1) {
+        output.push(node.childNodes[index]);
+      }
+    }
+    return output;
   }
 
-  /** Slovensky: Určí rozsah vyhľadávania. */
-  function resolveScope(root) {
+  function normalizeRoot(root) {
     if (!root) {
       return typeof document !== 'undefined' ? document : null;
     }
-    if (root.nodeType === Node.DOCUMENT_NODE) {
-      return /** @type {Document} */ (root);
+    if (root instanceof Document || root instanceof ShadowRoot || root instanceof DocumentFragment) {
+      return root;
     }
-    if (root.ownerDocument) {
-      return /** @type {Document} */ (root.ownerDocument);
+    if (root instanceof Element) {
+      return root;
     }
-    if (typeof document !== 'undefined') {
-      return document;
-    }
-    return null;
+    return typeof document !== 'undefined' ? document : null;
   }
 
-  /** Slovensky: Vyhľadá element podľa textového regexu. */
-  function byText(root, regex) {
-    const scope = resolveScope(root) || root;
-    if (!scope) {
-      return null;
+  function ensureArray(value) {
+    if (Array.isArray(value)) {
+      return value;
     }
-    const matcher = ensureRegex(regex, regex instanceof RegExp ? undefined : 'i');
-    const doc = scope.ownerDocument || (scope.nodeType === Node.DOCUMENT_NODE ? scope : document);
-    const walker = doc.createTreeWalker(scope, NodeFilter.SHOW_ELEMENT, {
-      acceptNode(node) {
-        if (!(node instanceof HTMLElement)) {
-          return NodeFilter.FILTER_SKIP;
-        }
-        const text = (node.textContent || '').trim();
-        if (!text) {
-          return NodeFilter.FILTER_SKIP;
-        }
-        return matcher.test(text) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
-      }
-    });
-    return /** @type {HTMLElement|null} */ (walker.nextNode());
-  }
-
-  /** Slovensky: Nájde elementy podľa ARIA role a voliteľného textu. */
-  function roleQuery(root, role, textRegex = null) {
-    const scope = resolveScope(root) || root;
-    if (!scope || !role) {
+    if (value === undefined || value === null) {
       return [];
     }
-    const matcher = textRegex ? ensureRegex(textRegex) : null;
-    return Array.from(scope.querySelectorAll(`[role="${role}"]`)).filter((node) => {
-      if (!(node instanceof HTMLElement)) {
-        return false;
+    return [value];
+  }
+
+  function queryAllDeep(rootOrSelector, ...selectorList) {
+    const { root, selectors } = parseQueryArgs(rootOrSelector, selectorList);
+    if (!root || !selectors.length) {
+      return [];
+    }
+    const matches = new Set();
+    walk(root, (node) => {
+      if (!(node instanceof Element)) {
+        return;
       }
-      if (!matcher) {
-        return true;
+      for (const selector of selectors) {
+        try {
+          if (node.matches(selector)) {
+            matches.add(node);
+            return;
+          }
+        } catch (_error) {}
       }
-      return matchesAnyText(node, [matcher]);
     });
+    return Array.from(matches);
   }
 
-  /** Slovensky: Čaká na nachystanie shellu aplikácie. */
-  async function waitForAppShell(options = {}) {
-    return waitFor(() => {
-      const root = document.querySelector('[data-testid*="app" i], [id*="root" i], #__next');
-      if (!root) {
-        return false;
-      }
-      const main = root.querySelector('[role="main"], main[role="main"]') || document.querySelector('[role="main"]');
-      if (!main) {
-        return false;
-      }
-      return { root, main };
-    }, options);
-  }
-
-  /** Slovensky: Čaká na zobrazenie vlákna konverzácie. */
-  async function waitForConversationView(options = {}) {
-    return waitFor(() => {
-      const main = document.querySelector('[role="main"]') || document.querySelector('main') || document.body;
-      if (!main) {
-        return false;
-      }
-      const headerCandidate = getConversationHeader(main);
-      if (headerCandidate) {
-        return { area: headerCandidate, source: 'header' };
-      }
-      const thread = main.querySelector('[data-testid="conversation-main"], [data-testid*="conversation-turn"], [data-message-author-role]');
-      if (thread) {
-        return { area: thread, source: 'thread' };
-      }
-      const sidebar = getSelectedSidebarItem(main.ownerDocument || document);
-      if (sidebar) {
-        return { area: sidebar, source: 'sidebar' };
-      }
-      return false;
-    }, options);
-  }
-
-  /** Slovensky: Nájde kebab menu tlačidlo. */
-  async function findKebabButton(root, options = {}) {
-    const attempts = [];
-    try {
-      return await waitFor(() => locateKebab(root, attempts), options);
-    } catch (error) {
-      throw selectorError('findKebab', attempts, error);
-    }
-  }
-
-  /** Slovensky: Nájde položku Delete v menu. */
-  async function findDeleteMenuItem(root, options = {}) {
-    const attempts = [];
-    try {
-      return await waitFor(() => locateDelete(root, attempts), options);
-    } catch (error) {
-      throw selectorError('findDelete', attempts, error);
-    }
-  }
-
-  /** Slovensky: Nájde potvrdenie v modale. */
-  async function findConfirmDeleteButton(root, options = {}) {
-    const attempts = [];
-    try {
-      return await waitFor(() => locateConfirm(root, attempts), options);
-    } catch (error) {
-      throw selectorError('findConfirm', attempts, error);
-    }
-  }
-
-  /** Slovensky: Pokus o lokalizáciu kebab tlačidla. */
-  function locateKebab(root, attempts) {
-    const doc = resolveScope(root);
-    if (!doc) {
-      return false;
-    }
-    const main = doc.querySelector('[role="main"]') || doc.querySelector('main') || doc.body || doc;
-    const header = getConversationHeader(main);
-
-    if (header) {
-      const ariaButton = header.querySelector('button[aria-label*="conversation actions" i]');
-      recordAttempt(attempts, 'header_aria_conversation_actions', ariaButton);
-      if (isUsableButton(ariaButton)) {
-        return ensureInteractive(ariaButton);
-      }
-
-      const byRole = roleQuery(header, 'button').find((node) => matchesLabel(node, MENU_LABEL_REGEX));
-      recordAttempt(attempts, 'header_role_button_label', byRole);
-      if (isUsableButton(byRole)) {
-        return ensureInteractive(byRole);
-      }
-
-      const actionsTestId = header.querySelector('[data-testid*="actions" i] button, button[data-testid*="actions" i]');
-      recordAttempt(attempts, 'header_data_testid_actions', actionsTestId);
-      if (isUsableButton(actionsTestId)) {
-        return ensureInteractive(actionsTestId);
-      }
-
-      const headerDots = Array.from(header.querySelectorAll('button, [role="button"]')).find((node) => looksLikeKebab(node));
-      recordAttempt(attempts, 'header_svg_three_dots', headerDots);
-      if (isUsableButton(headerDots)) {
-        return ensureInteractive(headerDots);
-      }
+  function parseQueryArgs(rootOrSelector, selectorList) {
+    let root = null;
+    const selectors = [];
+    const maybeRoot = rootOrSelector;
+    if (maybeRoot instanceof Element || maybeRoot instanceof Document || maybeRoot instanceof ShadowRoot) {
+      root = maybeRoot;
+      selectors.push(...flattenSelectors(selectorList));
     } else {
-      recordAttempt(attempts, 'conversation_header_missing', null);
+      root = normalizeRoot(null);
+      selectors.push(...flattenSelectors([maybeRoot, ...selectorList]));
     }
-
-    const actionsFallback = main.querySelector('[data-testid*="actions" i] button, button[data-testid*="actions" i]');
-    recordAttempt(attempts, 'main_data_testid_actions', actionsFallback);
-    if (isUsableButton(actionsFallback)) {
-      return ensureInteractive(actionsFallback);
-    }
-
-    const generalDots = Array.from(main.querySelectorAll('button, [role="button"]')).find((node) => looksLikeKebab(node));
-    recordAttempt(attempts, 'main_svg_three_dots', generalDots);
-    if (isUsableButton(generalDots)) {
-      return ensureInteractive(generalDots);
-    }
-
-    const sidebarItem = getSelectedSidebarItem(doc);
-    recordAttempt(attempts, 'sidebar_selected_item', sidebarItem);
-    if (sidebarItem) {
-      const ariaSidebar = sidebarItem.querySelector('button[aria-label*="more" i], button[aria-label*="actions" i], button[title*="more" i], button[title*="actions" i]');
-      recordAttempt(attempts, 'sidebar_aria_actions', ariaSidebar);
-      if (isUsableButton(ariaSidebar)) {
-        return ensureInteractive(ariaSidebar);
-      }
-
-      const sidebarTestId = sidebarItem.querySelector('[data-testid*="conversation-item" i] button, button[data-testid*="conversation-item" i]');
-      recordAttempt(attempts, 'sidebar_data_testid_item', sidebarTestId);
-      if (isUsableButton(sidebarTestId)) {
-        return ensureInteractive(sidebarTestId);
-      }
-
-      const sidebarDots = Array.from(sidebarItem.querySelectorAll('button, [role="button"]')).find((node) => looksLikeKebab(node));
-      recordAttempt(attempts, 'sidebar_svg_three_dots', sidebarDots);
-      if (isUsableButton(sidebarDots)) {
-        return ensureInteractive(sidebarDots);
-      }
-    }
-
-    return false;
+    return { root, selectors };
   }
 
-  /** Slovensky: Pokus o lokalizáciu delete položky. */
-  function locateDelete(root, attempts) {
-    const doc = resolveScope(root);
-    if (!doc) {
-      return false;
-    }
-    const searchRoots = getMenuSearchRoots(doc);
-
-    for (const container of searchRoots) {
-      const roleMatch = roleQuery(container, 'menuitem').find((node) => matchesAnyText(node, DELETE_TEXT_PATTERNS));
-      recordAttempt(attempts, 'menu_role_menuitem_text', roleMatch);
-      if (isUsableButton(roleMatch)) {
-        return ensureInteractive(roleMatch);
+  function flattenSelectors(list) {
+    const flat = [];
+    for (const item of list.flat()) {
+      if (!item) {
+        continue;
       }
-
-      const testIdMatch = queryByTestId(container, DELETE_TESTID_REGEX);
-      recordAttempt(attempts, 'menu_data_testid_delete', testIdMatch);
-      if (isUsableButton(testIdMatch)) {
-        return ensureInteractive(testIdMatch);
+      if (Array.isArray(item)) {
+        flat.push(...flattenSelectors(item));
+      } else if (typeof item === 'string') {
+        flat.push(item);
       }
     }
-
-    const textFallback = findByAnyText(doc, DELETE_TEXT_PATTERNS);
-    recordAttempt(attempts, 'document_text_delete', textFallback);
-    if (isUsableButton(textFallback)) {
-      return ensureInteractive(textFallback);
-    }
-
-    return false;
+    return flat;
   }
 
-  /** Slovensky: Pokus o lokalizáciu confirm tlačidla. */
-  function locateConfirm(root, attempts) {
-    const doc = resolveScope(root);
-    if (!doc) {
-      return false;
+  function ensureRegex(value) {
+    if (value instanceof RegExp) {
+      return value;
     }
-    const searchRoots = getDialogSearchRoots(doc);
-
-    for (const container of searchRoots) {
-      const roleButtons = roleQuery(container, 'button');
-      const roleMatch = roleButtons.find((node) => matchesAnyText(node, CONFIRM_TEXT_PATTERNS));
-      recordAttempt(attempts, 'dialog_role_button_text', roleMatch);
-      if (isUsableButton(roleMatch)) {
-        return ensureInteractive(roleMatch);
-      }
-
-      const testIdMatch = queryByTestId(container, CONFIRM_TESTID_REGEX);
-      recordAttempt(attempts, 'dialog_data_testid_confirm', testIdMatch);
-      if (isUsableButton(testIdMatch)) {
-        return ensureInteractive(testIdMatch);
-      }
-    }
-
-    const textFallback = findByAnyText(doc, CONFIRM_TEXT_PATTERNS);
-    recordAttempt(attempts, 'document_text_confirm', textFallback);
-    if (isUsableButton(textFallback)) {
-      return ensureInteractive(textFallback);
-    }
-
-    return false;
-  }
-
-  /** Slovensky: Spustí jednorazovú sondu selektorov. */
-  async function probeSelectorsOnce(options = {}) {
-    const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
-    const prefix = typeof options.prefix === 'string' ? options.prefix : '[RiskyMode]';
-    const log = createLogger(prefix);
-    const summary = { kebab: false, deleteMenu: false, confirm: false };
-
-    try {
-      await waitForAppShell({ timeoutMs });
-      await waitForConversationView({ timeoutMs });
-    } catch (error) {
-      log('Probe guard failed', makeErrorMeta(error));
-      return summary;
-    }
-
-    let kebab;
-    try {
-      kebab = await findKebabButton(document, { timeoutMs });
-      summary.kebab = true;
-      log('Probe FOUND kebab', describeElement(kebab));
-    } catch (error) {
-      log('Probe NOT FOUND kebab', makeErrorMeta(error));
-      return summary;
-    }
-
-    safeClick(kebab);
-    await delay(80);
-
-    let deleteItem;
-    try {
-      deleteItem = await findDeleteMenuItem(document, { timeoutMs });
-      summary.deleteMenu = true;
-      log('Probe FOUND delete menu', describeElement(deleteItem));
-    } catch (error) {
-      log('Probe NOT FOUND delete menu', makeErrorMeta(error));
-      closeMenus();
-      return summary;
-    }
-
-    safeClick(deleteItem);
-    await delay(120);
-
-    try {
-      const confirm = await findConfirmDeleteButton(document, { timeoutMs });
-      summary.confirm = true;
-      log('Probe FOUND confirm button', describeElement(confirm));
-      dismissDialog(confirm);
-    } catch (error) {
-      log('Probe NOT FOUND confirm', makeErrorMeta(error));
-      closeMenus();
-    }
-
-    return summary;
-  }
-
-  /** Slovensky: Popíše element pre log. */
-  function describeElement(node) {
-    if (!(node instanceof HTMLElement)) {
+    if (value === undefined || value === null) {
       return null;
     }
-    const tag = node.tagName.toLowerCase();
-    const id = node.id ? `#${node.id}` : '';
-    const classes = node.className ? `.${String(node.className).trim().split(/\s+/).join('.')}` : '';
-    const label = node.getAttribute('aria-label') || node.getAttribute('title') || '';
-    const text = (node.textContent || '').trim().slice(0, 60);
-    return { tag: `${tag}${id}${classes}`, label, text };
+    return new RegExp(String(value), 'i');
   }
 
-  /** Slovensky: Vráti aktívny logovací callback. */
-  function createLogger(prefix) {
-    return (message, meta) => {
-      if (meta !== undefined) {
-        console.log(`${prefix} ${message}`, meta);
-      } else {
-        console.log(`${prefix} ${message}`);
+  function byTextDeep(rootOrRegex, regexMaybe) {
+    const { root, regex } = parseTextArgs(rootOrRegex, regexMaybe);
+    if (!regex) {
+      return null;
+    }
+    let found = null;
+    walk(root, (node) => {
+      if (!(node instanceof Element)) {
+        return;
       }
-    };
-  }
-
-  /** Slovensky: Formátuje chybu selektora. */
-  function makeErrorMeta(error) {
-    if (!error) {
-      return { message: 'unknown_error' };
-    }
-    const meta = { message: error.message || error.code || String(error) };
-    if (error.code) {
-      meta.code = error.code;
-    }
-    if (Array.isArray(error.attempted)) {
-      meta.attempted = error.attempted;
-    }
-    return meta;
-  }
-
-  /** Slovensky: Uzatvorí otvorené menu (Escape). */
-  function closeMenus() {
-    const menus = Array.from(document.querySelectorAll('[role="menu"]'));
-    menus.forEach((menu) => {
-      menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    });
-  }
-
-  /** Slovensky: Zatvorí modal bez potvrdenia. */
-  function dismissDialog(confirmButton) {
-    const dialog = confirmButton?.closest('[role="dialog"],[role="alertdialog"]');
-    if (!dialog) {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      return;
-    }
-    const cancel = dialog.querySelector('button[aria-label*="cancel" i], button.secondary, button[data-testid*="cancel" i]');
-    if (cancel) {
-      safeClick(cancel);
-    } else {
-      dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    }
-  }
-
-  /** Slovensky: Bezpečne klikne na element. */
-  function safeClick(node) {
-    const el = ensureInteractive(node);
-    if (!el) {
-      return;
-    }
-    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
-  }
-
-  /** Slovensky: Vybuduje chybu selektora. */
-  function selectorError(code, attempts, error) {
-    return {
-      code,
-      attempted: collapseAttempts(attempts),
-      message: error?.message || error?.code || 'timeout'
-    };
-  }
-
-  /** Slovensky: Zaznamená pokus. */
-  function recordAttempt(attempts, label, node) {
-    attempts.push({ label, success: Boolean(node) });
-  }
-
-  /** Slovensky: Zlúči pokusy. */
-  function collapseAttempts(attempts) {
-    const map = new Map();
-    attempts.forEach((entry) => {
-      if (!map.has(entry.label) || entry.success) {
-        map.set(entry.label, { label: entry.label, success: Boolean(entry.success) });
+      if (!isVisible(node)) {
+        return;
+      }
+      const text = visibleText(node);
+      if (regex.test(text)) {
+        found = node;
+        return WALK_STOP;
       }
     });
-    return Array.from(map.values());
+    return found;
   }
 
-  /** Slovensky: Získa konverzačný header. */
-  function getConversationHeader(main) {
-    if (!main) {
-      return null;
+  function roleQueryDeep(rootOrRole, roleMaybe, textRegexMaybe) {
+    const { root, role, regex } = parseRoleArgs(rootOrRole, roleMaybe, textRegexMaybe);
+    if (!role) {
+      return [];
     }
-    const selectors = [
-      '[data-testid*="conversation"] header',
-      '[data-testid*="thread"] header',
-      'header[data-testid*="conversation" i]',
-      '[data-testid*="view-header" i]',
-      '[data-testid*="conversation-header" i]'
-    ];
-    for (const selector of selectors) {
-      const candidate = main.querySelector(selector);
-      if (candidate instanceof HTMLElement) {
-        return candidate;
+    const matches = [];
+    walk(root, (node) => {
+      if (!(node instanceof Element)) {
+        return;
       }
-    }
-    return null;
-  }
-
-  /** Slovensky: Nájde vybranú položku v sidebare. */
-  function getSelectedSidebarItem(doc) {
-    if (!doc) {
-      return null;
-    }
-    const selectors = [
-      '[aria-selected="true"][data-testid*="conversation" i]',
-      '[data-testid*="conversation-item" i][data-selected="true"]',
-      '[data-testid*="conversation-item" i].bg-token-sidebar-surface-selected',
-      'nav [aria-selected="true"][role="option"], nav [aria-current="true"]'
-    ];
-    for (const selector of selectors) {
-      const candidate = doc.querySelector(selector);
-      if (candidate instanceof HTMLElement) {
-        return candidate;
+      const attrRole = (node.getAttribute('role') || '').toLowerCase();
+      if (attrRole !== role) {
+        return;
       }
+      if (!isVisible(node)) {
+        return;
+      }
+      if (!regex) {
+        matches.push(node);
+        return;
+      }
+      const name = accessibleName(node);
+      if (regex.test(name) || regex.test(node.textContent || '')) {
+        matches.push(node);
+      }
+    });
+    return matches;
+  }
+
+  function parseTextArgs(rootOrRegex, regexMaybe) {
+    if (rootOrRegex instanceof Element || rootOrRegex instanceof Document || rootOrRegex instanceof ShadowRoot) {
+      return { root: rootOrRegex, regex: ensureRegex(regexMaybe) };
     }
-    return null;
+    return { root: normalizeRoot(null), regex: ensureRegex(rootOrRegex) };
   }
 
-  /** Slovensky: Získa viditeľné menu korene. */
-  function getMenuSearchRoots(doc) {
-    const menus = Array.from(doc.querySelectorAll('[role="menu"]')).filter((node) => node instanceof HTMLElement && isVisible(node));
-    return menus.length ? menus : [doc.body || doc];
+  function parseRoleArgs(rootOrRole, roleMaybe, regexMaybe) {
+    if (typeof rootOrRole === 'string') {
+      return {
+        root: normalizeRoot(null),
+        role: rootOrRole.toLowerCase(),
+        regex: ensureRegex(regexMaybe)
+      };
+    }
+    const root = normalizeRoot(rootOrRole);
+    const role = typeof roleMaybe === 'string' ? roleMaybe.toLowerCase() : '';
+    return { root, role, regex: ensureRegex(regexMaybe) };
   }
 
-  /** Slovensky: Získa viditeľné dialógové korene. */
-  function getDialogSearchRoots(doc) {
-    const dialogs = Array.from(doc.querySelectorAll('[role="dialog"],[role="alertdialog"]')).filter((node) => node instanceof HTMLElement && isVisible(node));
-    return dialogs.length ? dialogs : [doc.body || doc];
+  function visibleText(node) {
+    if (!(node instanceof Element)) {
+      return '';
+    }
+    return Array.from(node.childNodes)
+      .filter((child) => child.nodeType === Node.TEXT_NODE)
+      .map((child) => child.textContent || '')
+      .join(' ')
+      .trim();
   }
 
-  /** Slovensky: Overí textové popisky. */
-  function matchesLabel(node, regex) {
-    if (!(node instanceof HTMLElement)) {
-      return false;
+  function accessibleName(node) {
+    if (!(node instanceof Element)) {
+      return '';
     }
     const aria = node.getAttribute('aria-label') || '';
-    const title = node.getAttribute('title') || '';
-    const text = (node.textContent || '').trim();
-    const matcher = ensureRegex(regex);
-    return matcher.test(aria) || matcher.test(title) || matcher.test(text);
-  }
-
-  /** Slovensky: Overí viditeľnosť a dostupnosť. */
-  function isUsableButton(node) {
-    const el = ensureInteractive(node);
-    if (!el) {
-      return false;
+    if (aria.trim()) {
+      return aria.trim();
     }
-    return isVisible(el) && !el.hasAttribute('disabled');
+    const labelledBy = node.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const ids = labelledBy.split(/\s+/).filter(Boolean);
+      const doc = node.ownerDocument || document;
+      const labelText = ids
+        .map((id) => doc.getElementById(id)?.textContent || '')
+        .join(' ')
+        .trim();
+      if (labelText) {
+        return labelText;
+      }
+    }
+    const title = node.getAttribute('title');
+    if (title) {
+      return title.trim();
+    }
+    return (node.textContent || '').trim();
   }
 
-  /** Slovensky: Kontroluje viditeľnosť elementu. */
   function isVisible(node) {
-    if (!(node instanceof HTMLElement)) {
+    if (!(node instanceof Element)) {
       return false;
     }
-    const style = window.getComputedStyle(node);
-    if (style.visibility === 'hidden' || style.display === 'none') {
+    const style = node.ownerDocument?.defaultView?.getComputedStyle(node);
+    if (!style || style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity || '1') === 0) {
       return false;
     }
     const rect = node.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   }
 
-  /** Slovensky: Zaistí interaktívny element. */
+  function waitForAppShell(options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.appShell;
+    const deadline = now() + timeoutMs;
+    const attempts = [];
+    return (async () => {
+      while (now() <= deadline) {
+        const main = document.querySelector('main[role="main"], main');
+        if (main) {
+          return {
+            ready: true,
+            main,
+            evidence: describeElement(main)
+          };
+        }
+        const appRoot = document.querySelector('[data-testid*="app" i], [id*="__next" i], *[data-reactroot]');
+        if (appRoot) {
+          return {
+            ready: true,
+            main: appRoot,
+            evidence: describeElement(appRoot)
+          };
+        }
+        attempts.push('main/app-root-missing');
+        await sleep(POLL_STEP_MS);
+      }
+      throw {
+        code: 'waitForAppShell_timeout',
+        message: 'App shell not ready',
+        timeoutMs,
+        attempted: Array.from(new Set(attempts))
+      };
+    })();
+  }
+
+  function waitForConversationView(options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.conversation;
+    const deadline = now() + timeoutMs;
+    const attempts = [];
+    return (async () => {
+      while (now() <= deadline) {
+        const header = queryAllDeep(document, CONVO_HEADER_SELECTORS).find(isVisible);
+        if (header) {
+          return {
+            ready: true,
+            area: header,
+            source: 'header',
+            evidence: describeElement(header)
+          };
+        }
+        const viewport = queryAllDeep(document, 'main [data-viewport*="conversation" i]').find(isVisible);
+        if (viewport) {
+          return {
+            ready: true,
+            area: viewport,
+            source: 'viewport',
+            evidence: describeElement(viewport)
+          };
+        }
+        const thread = queryAllDeep(document, '[data-testid*="conversation-turn" i], [data-message-author-role]').find(isVisible);
+        if (thread) {
+          return {
+            ready: true,
+            area: thread,
+            source: 'thread',
+            evidence: describeElement(thread)
+          };
+        }
+        attempts.push('conversation:header/thread/viewport');
+        await sleep(POLL_STEP_MS);
+      }
+      return {
+        ready: false,
+        attempted: Array.from(new Set(attempts)),
+        timeoutMs
+      };
+    })();
+  }
+
+  async function ensureSidebarVisible(options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
+    const deadline = now() + timeoutMs;
+    while (now() <= deadline) {
+      const sidebar = locateSidebar();
+      if (sidebar?.visible) {
+        return sidebar;
+      }
+      const toggle = queryAllDeep(document, 'button', '[role="button"]').find((node) => {
+        if (!(node instanceof Element)) {
+          return false;
+        }
+        const label = accessibleName(node).toLowerCase();
+        return TOGGLE_BUTTON_LABEL.test(label);
+      });
+      if (toggle instanceof Element) {
+        await reveal(toggle);
+        toggle.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
+        await sleep(180);
+      } else {
+        await sleep(POLL_STEP_MS);
+      }
+    }
+    throw {
+      code: 'ensureSidebarVisible_timeout',
+      message: 'Sidebar toggle not found',
+      timeoutMs,
+      attempted: ['sidebar-visible', 'toggle-button']
+    };
+  }
+
+  function locateSidebar() {
+    const containers = queryAllDeep(document, SIDEBAR_ROOT_SELECTORS);
+    for (const container of containers) {
+      if (container instanceof Element && isVisible(container)) {
+        return { root: container, visible: true, evidence: describeElement(container) };
+      }
+    }
+    return null;
+  }
+
+  async function findSidebarSelectedItemByConvoId(convoId, options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
+    const deadline = now() + timeoutMs;
+    const attempted = [];
+    const needle = `/c/${convoId}`;
+    while (now() <= deadline) {
+      const anchors = queryAllDeep(document, `a[href*="${needle}"]`);
+      for (const anchor of anchors) {
+        if (!(anchor instanceof Element)) {
+          continue;
+        }
+        const container = anchor.closest('[role="option"], li, div');
+        if (!container || !(container instanceof Element)) {
+          continue;
+        }
+        if (!isVisible(container)) {
+          continue;
+        }
+        const kebab = locateKebabInContainer(container, attempted, 'sidebar');
+        if (kebab) {
+          return {
+            element: kebab,
+            evidence: {
+              item: describeElement(container),
+              button: describeElement(kebab)
+            }
+          };
+        }
+        attempted.push('sidebar-kebab-missing');
+      }
+      await sleep(POLL_STEP_MS);
+    }
+    throw selectorError('findSidebarKebab', attempted, timeoutMs);
+  }
+
+  async function findHeaderKebab(options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
+    const deadline = now() + timeoutMs;
+    const attempted = [];
+    while (now() <= deadline) {
+      const header = queryAllDeep(document, CONVO_HEADER_SELECTORS).find(isVisible);
+      if (header) {
+        const kebab = locateKebabInContainer(header, attempted, 'header');
+        if (kebab) {
+          return {
+            element: kebab,
+            evidence: {
+              header: describeElement(header),
+              button: describeElement(kebab)
+            }
+          };
+        }
+        attempted.push('header-kebab-missing');
+      } else {
+        attempted.push('header-missing');
+      }
+      await sleep(POLL_STEP_MS);
+    }
+    throw selectorError('findHeaderKebab', attempted, timeoutMs);
+  }
+
+  function locateKebabInContainer(container, attempted, scopeLabel) {
+    for (const selector of KEBAB_FALLBACK_SELECTORS) {
+      const candidate = container.querySelector(selector);
+      attempted.push(`${scopeLabel}:${selector}`);
+      if (candidate && candidate instanceof Element && isActionable(candidate)) {
+        return ensureInteractive(candidate);
+      }
+    }
+    const fallback = Array.from(container.querySelectorAll('button, [role="button"]')).find((node) => looksLikeKebab(node));
+    attempted.push(`${scopeLabel}:svg-kebab`);
+    if (fallback && fallback instanceof Element && isActionable(fallback)) {
+      return ensureInteractive(fallback);
+    }
+    return null;
+  }
+
+  async function findDeleteMenuItem(options = {}) {
+    return pollForMenuMatch({
+      timeoutMs: options.timeoutMs,
+      code: 'findDelete',
+      search: () => {
+        const menus = queryAllDeep(document, '[role="menu"], [data-testid*="menu" i]');
+        const candidates = [];
+        for (const menu of menus) {
+          if (!(menu instanceof Element) || !isVisible(menu)) {
+            continue;
+          }
+          const byRole = roleQueryDeep(menu, 'menuitem');
+          candidates.push(...byRole.filter((node) => matchesPatterns(node, MENUITEM_PATTERNS)));
+          const byTestId = Array.from(menu.querySelectorAll('[data-testid]')).filter((node) => {
+            if (!(node instanceof Element)) {
+              return false;
+            }
+            const value = node.getAttribute('data-testid') || '';
+            return MENUITEM_TESTID_REGEX.test(value);
+          });
+          candidates.push(...byTestId);
+        }
+        if (!candidates.length) {
+          const fallback = candidatesFromDocument(MENUITEM_PATTERNS);
+          candidates.push(...fallback);
+        }
+        const first = candidates.find((node) => node instanceof Element && isVisible(node));
+        if (first) {
+          return {
+            element: ensureInteractive(first),
+            evidence: { button: describeElement(first) }
+          };
+        }
+        return null;
+      }
+    });
+  }
+
+  async function findConfirmDeleteButton(options = {}) {
+    return pollForMenuMatch({
+      timeoutMs: options.timeoutMs,
+      code: 'findConfirm',
+      search: () => {
+        const dialogs = queryAllDeep(document, '[role="dialog"], [role="alertdialog"]').filter(isVisible);
+        const candidates = [];
+        for (const dialog of dialogs) {
+          const buttons = roleQueryDeep(dialog, 'button');
+          candidates.push(...buttons.filter((node) => matchesPatterns(node, CONFIRM_PATTERNS)));
+          const byTestId = Array.from(dialog.querySelectorAll('[data-testid]')).filter((node) => {
+            if (!(node instanceof Element)) {
+              return false;
+            }
+            return CONFIRM_TESTID_REGEX.test(node.getAttribute('data-testid') || '');
+          });
+          candidates.push(...byTestId);
+        }
+        if (!candidates.length) {
+          candidates.push(...candidatesFromDocument(CONFIRM_PATTERNS));
+        }
+        const first = candidates.find((node) => node instanceof Element && isVisible(node));
+        if (first) {
+          return {
+            element: ensureInteractive(first),
+            evidence: { button: describeElement(first) }
+          };
+        }
+        return null;
+      }
+    });
+  }
+
+  async function pollForMenuMatch({ timeoutMs, code, search }) {
+    const limit = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : DEFAULT_TIMEOUTS.finder;
+    const deadline = now() + limit;
+    const attempted = [];
+    while (now() <= deadline) {
+      const match = search();
+      if (match) {
+        return match;
+      }
+      attempted.push(code);
+      await sleep(POLL_STEP_MS);
+    }
+    throw selectorError(code, attempted, limit);
+  }
+
+  function matchesPatterns(node, patterns) {
+    if (!(node instanceof Element)) {
+      return false;
+    }
+    const values = [accessibleName(node), node.textContent || ''];
+    return patterns.some((pattern) => ensureRegex(pattern).test(values.join(' ')));
+  }
+
+  function candidatesFromDocument(patterns) {
+    const list = [];
+    walk(document, (node) => {
+      if (!(node instanceof Element)) {
+        return;
+      }
+      if (!isVisible(node)) {
+        return;
+      }
+      if (matchesPatterns(node, patterns)) {
+        list.push(node);
+      }
+    });
+    return list;
+  }
+
   function ensureInteractive(node) {
-    if (!(node instanceof HTMLElement)) {
+    if (!(node instanceof Element)) {
       return null;
     }
     if (node instanceof HTMLButtonElement || node instanceof HTMLAnchorElement) {
       return node;
     }
     const closest = node.closest('button, a, [role="button"], [role="menuitem"]');
-    return closest instanceof HTMLElement ? closest : node;
+    return closest instanceof Element ? closest : node;
   }
 
-  /** Slovensky: Rozhodne či element vyzerá ako tri bodky. */
+  function isActionable(node) {
+    if (!(node instanceof Element)) {
+      return false;
+    }
+    if (!isVisible(node)) {
+      return false;
+    }
+    if (node.hasAttribute('disabled')) {
+      return false;
+    }
+    return true;
+  }
+
   function looksLikeKebab(node) {
+    if (!(node instanceof Element)) {
+      return false;
+    }
     const el = ensureInteractive(node);
     if (!el) {
       return false;
@@ -579,72 +666,66 @@
     if (!svg) {
       return false;
     }
-    const circles = svg.querySelectorAll('circle').length;
-    if (circles === 3) {
+    const circles = svg.querySelectorAll('circle');
+    if (circles.length === 3) {
       return true;
     }
-    const paths = svg.querySelectorAll('path').length;
-    return paths > 0 && paths <= 3;
+    const paths = svg.querySelectorAll('path');
+    return paths.length > 0 && paths.length <= 3;
   }
 
-  /** Slovensky: Zistí textové hodnoty pre regex. */
-  function textCandidates(node) {
-    if (!(node instanceof HTMLElement)) {
-      return [];
+  function selectorError(code, attempted, timeoutMs) {
+    return {
+      code,
+      message: 'not_found',
+      attempted: Array.from(new Set(ensureArray(attempted).map(String))),
+      timeoutMs
+    };
+  }
+
+  async function reveal(node) {
+    if (!(node instanceof Element)) {
+      return;
     }
-    const aria = node.getAttribute('aria-label') || '';
-    const title = node.getAttribute('title') || '';
-    const text = (node.textContent || '').trim();
-    return [aria, title, text];
-  }
-
-  /** Slovensky: Otestuje viac regexov naraz. */
-  function matchesAnyText(node, patterns) {
-    if (!(node instanceof HTMLElement)) {
-      return false;
+    node.scrollIntoView({ block: 'center', inline: 'center' });
+    node.dispatchEvent(new Event('mouseenter', { bubbles: true, composed: true }));
+    node.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, composed: true }));
+    if (typeof node.focus === 'function') {
+      node.focus({ preventScroll: true });
     }
-    const candidates = textCandidates(node);
-    return patterns.some((pattern) => {
-      const regex = ensureRegex(pattern);
-      return candidates.some((value) => regex.test(value));
-    });
+    await sleep(80);
   }
 
-  /** Slovensky: Hľadá podľa data-testid. */
-  function queryByTestId(root, regex) {
-    const scope = root instanceof HTMLElement || root instanceof Document ? root : document;
-    const matcher = ensureRegex(regex);
-    return Array.from(scope.querySelectorAll('[data-testid]')).find((node) => {
-      if (!(node instanceof HTMLElement)) {
-        return false;
-      }
-      const testId = node.getAttribute('data-testid') || '';
-      return matcher.test(testId);
-    }) || null;
-  }
-
-  /** Slovensky: Nájde prvý výskyt podľa textu. */
-  function findByAnyText(root, patterns) {
-    const scope = root instanceof HTMLElement || root instanceof Document ? root : document;
-    for (const pattern of patterns) {
-      const found = byText(scope, pattern);
-      if (found) {
-        return found;
-      }
+  function describeElement(node) {
+    if (!(node instanceof Element)) {
+      return null;
     }
-    return null;
+    const tag = node.tagName.toLowerCase();
+    const id = node.id ? `#${node.id}` : '';
+    const className = node.className && typeof node.className === 'string'
+      ? `.${node.className.trim().split(/\s+/).filter(Boolean).join('.')}`
+      : '';
+    const label = node.getAttribute('aria-label') || node.getAttribute('title') || '';
+    const text = (node.textContent || '').trim().slice(0, 60);
+    return { tag: `${tag}${id}${className}`, label, text };
   }
 
   const api = {
-    waitFor,
-    byText,
-    roleQuery,
+    sleep,
+    now,
+    withTimeout,
+    walk,
+    queryAllDeep,
+    byTextDeep,
+    roleQueryDeep,
     waitForAppShell,
     waitForConversationView,
-    findKebabButton,
+    ensureSidebarVisible,
+    findSidebarSelectedItemByConvoId,
+    findHeaderKebab,
     findDeleteMenuItem,
     findConfirmDeleteButton,
-    probeSelectorsOnce,
+    reveal,
     describeElement,
     TOAST_REGEX
   };
