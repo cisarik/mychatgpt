@@ -7,8 +7,60 @@
   <link rel="stylesheet" href="../styles.css" />
 </head>
 <body>
-  <h1>Settings</h1>
-  <p>Configuration options will be added here later.</p>
+  <main class="page">
+    <h1>Nastavenia</h1>
+    <form id="settings-form">
+      <section>
+        <h2>Režimy</h2>
+        <label class="setting-row">
+          <span class="label-text">List only</span>
+          <input type="checkbox" id="LIST_ONLY" name="LIST_ONLY" />
+          <span class="heal-hint" data-field="LIST_ONLY" hidden>(opravené)</span>
+        </label>
+        <label class="setting-row">
+          <span class="label-text">Dry run</span>
+          <input type="checkbox" id="DRY_RUN" name="DRY_RUN" />
+          <span class="heal-hint" data-field="DRY_RUN" hidden>(opravené)</span>
+        </label>
+        <label class="setting-row">
+          <span class="label-text">Potvrdenie pred zmazaním</span>
+          <input type="checkbox" id="CONFIRM_BEFORE_DELETE" name="CONFIRM_BEFORE_DELETE" />
+          <span class="heal-hint" data-field="CONFIRM_BEFORE_DELETE" hidden>(opravené)</span>
+        </label>
+        <label class="setting-row">
+          <span class="label-text">Automatický scan</span>
+          <input type="checkbox" id="AUTO_SCAN" name="AUTO_SCAN" />
+          <span class="heal-hint" data-field="AUTO_SCAN" hidden>(opravené)</span>
+        </label>
+      </section>
+      <section>
+        <h2>Limity</h2>
+        <label class="setting-row">
+          <span class="label-text">Max správy</span>
+          <input type="number" id="MAX_MESSAGES" name="MAX_MESSAGES" min="1" />
+          <span class="heal-hint" data-field="MAX_MESSAGES" hidden>(opravené)</span>
+        </label>
+        <label class="setting-row">
+          <span class="label-text">Max používateľské správy</span>
+          <input type="number" id="USER_MESSAGES_MAX" name="USER_MESSAGES_MAX" min="1" />
+          <span class="heal-hint" data-field="USER_MESSAGES_MAX" hidden>(opravené)</span>
+        </label>
+      </section>
+      <section>
+        <h2>Bezpečné URL</h2>
+        <label class="setting-column">
+          <span class="label-text">Vzory URL (jeden na riadok)</span>
+          <textarea id="SAFE_URL_PATTERNS" name="SAFE_URL_PATTERNS" rows="4"></textarea>
+          <span class="heal-hint" data-field="SAFE_URL_PATTERNS" hidden>(opravené)</span>
+        </label>
+      </section>
+      <div class="form-actions">
+        <button type="submit" id="save-btn">Uložiť</button>
+        <button type="button" id="reset-btn">Resetovať na defaulty</button>
+        <span id="status-text" aria-live="polite"></span>
+      </div>
+    </form>
+  </main>
   <script src="../utils.js"></script>
   <script src="settings.js"></script>
 </body>

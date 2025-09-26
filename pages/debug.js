@@ -5,6 +5,8 @@
   const refreshButton = document.getElementById('refresh-btn');
   const exportButton = document.getElementById('export-btn');
   const clearButton = document.getElementById('clear-btn');
+  const scanButton = document.getElementById('scan-btn');
+  const scanResultContainer = document.getElementById('scan-result');
 
   async function loadAndRenderLogs() {
     const filterValue = filterInput.value.trim().toLowerCase();
@@ -55,10 +57,64 @@
 
   clearButton.addEventListener('click', async () => {
     await Logger.clear();
-    await Logger.log('info', 'pages/debug', 'Logs cleared from debug page');
+    await Logger.log('info', 'db', 'Logs cleared from debug page');
     await loadAndRenderLogs();
   });
 
-  await Logger.log('info', 'pages/debug', 'Debug page opened');
+  /* Slovensky komentar: Vytvori toast so stavom skenu. */
+  function appendScanToast(message) {
+    const block = document.createElement('div');
+    block.className = 'log-entry';
+    block.textContent = message;
+    scanResultContainer.prepend(block);
+    while (scanResultContainer.childElementCount > 4) {
+      scanResultContainer.removeChild(scanResultContainer.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Odosle spravu pre stub skenovanie. */
+  function requestScanStub() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'scan_now' }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(runtimeError);
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
+  scanButton.addEventListener('click', async () => {
+    const originalLabel = scanButton.textContent;
+    scanButton.disabled = true;
+    scanButton.textContent = 'Prebieha stub…';
+    try {
+      const response = await requestScanStub();
+      if (response && response.ok) {
+        appendScanToast(`Scan stub executed: ${JSON.stringify(response.result)}`);
+        await Logger.log('info', 'scan', 'Scan stub completed on debug page', {
+          result: response.result
+        });
+      } else {
+        const errorMessage = (response && response.error) || 'Neznáma chyba';
+        appendScanToast(`Scan stub failed: ${errorMessage}`);
+        await Logger.log('error', 'scan', 'Scan stub returned error', {
+          message: errorMessage
+        });
+      }
+    } catch (error) {
+      appendScanToast(`Scan stub failed: ${error && error.message}`);
+      await Logger.log('error', 'scan', 'Scan stub request threw error', {
+        message: error && error.message
+      });
+    } finally {
+      scanButton.disabled = false;
+      scanButton.textContent = originalLabel;
+    }
+  });
+
+  await Logger.log('info', 'db', 'Debug page opened');
   await loadAndRenderLogs();
 })();

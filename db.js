@@ -4,6 +4,14 @@ const DB_VERSION = 1;
 const STORE_BACKUPS = 'backups';
 const STORE_CATEGORIES = 'categories';
 
+/* Slovensky komentar: Predvolene kategorie na prvy beh. */
+const DEFAULT_CATEGORIES = [
+  { id: 'programovanie', name: 'Programovanie' },
+  { id: 'kryptomeny', name: 'Kryptomeny' },
+  { id: 'hw', name: 'HW' },
+  { id: 'zdravie', name: 'Zdravie' }
+];
+
 const dbGlobalTarget = typeof self !== 'undefined' ? self : window;
 let dbInstance = null;
 
@@ -37,6 +45,14 @@ function openDatabase() {
   });
 }
 
+/* Slovensky komentar: Prevod IndexedDB requestu na Promise. */
+function requestAsPromise(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
 /* Slovensky komentar: Verejna API pre databazu. */
 const Database = {
   initDB: async () => {
@@ -47,7 +63,42 @@ const Database = {
       const db = await openDatabase();
       return db;
     } catch (error) {
-      await Logger.log('error', 'database', 'IndexedDB initialization failed', { message: error && error.message });
+      await Logger.log('error', 'db', 'IndexedDB initialization failed', { message: error && error.message });
+      throw error;
+    }
+  },
+  ensureDbWithSeeds: async () => {
+    const start = Date.now();
+    const db = await Database.initDB();
+    let inserted = 0;
+    try {
+      const transaction = db.transaction([STORE_CATEGORIES], 'readwrite');
+      const store = transaction.objectStore(STORE_CATEGORIES);
+      const countRequest = store.count();
+      const existingCount = await requestAsPromise(countRequest);
+      if (existingCount === 0) {
+        await Promise.all(
+          DEFAULT_CATEGORIES.map(async (category) => {
+            const putRequest = store.put(category);
+            await requestAsPromise(putRequest);
+            inserted += 1;
+          })
+        );
+      }
+      await new Promise((resolve, reject) => {
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+      const durationMs = Date.now() - start;
+      await Logger.log('info', 'db', 'Category seeding check completed', {
+        inserted,
+        existingCount,
+        durationMs
+      });
+      return { inserted, existingCount };
+    } catch (error) {
+      await Logger.log('error', 'db', 'Category seeding failed', { message: error && error.message });
       throw error;
     }
   },

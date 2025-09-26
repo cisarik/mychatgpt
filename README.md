@@ -13,3 +13,23 @@ This repository contains a minimal Manifest V3 Chrome/Brave extension scaffold f
 3. Open the dedicated debug page and use **Refresh** to confirm the new entry.
 
 Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use the **Export debug** button on the debug page to download the latest records.
+
+## Settings & Categories
+| Key | Default | Description |
+| --- | --- | --- |
+| `LIST_ONLY` | `true` | Limits the extension to listing actions without edits. |
+| `DRY_RUN` | `true` | Produces simulated results without writes. |
+| `CONFIRM_BEFORE_DELETE` | `true` | Prompts before any destructive action. |
+| `AUTO_SCAN` | `false` | Enables background scanning when supported. |
+| `MAX_MESSAGES` | `2` | Maximum total messages captured per conversation. |
+| `USER_MESSAGES_MAX` | `2` | Maximum user-authored messages retained. |
+| `SAFE_URL_PATTERNS` | `['/workspaces','/projects','/new-project']` | Allowed path patterns for scanning. |
+
+Settings persist under `chrome.storage.local` key `settings_v1`. The settings page automatically validates loaded values and heals any missing/invalid fields back to defaults, marking corrected inputs with a subtle “(opravené)” hint. Use the **Resetovať na defaulty** button to repopulate the form with the defaults before saving.
+
+The IndexedDB store `categories` seeds the following categories on first run: `Programovanie`, `Kryptomeny`, `HW`, `Zdravie`. The background worker repeats the seed check on startup and during installation, logging the outcome.
+
+## Debug scan stub
+1. Open the **Debug** page and click **Scan now (stub)**.
+2. Observe the inline toast with the deterministic JSON payload (e.g., `{ scanned: 0, matched: 0, dryRun: true }`).
+3. Refresh the logs list to review the corresponding entries under the `scan` scope.
