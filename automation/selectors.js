@@ -936,8 +936,39 @@
     return { tag: `${tag}${id}${className}`, label, text };
   }
 
+  async function dismissOpenMenusAndDialogs() {
+    const keyInit = { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true };
+    const doc = typeof document !== 'undefined' ? document : null;
+    if (!doc) {
+      return;
+    }
+    for (let index = 0; index < 2; index += 1) {
+      doc.dispatchEvent(new KeyboardEvent('keydown', keyInit));
+      doc.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+      await sleep(90);
+    }
+  }
+
+  async function ensureFocusHover(node) {
+    if (!(node instanceof Element)) {
+      return;
+    }
+    await reveal(node);
+    if (typeof node.focus === 'function') {
+      try {
+        node.focus({ preventScroll: true });
+      } catch (_error) {}
+    }
+    await sleep(60);
+  }
+
+  async function delay(ms) {
+    await sleep(ms);
+  }
+
   const api = {
     sleep,
+    delay,
     now,
     withTimeout,
     walk,
@@ -951,14 +982,21 @@
     findHeaderKebabNearShare,
     findDeleteInOpenMenu,
     findConfirmDelete,
+    dismissOpenMenusAndDialogs,
+    ensureFocusHover,
     reveal,
     clickHard,
     describeElement,
     TOAST_REGEX
   };
 
-  if (typeof globalThis !== 'undefined') {
-    const existing = globalThis.RiskySelectors || {};
-    globalThis.RiskySelectors = { ...existing, ...api };
+  if (typeof window !== 'undefined') {
+    window.__MYCHAT_SELECTORS__ = {
+      ...(window.__MYCHAT_SELECTORS__ || {}),
+      ...api
+    };
+    if (typeof globalThis !== 'undefined') {
+      globalThis.RiskySelectors = window.__MYCHAT_SELECTORS__;
+    }
   }
 })();

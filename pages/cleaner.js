@@ -26,6 +26,14 @@ const debugToggle = document.getElementById('debugLogs');
 const statusRoot = document.getElementById('status-root');
 const showAllToggle = document.getElementById('show-all-toggle');
 
+const deletionProgress = document.createElement('span');
+deletionProgress.className = 'status-muted';
+deletionProgress.hidden = true;
+deleteSelectedButton.after(deletionProgress);
+
+let lastProgressState = { done: true };
+let progressClearTimer = null;
+
 let backups = [];
 let selectedIds = new Set();
 let settings = { ...DEFAULT_SETTINGS };
@@ -96,6 +104,11 @@ function bindEvents() {
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === 'BACKUPS_UPDATED') {
       void loadBackups();
+      return;
+    }
+    if (message?.type === 'RISKY_PROGRESS') {
+      handleRiskyProgress(message.payload);
+      return;
     }
   });
 }
@@ -545,6 +558,8 @@ async function runDeletion() {
     return;
   }
   setBusy(true);
+  const total = selectedIds.size;
+  showDeletionProgressPlaceholder(total);
   void showStatus('Running… see tab console');
   try {
     const payload = backups
@@ -555,11 +570,16 @@ async function runDeletion() {
     const results = Array.isArray(report.results) ? report.results : [];
     const deletedCount = results.filter((entry) => entry.ok).length;
     const failedCount = results.filter((entry) => !entry.ok).length;
+    const tabError = results.some((entry) => entry && entry.err);
 
     if (response?.ok || results.length) {
       await showStatus(`Deleted ${deletedCount} • Failed ${failedCount}`);
     } else {
       await showStatus('Deletion failed');
+    }
+
+    if (tabError) {
+      await showStatus('Tab error – check console');
     }
 
     if (response?.ok) {
@@ -573,8 +593,67 @@ async function runDeletion() {
   } catch (_error) {
     await showStatus('Deletion failed');
   } finally {
+    lastProgressState.done = true;
+    clearDeletionProgress();
     setBusy(false);
   }
+}
+
+/** Slovensky: Aktualizuje priebežný stav riskantného mazania. */
+function handleRiskyProgress(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return;
+  }
+  const processed = Number.isFinite(payload.processed) ? payload.processed : 0;
+  const total = Number.isFinite(payload.total) ? payload.total : 0;
+  const deleted = Number.isFinite(payload.deleted) ? payload.deleted : 0;
+  const failed = Number.isFinite(payload.failed) ? payload.failed : 0;
+  const cancelled = Boolean(payload.cancelled);
+  const done = Boolean(payload.done);
+
+  lastProgressState = { processed, total, deleted, failed, cancelled, done };
+
+  const runningText = `Running… ${processed}/${total} • ${deleted} deleted • ${failed} failed`;
+  const doneText = `Done – ${deleted} deleted • ${failed} failed${cancelled ? ' • cancelled' : ''}`;
+
+  if (progressClearTimer) {
+    clearTimeout(progressClearTimer);
+    progressClearTimer = null;
+  }
+
+  deletionProgress.hidden = false;
+  deletionProgress.textContent = done ? doneText : runningText;
+  if (done) {
+    clearDeletionProgress();
+  }
+}
+
+/** Slovensky: Zobrazí placeholder kým nepríde prvý update. */
+function showDeletionProgressPlaceholder(total) {
+  lastProgressState = { processed: 0, total, deleted: 0, failed: 0, cancelled: false, done: false };
+  if (progressClearTimer) {
+    clearTimeout(progressClearTimer);
+    progressClearTimer = null;
+  }
+  deletionProgress.hidden = false;
+  deletionProgress.textContent = `Running… 0/${total} • 0 deleted • 0 failed`;
+}
+
+/** Slovensky: Vymaže text priebežného stavu. */
+function clearDeletionProgress() {
+  if (!lastProgressState.done) {
+    // necháme posledný update z pozadia, ktorý príde po dokončení
+    return;
+  }
+  if (progressClearTimer) {
+    clearTimeout(progressClearTimer);
+  }
+  progressClearTimer = setTimeout(() => {
+    deletionProgress.hidden = true;
+    deletionProgress.textContent = '';
+    lastProgressState = { done: true };
+    progressClearTimer = null;
+  }, 1200);
 }
 
 /** Slovensky: Požiada o zrušenie mazacej dávky. */

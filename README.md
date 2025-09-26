@@ -45,6 +45,8 @@ Search Cleaner keeps short, search-like ChatGPT conversations in a local backup 
   - Screenshot note: grab a quick capture of the header toolbar (Share → kebab) when updating docs so teammates know which controls to target.
   - If the kebab button only shows on hover, the automation reveals it automatically—ensure the element can scroll into view.
   - Still failing? Capture the `[RiskyMode]` console logs (including evidence payloads) and tune selectors or timeouts.
+  - `[RiskyMode][bg] FATAL call failed: global API missing` means the tab never loaded the injected scripts. Reload the extension, re-check permissions, or try again after the tab finishes loading (MV3 can race the injection).
+  - During a delete run you should see `[RiskyMode][tab] begin run …` followed by `[RiskyMode][tab] done …` in the tab console. If those lines never appear, the injection stalled—open DevTools on the chat tab and retry.
 - Everything runs locally—no hidden APIs, only `chrome.scripting.executeScript` driving the public UI.
 
 ### Selector diagnostics

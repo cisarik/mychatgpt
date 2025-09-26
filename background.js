@@ -19,21 +19,15 @@ import {
   reEvaluate,
   sanitizeHTML,
   SETTINGS_KEY,
-  sleep
+  sleep,
+  randomJitter
 } from './utils.js';
-import { createUiAutomationDeletionStrategy } from './automation/risky_mode.js';
 
 let settingsCache = { ...DEFAULT_SETTINGS };
 const bootstrapReady = bootstrap();
 const recentlyOpened = new Map();
 const CANCEL_FLAG_KEY = 'cancel_deletion';
 let deletionInProgress = false;
-
-const automationStrategy = createUiAutomationDeletionStrategy({
-  getSettings: () => settingsCache,
-  getDebug: () => Boolean(settingsCache.debugLogs),
-  shouldCancel: () => readCancelFlag()
-});
 
 const manualBatchStrategy = createManualOpenStrategy(async (url) => {
   await openConversationTab(url, { active: false });
@@ -533,7 +527,7 @@ async function deleteSelected(selection) {
       };
       await log(LogLevel.WARN, 'deletion', 'Risky mode inactive – skipping automation');
     } else {
-      report = await automationStrategy.deleteMany(items.map((item) => item.url));
+      report = await runRiskyAutomationBatch(items, settings);
     }
     await recordDeletionResults(report.results || [], settings);
     return { ok: true, report };
@@ -583,6 +577,327 @@ function normalizeSelection(selection) {
     }
   });
   return Array.from(seen.values());
+}
+
+/** Slovensky: Spustí riskantnú automatizáciu na dávke položiek. */
+async function runRiskyAutomationBatch(items, rawSettings) {
+  const entries = Array.isArray(items) ? items : [];
+  const normalizedSettings = normalizeSettings(rawSettings || settingsCache);
+  const results = [];
+  let cancelled = false;
+  let deleted = 0;
+  let failed = 0;
+
+  broadcastRiskyProgress({ processed: 0, total: entries.length, deleted, failed });
+
+  for (let index = 0; index < entries.length; index += 1) {
+    if (await readCancelFlag()) {
+      cancelled = true;
+      break;
+    }
+    const entry = entries[index];
+    const convoId = entry?.convoId || getConversationIdFromUrl(entry?.url);
+    const url = normalizeChatUrl(entry?.url) || (convoId ? getConvoUrl(convoId) : null);
+    if (!url) {
+      const fallback = {
+        convoId: convoId || '',
+        url: entry?.url || '',
+        ok: false,
+        reason: 'invalid_url',
+        step: 'init',
+        attempt: 0,
+        strategyId: DeletionStrategyIds.UI_AUTOMATION
+      };
+      results.push(fallback);
+      failed += 1;
+      broadcastRiskyProgress({ processed: results.length, total: entries.length, deleted, failed });
+      continue;
+    }
+
+    console.log('[RiskyMode][bg] begin item', { url, index: index + 1 });
+    const attempt = await attemptRiskyAutomation({ convoId, url, settings: normalizedSettings });
+    results.push(attempt);
+    if (attempt.ok) {
+      deleted += 1;
+    } else {
+      failed += 1;
+    }
+    console.log('[RiskyMode][bg] item result', {
+      url,
+      ok: attempt.ok,
+      reason: attempt.reason,
+      step: attempt.step,
+      attempt: attempt.attempt
+    });
+    broadcastRiskyProgress({ processed: results.length, total: entries.length, deleted, failed });
+
+    if (index < entries.length - 1) {
+      await delayBetweenTabs(normalizedSettings);
+    }
+  }
+
+  broadcastRiskyProgress({
+    processed: results.length,
+    total: entries.length,
+    deleted,
+    failed,
+    done: true,
+    cancelled
+  });
+
+  const opened = results.filter((item) => item.ok).length;
+  const notes = [];
+  if (cancelled) {
+    notes.push('cancelled');
+  }
+  return {
+    strategyId: DeletionStrategyIds.UI_AUTOMATION,
+    attempted: entries.length,
+    opened,
+    notes,
+    results
+  };
+}
+
+/** Slovensky: Pokus o mazanie na konkrétnej URL s retry logikou. */
+async function attemptRiskyAutomation({ convoId, url, settings }) {
+  const maxRetries = Math.max(0, Number.isFinite(settings?.risky_max_retries) ? settings.risky_max_retries : 0);
+  let lastError = { reason: 'automation_failed', step: 'init', attempt: 0 };
+  for (let index = 0; index <= maxRetries; index += 1) {
+    const attempt = index + 1;
+    try {
+      const { tab } = await getOrCreateTabForUrl(url);
+      if (!tab?.id) {
+        lastError = { reason: 'tab_missing', step: 'tab', attempt };
+        break;
+      }
+      await focusTab(tab);
+      const jitter = randomJitter(settings?.risky_jitter_ms);
+      if (Number.isFinite(jitter) && jitter > 0) {
+        console.log('[RiskyMode][bg] jitter', { url, attempt, ms: jitter });
+        await sleep(jitter);
+      }
+      await ensureTabScripts(tab.id);
+      const profile = await resolveUiProfile();
+      const invoke = await invokeRiskyDelete(tab.id, { url, convoId, profile, settings });
+      if (!invoke.ok) {
+        console.error(`[RiskyMode][bg] FATAL call failed: ${invoke.err || 'unknown'}`, { url, attempt });
+        lastError = { reason: 'tab_exec_error', step: 'tab_exec', attempt, err: invoke.err };
+      } else if (invoke.out?.ok) {
+        return {
+          convoId,
+          url,
+          ok: true,
+          reason: invoke.out.reason || 'deleted',
+          step: invoke.out.step || 'verify',
+          attempt,
+          strategyId: DeletionStrategyIds.UI_AUTOMATION
+        };
+      } else {
+        lastError = {
+          reason: invoke.out?.reason || 'automation_failed',
+          step: invoke.out?.step || 'unknown',
+          attempt,
+          err: invoke.out?.details?.message || invoke.out?.details?.code || null
+        };
+        console.warn('[RiskyMode][bg] retryable failure', { url, attempt, reason: lastError.reason, step: lastError.step });
+      }
+    } catch (error) {
+      const parsed = parseChromeError(error);
+      lastError = { reason: parsed, step: 'chrome', attempt };
+      console.error('[RiskyMode][bg] chrome error', { url, attempt, error: parsed });
+    }
+
+    if (index < maxRetries) {
+      await sleep(200);
+    }
+  }
+
+  return {
+    convoId,
+    url,
+    ok: false,
+    reason: lastError.reason || 'automation_failed',
+    step: lastError.step || 'unknown',
+    attempt: lastError.attempt || maxRetries + 1,
+    strategyId: DeletionStrategyIds.UI_AUTOMATION,
+    err: lastError.err || null
+  };
+}
+
+/** Slovensky: Predlet pre injekciu – zaistí načítanie skriptov. */
+async function ensureTabScripts(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    files: ['automation/selectors.js']
+  });
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    files: ['automation/risky_mode.js']
+  });
+}
+
+/** Slovensky: Zavolá globálny API v kontexte karty. */
+async function invokeRiskyDelete(tabId, args) {
+  const [execution] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    func: async (payload) => {
+      try {
+        console.log('[RiskyMode][tab] begin run', payload);
+        if (!window.__MYCHAT_SELECTORS__ || !window.__MYCHAT_RISKY__) {
+          throw new Error('global API missing');
+        }
+        const out = await window.__MYCHAT_RISKY__.runHeaderDelete(payload);
+        console.log('[RiskyMode][tab] done', out);
+        return { ok: true, out };
+      } catch (error) {
+        const message = error && (error.stack || error.message || String(error));
+        console.error('[RiskyMode][tab] FATAL', message);
+        return { ok: false, err: String(message || 'tab_error') };
+      }
+    },
+    args: [args]
+  });
+  return execution?.result || { ok: false, err: 'no_result' };
+}
+
+/** Slovensky: Zameria okno a aktivuje kartu pred injekciou. */
+async function focusTab(tab) {
+  try {
+    if (tab?.windowId) {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
+  } catch (_error) {}
+  try {
+    if (tab?.id) {
+      await chrome.tabs.update(tab.id, { active: true });
+    }
+  } catch (_error) {}
+  await sleep(150);
+}
+
+/** Slovensky: Vráti existujúci tab alebo otvorí nový pre danú URL. */
+async function getOrCreateTabForUrl(url) {
+  const normalized = normalizeChatUrl(url);
+  if (!normalized) {
+    return { tab: null };
+  }
+  const candidates = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+  const existing = candidates.find((tab) => normalizeChatUrl(tab.url) === normalized);
+  if (existing?.id) {
+    await waitForTabComplete(existing.id, { timeoutMs: 15000 });
+    return { tab: existing };
+  }
+  const created = await chrome.tabs.create({ url: normalized, active: true });
+  await waitForTabComplete(created.id, { timeoutMs: 20000 });
+  return { tab: created };
+}
+
+/** Slovensky: Počká na načítanie karty. */
+async function waitForTabComplete(tabId, { timeoutMs = 15000 } = {}) {
+  if (!Number.isInteger(tabId)) {
+    return;
+  }
+  const deadline = Date.now() + Math.max(1000, timeoutMs);
+  while (Date.now() <= deadline) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab?.status === 'complete') {
+        return;
+      }
+    } catch (_error) {
+      return;
+    }
+    await sleep(150);
+  }
+}
+
+/** Slovensky: Vypočíta pauzu medzi kartami vrátane jitteru. */
+async function delayBetweenTabs(settings) {
+  const base = Math.max(0, settings?.risky_between_tabs_ms || 0);
+  const jitter = randomJitter(settings?.risky_jitter_ms);
+  const total = base + (Number.isFinite(jitter) ? jitter : 0);
+  if (total > 0) {
+    await sleep(total);
+  }
+}
+
+/** Slovensky: Vyhodnotí UI profil z jazykov pre tab volanie. */
+let cachedUiProfile = null;
+async function resolveUiProfile() {
+  if (cachedUiProfile) {
+    return cachedUiProfile;
+  }
+  const locales = [];
+  try {
+    if (typeof chrome.i18n?.getUILanguage === 'function') {
+      locales.push(chrome.i18n.getUILanguage());
+    }
+  } catch (_error) {}
+  if (typeof chrome.i18n?.getAcceptLanguages === 'function') {
+    try {
+      const accepted = await new Promise((resolve) => chrome.i18n.getAcceptLanguages((langs) => resolve(langs || [])));
+      locales.push(...accepted);
+    } catch (_error) {}
+  }
+  const normalized = locales
+    .map((code) => String(code || '').toLowerCase())
+    .filter(Boolean);
+  const isSk = normalized.some((code) => /^sk|^cs|^cz/.test(code));
+  const base = isSk ? PROFILE_SK : PROFILE_EN;
+  cachedUiProfile = compileBackgroundProfile(base);
+  return cachedUiProfile;
+}
+
+const PROFILE_SK = {
+  delete_menu_items: [/^(odstrániť|odstranit)$/i, /^(zmazať|zmazat)$/i],
+  confirm_buttons: [/^(odstrániť|odstranit)$/i, /^(zmazať|zmazat)$/i, /^(áno, odstrániť|ano, odstranit)$/i],
+  toast_texts: [/odstránen/i, /odstranen/i, /zmazan/i]
+};
+
+const PROFILE_EN = {
+  delete_menu_items: [/^(delete|delete chat|delete conversation)$/i, /^remove$/i],
+  confirm_buttons: [/^(delete|delete conversation)$/i, /^yes, delete$/i],
+  toast_texts: [/deleted/i, /removed/i]
+};
+
+function compileBackgroundProfile(base) {
+  const toastRegex = Array.isArray(base.toast_texts) && base.toast_texts.length
+    ? new RegExp(base.toast_texts.map((regex) => regex.source).join('|'), 'i')
+    : null;
+  return {
+    delete_menu_items: base.delete_menu_items,
+    confirm_buttons: base.confirm_buttons,
+    toast_texts: base.toast_texts,
+    toast_regex: toastRegex
+  };
+}
+
+/** Slovensky: Posiela priebežný update pre popup. */
+function broadcastRiskyProgress(payload) {
+  try {
+    chrome.runtime.sendMessage({ type: 'RISKY_PROGRESS', payload }).catch(() => {});
+  } catch (_error) {}
+}
+
+/** Slovensky: Normalizuje chybu z chrome.* API na text. */
+function parseChromeError(error) {
+  if (!error) {
+    return 'chrome_error';
+  }
+  if (typeof error === 'string') {
+    return error;
+  }
+  if (error.message) {
+    return error.message;
+  }
+  if (error.code) {
+    return error.code;
+  }
+  return 'chrome_error';
 }
 
 /** Slovensky: Otvorí manuálne potrebné taby (fallback mód). */
@@ -650,7 +965,7 @@ async function testSelectorsOnActiveTab() {
       target: { tabId },
       world: 'ISOLATED',
       func: async ({ timeoutMs, prefix }) => {
-        const selectors = globalThis.RiskySelectors;
+        const selectors = globalThis.__MYCHAT_SELECTORS__;
         if (!selectors?.waitForHeaderToolbar) {
           console.warn(`${prefix} Probe missing selectors`);
           return { ok: false, error: 'selectors_missing' };
@@ -792,7 +1107,7 @@ async function testSelectorsOnActiveTab() {
           };
         }
       },
-      args: [{ timeoutMs: settings.risky_step_timeout_ms, prefix: '[RiskyMode]' }]
+      args: [{ timeoutMs: settings.risky_step_timeout_ms, prefix: '[RiskyMode][tab]' }]
     });
     const outcome = response?.result;
     if (!outcome?.ok) {
