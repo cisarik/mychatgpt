@@ -111,7 +111,13 @@ function mapRecord(input = {}, existing = null) {
     createdAt,
     capturedAt,
     messageCount: Number.isFinite(input.messageCount) ? input.messageCount : Number.isFinite(existing?.messageCount) ? existing.messageCount : 0,
-    url: input.url || existing?.url || ''
+    url: input.url || existing?.url || '',
+    lastDeletionAttemptAt: Number.isFinite(input.lastDeletionAttemptAt)
+      ? input.lastDeletionAttemptAt
+      : Number.isFinite(existing?.lastDeletionAttemptAt)
+      ? existing.lastDeletionAttemptAt
+      : null,
+    lastDeletionOutcome: input.lastDeletionOutcome ?? existing?.lastDeletionOutcome ?? null
   };
 }
 
@@ -140,6 +146,31 @@ export const backups = {
     const index = store.index(INDEX_CONVO);
     const existing = await requestToPromise(index.get(entry.convoId));
     const record = mapRecord(entry, existing);
+    store.put({ ...record, timestamp: record.capturedAt });
+    await txDone(tx);
+    return record;
+  },
+
+  /**
+   * Slovensky: Aktualizuje meta údaje o poslednom mazacom pokuse.
+   * @param {string} convoId
+   * @param {{lastDeletionAttemptAt?: number|null,lastDeletionOutcome?: any}} meta
+   * @returns {Promise<import('./utils.js').BackupItem|null>}
+   */
+  async updateDeletionMeta(convoId, meta) {
+    if (!convoId || !meta) {
+      return null;
+    }
+    const db = await initDb();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    const index = store.index(INDEX_CONVO);
+    const existing = await requestToPromise(index.get(convoId));
+    if (!existing) {
+      await txDone(tx);
+      return null;
+    }
+    const record = mapRecord({ ...existing, ...meta }, existing);
     store.put({ ...record, timestamp: record.capturedAt });
     await txDone(tx);
     return record;
@@ -211,4 +242,3 @@ export const backups = {
     return true;
   }
 };
-

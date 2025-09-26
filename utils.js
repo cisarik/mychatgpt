@@ -1,6 +1,3 @@
-const LOG_KEY = 'search_cleaner_logs';
-const LOG_LIMIT = 150;
-
 export const SETTINGS_KEY = 'search_cleaner_settings';
 
 export const DeletionStrategyIds = Object.freeze({
@@ -21,7 +18,14 @@ export const DEFAULT_SETTINGS = Object.freeze({
   maxPromptLength: 280,
   maxAnswerLength: 3600,
   batchSize: 5,
-  deletionStrategyId: DeletionStrategyIds.MANUAL_OPEN
+  deletionStrategyId: DeletionStrategyIds.MANUAL_OPEN,
+  risky_mode_enabled: false,
+  risky_session_until: null,
+  risky_jitter_ms: [120, 380],
+  risky_step_timeout_ms: 5000,
+  risky_between_tabs_ms: 700,
+  risky_max_retries: 2,
+  dry_run: false
 });
 
 let debugCache = false;
@@ -37,6 +41,28 @@ let debugWaiter = null;
  */
 
 /**
+ * @typedef {Object} RiskyConfig
+ * @property {boolean} risky_mode_enabled
+ * @property {number|null} risky_session_until
+ * @property {[number, number]} risky_jitter_ms
+ * @property {number} risky_step_timeout_ms
+ * @property {number} risky_between_tabs_ms
+ * @property {number} risky_max_retries
+ * @property {boolean} dry_run
+ */
+
+/**
+ * @typedef {Object} DeletionItemResult
+ * @property {string} convoId
+ * @property {string} url
+ * @property {boolean} ok
+ * @property {string} reason
+ * @property {string} strategyId
+ * @property {string=} step
+ * @property {number=} attempt
+ */
+
+/**
  * @typedef {Object} BackupItem
  * @property {string} id
  * @property {string} convoId
@@ -47,6 +73,18 @@ let debugWaiter = null;
  * @property {number} capturedAt
  * @property {number} messageCount
  * @property {string} url
+ * @property {number|null} lastDeletionAttemptAt
+ * @property {DeletionOutcome|null} lastDeletionOutcome
+ */
+
+/**
+ * @typedef {Object} DeletionOutcome
+ * @property {boolean} ok
+ * @property {string|null} reason
+ * @property {string|null} step
+ * @property {'manual-open'|'ui-automation'} strategyId
+ * @property {number} attempt
+ * @property {boolean} dryRun
  */
 
 /**
@@ -55,6 +93,7 @@ let debugWaiter = null;
  * @property {number} attempted
  * @property {number} opened
  * @property {string[]} notes
+ * @property {DeletionItemResult[]} results
  */
 
 /**
@@ -134,6 +173,32 @@ export function normalizeSettings(raw) {
   }
   if (typeof raw.deletionStrategyId === 'string' && Object.values(DeletionStrategyIds).includes(raw.deletionStrategyId)) {
     result.deletionStrategyId = raw.deletionStrategyId;
+  }
+  if (typeof raw.risky_mode_enabled === 'boolean') {
+    result.risky_mode_enabled = raw.risky_mode_enabled;
+  }
+  if (raw.risky_session_until === null) {
+    result.risky_session_until = null;
+  } else if (Number.isFinite(raw.risky_session_until)) {
+    const until = Number(raw.risky_session_until);
+    result.risky_session_until = until > 0 ? until : null;
+  }
+  if (raw.risky_jitter_ms !== undefined) {
+    result.risky_jitter_ms = normalizeJitter(raw.risky_jitter_ms, base.risky_jitter_ms);
+  } else {
+    result.risky_jitter_ms = [...base.risky_jitter_ms];
+  }
+  if (Number.isFinite(raw.risky_step_timeout_ms)) {
+    result.risky_step_timeout_ms = clampInt(raw.risky_step_timeout_ms, 1000, 30000);
+  }
+  if (Number.isFinite(raw.risky_between_tabs_ms)) {
+    result.risky_between_tabs_ms = clampInt(raw.risky_between_tabs_ms, 100, 60000);
+  }
+  if (Number.isFinite(raw.risky_max_retries)) {
+    result.risky_max_retries = clampInt(raw.risky_max_retries, 0, 5);
+  }
+  if (typeof raw.dry_run === 'boolean') {
+    result.dry_run = raw.dry_run;
   }
   return result;
 }
@@ -285,23 +350,16 @@ export async function log(level, scope, message, meta = undefined) {
   if (!allowed) {
     return null;
   }
-  const entry = {
-    id: uuidv4(),
-    timestamp: Date.now(),
-    level: level || LogLevel.INFO,
-    scope: scope || 'general',
-    message: message || '',
-    meta: sanitizeMeta(meta)
-  };
-  try {
-    const stored = await chrome.storage.local.get([LOG_KEY]);
-    const existing = Array.isArray(stored?.[LOG_KEY]) ? stored[LOG_KEY] : [];
-    const next = [...existing, entry].slice(-LOG_LIMIT);
-    await chrome.storage.local.set({ [LOG_KEY]: next });
-  } catch (error) {
-    console.warn('Search Cleaner log store failed', error);
+  const normalizedLevel = level || LogLevel.INFO;
+  const channel = normalizedLevel === LogLevel.ERROR ? 'error' : normalizedLevel === LogLevel.WARN ? 'warn' : 'log';
+  const prefix = `[Cleaner][${scope || 'general'}]`;
+  const details = sanitizeMeta(meta);
+  if (details !== undefined && details !== null) {
+    console[channel](`${prefix} ${message || ''}`, details);
+  } else {
+    console[channel](`${prefix} ${message || ''}`);
   }
-  return entry;
+  return null;
 }
 
 /**
@@ -309,12 +367,7 @@ export async function log(level, scope, message, meta = undefined) {
  * @returns {Promise<Array>}
  */
 export async function getLogs() {
-  try {
-    const stored = await chrome.storage.local.get([LOG_KEY]);
-    return Array.isArray(stored?.[LOG_KEY]) ? stored[LOG_KEY] : [];
-  } catch (_error) {
-    return [];
-  }
+  return [];
 }
 
 /**
@@ -322,7 +375,7 @@ export async function getLogs() {
  * @returns {Promise<void>}
  */
 export async function clearLogs() {
-  await chrome.storage.local.set({ [LOG_KEY]: [] });
+  return Promise.resolve();
 }
 
 /**
@@ -332,6 +385,58 @@ export async function clearLogs() {
  */
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms || 0)));
+}
+
+/** Slovensky: Vracia aktuálny čas pre konzistentné merania. */
+export function now() {
+  return Date.now();
+}
+
+/**
+ * Slovensky: Overí, či je riskantná relácia práve aktívna.
+ * @param {Partial<RiskyConfig>} settings
+ * @returns {boolean}
+ */
+export function isRiskySessionActive(settings) {
+  const normalized = normalizeSettings(settings);
+  if (!normalized.risky_mode_enabled) {
+    return false;
+  }
+  if (!Number.isFinite(normalized.risky_session_until)) {
+    return false;
+  }
+  return normalized.risky_session_until > now();
+}
+
+/**
+ * Slovensky: Rozhodne preferovanú stratégiu podľa nastavení.
+ * @param {Partial<RiskyConfig>} settings
+ * @returns {'manual-open'|'ui-automation'}
+ */
+export function getDeletionStrategy(settings) {
+  return isRiskySessionActive(settings) ? DeletionStrategyIds.UI_AUTOMATION : DeletionStrategyIds.MANUAL_OPEN;
+}
+
+/** Slovensky: Vyrobí kanonický link na konverzáciu. */
+export function getConvoUrl(convoId) {
+  if (!convoId) {
+    return null;
+  }
+  const trimmed = String(convoId).trim();
+  if (!trimmed) {
+    return null;
+  }
+  return `https://chatgpt.com/c/${trimmed}`;
+}
+
+/**
+ * Slovensky: Náhodný jitter v milisekundách v poradí <min,max>.
+ * @param {[number, number]} range
+ * @returns {number}
+ */
+export function randomJitter(range) {
+  const [min, max] = normalizeJitter(range, DEFAULT_SETTINGS.risky_jitter_ms);
+  return randomIntBetween(min, max);
 }
 
 /**
@@ -348,33 +453,25 @@ export function createManualOpenStrategy(opener) {
     async deleteMany(urls) {
       const list = Array.isArray(urls) ? urls.filter(Boolean) : [];
       let opened = 0;
+      const results = [];
       for (const url of list) {
         await opener(url);
         opened += 1;
+        results.push({
+          convoId: getConversationIdFromUrl(url) || '',
+          url,
+          ok: false,
+          reason: 'manual_open',
+          strategyId: DeletionStrategyIds.MANUAL_OPEN
+        });
       }
       return {
         strategyId: DeletionStrategyIds.MANUAL_OPEN,
         attempted: list.length,
         opened,
-        notes: opened < list.length ? ['some_tabs_blocked'] : []
+        notes: opened < list.length ? ['some_tabs_blocked'] : [],
+        results
       };
-    }
-  };
-}
-
-/**
- * Slovensky: Placeholder pre budúci riskantný mód.
- * @returns {DeletionStrategy}
- */
-export function createDisabledAutomationStrategy() {
-  return {
-    id: DeletionStrategyIds.UI_AUTOMATION,
-    async isAvailable() {
-      return false;
-    },
-    async deleteMany() {
-      // TODO(ui-automation): locate kebab menu → open delete → confirm → wait for removal.
-      throw new Error('UI automation strategy not enabled');
     }
   };
 }
@@ -427,6 +524,34 @@ function clampInt(value, min, max) {
     return min;
   }
   return Math.min(max, Math.max(min, parsed));
+}
+
+/** Slovensky: Normalizuje jitter polia pre riskantný mód. */
+function normalizeJitter(input, fallback) {
+  let min = Number.parseInt(fallback?.[0], 10) || 0;
+  let max = Number.parseInt(fallback?.[1], 10) || min;
+  const candidate = Array.isArray(input) ? input : [input?.min, input?.max].filter((v) => Number.isFinite(v));
+  if (candidate.length >= 2) {
+    const first = clampInt(candidate[0], 0, 60000);
+    const second = clampInt(candidate[1], 0, 60000);
+    min = Math.min(first, second);
+    max = Math.max(first, second);
+  } else if (candidate.length === 1 && Number.isFinite(candidate[0])) {
+    const single = clampInt(candidate[0], 0, 60000);
+    min = Math.min(min, single);
+    max = Math.max(max, single);
+  }
+  if (max < min) {
+    max = min;
+  }
+  return [min, max];
+}
+
+/** Slovensky: Náhodné celé číslo v rozsahu vrátane hraníc. */
+function randomIntBetween(min, max) {
+  const clampedMin = clampInt(min, 0, 60000);
+  const clampedMax = clampInt(max, clampedMin, 60000);
+  return clampedMin + Math.floor(Math.random() * (clampedMax - clampedMin + 1));
 }
 
 /** Slovensky: Rezerva na sanitizáciu keď DOMParser nie je dostupný. */
@@ -483,4 +608,3 @@ function countAnswerLength(html) {
 function stripHtml(value) {
   return value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
-

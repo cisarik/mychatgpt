@@ -21,7 +21,12 @@
 
       <section class="toolbar">
         <span id="selection-counter" class="status-muted">0 selected</span>
-        <button id="open-next-button" type="button" disabled>Open next (5)</button>
+        <div class="toolbar__actions">
+          <button id="open-next-button" type="button" class="secondary" disabled>Open next (manual)</button>
+          <button id="delete-selected-button" type="button" disabled>Delete selected</button>
+          <button id="cancel-deletion-button" type="button" class="secondary">Cancel deletion</button>
+          <button id="test-selectors-button" type="button" class="secondary">Test selectors</button>
+        </div>
       </section>
 
       <section>
@@ -34,6 +39,7 @@
               <th scope="col" class="col-time">Time</th>
               <th scope="col">Prompt preview</th>
               <th scope="col">Backup?</th>
+              <th scope="col" class="col-status">Last deletion</th>
               <th scope="col" class="col-actions">Actions</th>
             </tr>
           </thead>
@@ -45,53 +51,77 @@
       <details class="settings" id="settings-panel">
         <summary>Settings</summary>
         <form id="settings-form">
-          <div class="field">
-            <label for="maxMessageCount">Max messages</label>
-            <input id="maxMessageCount" name="maxMessageCount" type="number" min="1" max="6" />
-          </div>
-          <div class="field">
-            <label for="maxAgeMinutes">Max age (minutes)</label>
-            <input id="maxAgeMinutes" name="maxAgeMinutes" type="number" min="1" max="60" />
-          </div>
-          <div class="field">
-            <label for="maxPromptLength">Max prompt length</label>
-            <input id="maxPromptLength" name="maxPromptLength" type="number" min="40" max="2000" />
-          </div>
-          <div class="field">
-            <label for="maxAnswerLength">Max answer length</label>
-            <input id="maxAnswerLength" name="maxAnswerLength" type="number" min="200" max="12000" />
-          </div>
-          <div class="field">
-            <label for="batchSize">Open batch size</label>
-            <input id="batchSize" name="batchSize" type="number" min="1" max="10" />
-          </div>
-          <div class="field">
-            <label for="deletionStrategyId">Deletion strategy</label>
-            <select id="deletionStrategyId" name="deletionStrategyId">
-              <option value="manual-open">Manual open (default)</option>
-              <option value="ui-automation" disabled title="coming soon">UI automation (risky)</option>
-            </select>
-          </div>
-          <div class="field field-inline">
-            <label for="debugLogs">Debug log toggle</label>
-            <input id="debugLogs" name="debugLogs" type="checkbox" />
-          </div>
+          <fieldset>
+            <legend>Heuristics</legend>
+            <div class="field">
+              <label for="maxMessageCount">Max messages</label>
+              <input id="maxMessageCount" name="maxMessageCount" type="number" min="1" max="6" />
+            </div>
+            <div class="field">
+              <label for="maxAgeMinutes">Max age (minutes)</label>
+              <input id="maxAgeMinutes" name="maxAgeMinutes" type="number" min="1" max="60" />
+            </div>
+            <div class="field">
+              <label for="maxPromptLength">Max prompt length</label>
+              <input id="maxPromptLength" name="maxPromptLength" type="number" min="40" max="2000" />
+            </div>
+            <div class="field">
+              <label for="maxAnswerLength">Max answer length</label>
+              <input id="maxAnswerLength" name="maxAnswerLength" type="number" min="200" max="12000" />
+            </div>
+            <div class="field">
+              <label for="batchSize">Open batch size</label>
+              <input id="batchSize" name="batchSize" type="number" min="1" max="10" />
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Risky mode (UI automation)</legend>
+            <div class="field field-inline">
+              <label for="risky_mode_enabled">Enable Risky mode (UI automation)</label>
+              <input id="risky_mode_enabled" name="risky_mode_enabled" type="checkbox" />
+            </div>
+            <p id="risky-session-status" class="status-muted"></p>
+            <div class="field">
+              <button id="risky-enable-session" type="button" class="secondary">Enable for 10 minutes</button>
+            </div>
+            <div class="field field-inline">
+              <label for="dry_run">Dry run (no clicks)</label>
+              <input id="dry_run" name="dry_run" type="checkbox" />
+            </div>
+            <div class="field field-inline">
+              <label for="risky_step_timeout_ms">Step timeout (ms)</label>
+              <input id="risky_step_timeout_ms" name="risky_step_timeout_ms" type="number" min="1000" max="30000" />
+            </div>
+            <div class="field field-inline">
+              <label for="risky_between_tabs_ms">Delay between tabs (ms)</label>
+              <input id="risky_between_tabs_ms" name="risky_between_tabs_ms" type="number" min="0" max="60000" />
+            </div>
+            <div class="field field-inline">
+              <label for="risky_max_retries">Max retries</label>
+              <input id="risky_max_retries" name="risky_max_retries" type="number" min="0" max="5" />
+            </div>
+            <div class="field field-inline field-range">
+              <label>Jitter (ms)</label>
+              <input id="risky_jitter_min" name="risky_jitter_min" type="number" min="0" max="60000" />
+              <span aria-hidden="true">–</span>
+              <input id="risky_jitter_max" name="risky_jitter_max" type="number" min="0" max="60000" />
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Debug</legend>
+            <div class="field field-inline">
+              <label for="debugLogs">Console debug</label>
+              <input id="debugLogs" name="debugLogs" type="checkbox" />
+            </div>
+          </fieldset>
+
           <div class="field">
             <button type="submit">Save settings</button>
           </div>
         </form>
       </details>
-
-      <section class="debug-panel" id="debug-panel" hidden aria-live="polite">
-        <header>
-          <h2>Debug log</h2>
-          <div class="header__actions">
-            <button id="refresh-logs" type="button" class="secondary">Refresh logs</button>
-            <button id="clear-logs" type="button" class="secondary">Clear logs</button>
-          </div>
-        </header>
-        <pre id="logs-output">(debug disabled)</pre>
-      </section>
     </main>
     <div id="status-root" class="toast-root" aria-live="polite"></div>
     <script type="module" src="cleaner.js"></script>

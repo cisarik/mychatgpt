@@ -16,7 +16,7 @@
       "128": "assets/icon-128.png"
     }
   },
-  "permissions": ["tabs", "storage"],
+  "permissions": ["storage", "tabs", "scripting"],
   "host_permissions": ["https://chatgpt.com/*"],
   "icons": {
     "16": "assets/icon-16.png",
@@ -32,7 +32,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["utils.js"],
+      "resources": ["utils.js", "automation/selectors.js"],
       "matches": ["https://chatgpt.com/*"]
     }
   ]

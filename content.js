@@ -5,12 +5,14 @@
   const observerConfig = { childList: true, subtree: true };
   let pending = false;
   let lastSignature = '';
+  let readySignalSent = false;
 
   if (!isConversationPage()) {
     return;
   }
 
   await trySendCandidate('initial-load');
+  void markActiveTabReady('initial-load');
 
   const root = getConversationRoot();
   if (root) {
@@ -37,6 +39,19 @@
   /** Slovensky: Zistí, či je stránka konverzácie. */
   function isConversationPage() {
     return Boolean(getConversationIdFromUrl(window.location.href));
+  }
+
+  /** Slovensky: Odošle signál o pripravenosti aktívneho tabu. */
+  async function markActiveTabReady(reason) {
+    if (readySignalSent) {
+      return;
+    }
+    readySignalSent = true;
+    try {
+      await chrome.runtime.sendMessage({ type: 'ACTIVE_TAB_READY', reason });
+    } catch (_error) {
+      // Background service worker môže spať; ignorujeme.
+    }
   }
 
   /** Slovensky: Nájde koreňový uzol konverzácie. */
@@ -141,4 +156,3 @@
     return html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '').replace(/on\w+\s*=\s*"[^"]*"/gi, '');
   }
 })();
-

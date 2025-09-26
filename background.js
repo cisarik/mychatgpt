@@ -1,24 +1,38 @@
 import { initDb, backups } from './db.js';
 import {
-  clearLogs,
-  createDisabledAutomationStrategy,
   createManualOpenStrategy,
   DEFAULT_SETTINGS,
   DeletionStrategyIds,
-  getLogs,
+  getConvoUrl,
+  getDeletionStrategy,
+  getConversationIdFromUrl,
   log,
   LogLevel,
   normalizeChatUrl,
   normalizeSettings,
+  now,
   passesHeuristics,
   sanitizeHTML,
   SETTINGS_KEY,
   sleep
 } from './utils.js';
+import { createUiAutomationDeletionStrategy } from './automation/risky_mode.js';
 
 let settingsCache = { ...DEFAULT_SETTINGS };
 const bootstrapReady = bootstrap();
 const recentlyOpened = new Map();
+const CANCEL_FLAG_KEY = 'cancel_deletion';
+let deletionInProgress = false;
+
+const automationStrategy = createUiAutomationDeletionStrategy({
+  getSettings: () => settingsCache,
+  getDebug: () => Boolean(settingsCache.debugLogs),
+  shouldCancel: () => readCancelFlag()
+});
+
+const manualBatchStrategy = createManualOpenStrategy(async (url) => {
+  await openConversationTab(url, { active: false });
+});
 
 /**
  * Slovensky: Štartuje pozadie – DB, nastavenia a log.
@@ -74,15 +88,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: true, settings: settingsCache };
       case 'SAVE_SETTINGS':
         return saveSettings(message.update || {});
-      case 'GET_LOGS':
-        return { ok: true, logs: await getLogs() };
-      case 'CLEAR_LOGS':
-        await clearLogs();
-        return { ok: true };
       case 'OPEN_NEXT':
         return openNext(message.urls || []);
       case 'REQUEST_SCAN':
         return triggerScan();
+      case 'DELETE_SELECTED':
+        return deleteSelected(message.selection || message.urls || []);
+      case 'CANCEL_DELETION':
+        await setCancelFlag(true);
+        return { ok: true };
+      case 'TEST_SELECTORS_ON_ACTIVE_TAB':
+        return testSelectorsOnActiveTab();
+      case 'ACTIVE_TAB_READY':
+        await log(LogLevel.INFO, 'content', 'Active tab ready', { tab: sender?.tab?.id });
+        return { ok: true };
       default:
         return { ok: false, error: 'unsupported_message' };
     }
@@ -247,19 +266,7 @@ async function openNext(urls) {
   if (!openable.length) {
     return { ok: true, opened: 0 };
   }
-  const strategy = selectStrategy(settingsCache.deletionStrategyId);
-  let report;
-  try {
-    report = await strategy.deleteMany(openable);
-  } catch (error) {
-    if (strategy.id === DeletionStrategyIds.UI_AUTOMATION) {
-      const fallback = selectStrategy(DeletionStrategyIds.MANUAL_OPEN);
-      report = await fallback.deleteMany(openable);
-      await log(LogLevel.WARN, 'batch', 'Automation strategy unavailable, used manual fallback', { error: error?.message });
-    } else {
-      throw error;
-    }
-  }
+  const report = await manualBatchStrategy.deleteMany(openable);
   report.notes.forEach((note) => {
     log(LogLevel.WARN, 'batch', 'Open batch note', { note }).catch(() => {});
   });
@@ -273,19 +280,16 @@ async function filterAvailableTabs(urls) {
   return urls.filter((url) => !openSet.has(url));
 }
 
-/** Slovensky: Vyberie vhodnú mazaciu strategiu (aktuálne len manuál). */
-function selectStrategy(requestedId) {
-  const opener = async (url) => {
-    const delay = 150 + Math.floor(Math.random() * 100);
-    await sleep(delay);
-    await chrome.tabs.create({ url, active: false });
-    markOpened(url);
-  };
-  const manual = createManualOpenStrategy(opener);
-  if (requestedId === DeletionStrategyIds.UI_AUTOMATION) {
-    return createDisabledAutomationStrategy();
+/** Slovensky: Otvorí konverzáciu na pozadí a označí ju. */
+async function openConversationTab(url, { active = false } = {}) {
+  const normalized = normalizeChatUrl(url);
+  if (!normalized) {
+    return;
   }
-  return manual;
+  const delay = 150 + Math.floor(Math.random() * 120);
+  await sleep(delay);
+  await chrome.tabs.create({ url: normalized, active });
+  markOpened(normalized);
 }
 
 /** Slovensky: Označí URL ako nedávno otvorenú kvôli anti-duplikátu. */
@@ -322,3 +326,273 @@ async function triggerScan() {
   return { ok: true, dispatched };
 }
 
+/** Slovensky: Spustí mazanie vybratých konverzácií podľa aktuálnych nastavení. */
+async function deleteSelected(selection) {
+  if (deletionInProgress) {
+    return { ok: false, error: 'deletion_running' };
+  }
+  const items = normalizeSelection(selection);
+  if (!items.length) {
+    return { ok: false, error: 'empty_selection' };
+  }
+  deletionInProgress = true;
+  await resetCancelFlag();
+  const settings = normalizeSettings(settingsCache);
+  const desiredStrategy = getDeletionStrategy(settings);
+  let report;
+  try {
+    if (desiredStrategy === DeletionStrategyIds.UI_AUTOMATION) {
+      const available = await automationStrategy.isAvailable();
+      if (available) {
+        report = await automationStrategy.deleteMany(items.map((item) => item.url));
+      } else {
+        await log(LogLevel.WARN, 'deletion', 'Automation unavailable – using manual fallback');
+        report = await runManualDeletion(items, settings, true);
+      }
+    } else {
+      report = await runManualDeletion(items, settings, false);
+    }
+    await recordDeletionResults(report.results || [], settings);
+    return { ok: true, report };
+  } catch (error) {
+    await log(LogLevel.ERROR, 'deletion', 'deleteSelected failed', { message: error?.message || String(error) });
+    return { ok: false, error: error?.message || 'deletion_failed' };
+  } finally {
+    deletionInProgress = false;
+    await resetCancelFlag();
+  }
+}
+
+/** Slovensky: Normalizuje výber konverzácií na jedinečné URL. */
+function normalizeSelection(selection) {
+  const list = Array.isArray(selection) ? selection : [];
+  const seen = new Map();
+  list.forEach((entry) => {
+    let convoId = '';
+    let url = '';
+    if (typeof entry === 'string') {
+      if (entry.startsWith('http')) {
+        url = normalizeChatUrl(entry) || entry;
+        convoId = getConversationIdFromUrl(url) || '';
+      } else {
+        convoId = entry;
+      }
+    } else if (entry && typeof entry === 'object') {
+      if (typeof entry.convoId === 'string') {
+        convoId = entry.convoId;
+      }
+      if (entry.url) {
+        url = normalizeChatUrl(entry.url) || entry.url;
+      }
+    }
+    if (!url && convoId) {
+      url = getConvoUrl(convoId);
+    }
+    if (url && !convoId) {
+      convoId = getConversationIdFromUrl(url) || convoId;
+    }
+    if (!url || !convoId) {
+      return;
+    }
+    const canonical = normalizeChatUrl(url) || url;
+    if (!seen.has(canonical)) {
+      seen.set(canonical, { convoId, url: canonical });
+    }
+  });
+  return Array.from(seen.values());
+}
+
+/** Slovensky: Otvorí manuálne potrebné taby (fallback mód). */
+async function runManualDeletion(items, settings, fromFallback) {
+  const canonicalItems = items.map((item) => ({ ...item, url: normalizeChatUrl(item.url) || item.url }));
+  const available = await filterAvailableTabs(canonicalItems.map((item) => item.url));
+  const availableSet = new Set(available);
+  const results = [];
+  let cancelled = false;
+  for (const item of canonicalItems) {
+    const convoId = item.convoId;
+    if (!convoId) {
+      continue;
+    }
+    if (await readCancelFlag()) {
+      cancelled = true;
+      break;
+    }
+    if (!availableSet.has(item.url)) {
+      results.push({
+        convoId,
+        url: item.url,
+        ok: false,
+        reason: 'already_open',
+        strategyId: DeletionStrategyIds.MANUAL_OPEN,
+        attempt: 0
+      });
+      availableSet.delete(item.url);
+      continue;
+    }
+    await openConversationTab(item.url, { active: false });
+    results.push({
+      convoId,
+      url: item.url,
+      ok: false,
+      reason: fromFallback ? 'manual_fallback' : 'manual_open',
+      strategyId: DeletionStrategyIds.MANUAL_OPEN,
+      attempt: 1
+    });
+    availableSet.delete(item.url);
+    if (settings.risky_between_tabs_ms) {
+      await sleep(settings.risky_between_tabs_ms);
+    }
+  }
+  const opened = results.filter((row) => row.reason === 'manual_open' || row.reason === 'manual_fallback').length;
+  return {
+    strategyId: DeletionStrategyIds.MANUAL_OPEN,
+    attempted: canonicalItems.length,
+    opened,
+    notes: cancelled ? ['cancelled'] : [],
+    results
+  };
+}
+
+/** Slovensky: Zapíše výsledok pokusu do IndexedDB. */
+async function recordDeletionResults(results, settings) {
+  const timestamp = now();
+  await Promise.all(
+    (results || []).map(async (item) => {
+      if (!item?.convoId) {
+        return;
+      }
+      await backups.updateDeletionMeta(item.convoId, {
+        lastDeletionAttemptAt: timestamp,
+        lastDeletionOutcome: {
+          ok: Boolean(item.ok),
+          reason: item.reason || null,
+          step: item.step || null,
+          strategyId: item.strategyId,
+          attempt: item.attempt || 0,
+          dryRun: item.strategyId === DeletionStrategyIds.UI_AUTOMATION ? Boolean(settings.dry_run) : false
+        }
+      });
+    })
+  );
+}
+
+/** Slovensky: Nastaví príznak zrušenia mazania. */
+async function setCancelFlag(value) {
+  await chrome.storage.local.set({ [CANCEL_FLAG_KEY]: Boolean(value) });
+}
+
+/** Slovensky: Vráti aktuálny stav cancel príznaku. */
+async function readCancelFlag() {
+  try {
+    const stored = await chrome.storage.local.get([CANCEL_FLAG_KEY]);
+    return Boolean(stored?.[CANCEL_FLAG_KEY]);
+  } catch (_error) {
+    return false;
+  }
+}
+
+/** Slovensky: Resetuje cancel príznak na false. */
+async function resetCancelFlag() {
+  await chrome.storage.local.set({ [CANCEL_FLAG_KEY]: false });
+}
+
+/** Slovensky: Otestuje selektory na aktívnom tabe – loguje len do konzoly. */
+async function testSelectorsOnActiveTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true, url: 'https://chatgpt.com/*' });
+  if (!tab?.id) {
+    return { ok: false, error: 'no_active_chat' };
+  }
+  const settings = normalizeSettings(settingsCache);
+  try {
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      injectImmediately: true,
+      func: selectorProbe,
+      args: [
+        {
+          timeoutMs: settings.risky_step_timeout_ms,
+          prefix: '[RiskyMode]',
+          debug: Boolean(settings.debugLogs)
+        }
+      ]
+    });
+    return { ok: true, result: injected?.[0]?.result || null };
+  } catch (error) {
+    await log(LogLevel.ERROR, 'deletion', 'Selector probe failed', { message: error?.message || String(error) });
+    return { ok: false, error: error?.message || 'probe_failed' };
+  }
+}
+
+/** Slovensky: Kód injektovaný do chatgpt tabu pre overenie selektorov. */
+async function selectorProbe(payload) {
+  const { timeoutMs, prefix, debug } = payload || {};
+  const logProbe = (message, meta) => {
+    if (debug) {
+      if (meta !== undefined) {
+        console.log(`${prefix} ${message}`, meta);
+      } else {
+        console.log(`${prefix} ${message}`);
+      }
+    }
+  };
+  const selectors = await import(chrome.runtime.getURL('automation/selectors.js'));
+  const summary = { kebab: false, deleteMenu: false, confirm: false };
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms || 0)));
+  try {
+    const kebab = await selectors.findKebabButton(document, timeoutMs);
+    summary.kebab = true;
+    logProbe('Test: kebab menu located', probeSummary(kebab));
+    kebab.click();
+    await pause(80);
+    try {
+      const deleteItem = await selectors.findDeleteMenuItem(document, timeoutMs);
+      summary.deleteMenu = true;
+      logProbe('Test: delete item located', probeSummary(deleteItem));
+      deleteItem.click();
+      await pause(80);
+      try {
+        const confirm = await selectors.findConfirmDeleteButton(document, timeoutMs);
+        summary.confirm = true;
+        logProbe('Test: confirm button located', probeSummary(confirm));
+        dismissModal(confirm);
+      } catch (error) {
+        summary.confirm = false;
+        logProbe('Test: confirm button missing', { code: error?.code || 'not_found', detail: error?.attempted });
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      }
+    } catch (error) {
+      summary.deleteMenu = false;
+      logProbe('Test: delete item missing', { code: error?.code || 'not_found', detail: error?.attempted });
+    }
+  } catch (error) {
+    summary.kebab = false;
+    logProbe('Test: kebab menu missing', { code: error?.code || 'not_found', detail: error?.attempted });
+  }
+  return summary;
+
+  function probeSummary(node) {
+    if (!(node instanceof HTMLElement)) {
+      return null;
+    }
+    const tag = node.tagName.toLowerCase();
+    const text = (node.textContent || '').trim().slice(0, 40);
+    const label = node.getAttribute('aria-label') || node.getAttribute('title') || '';
+    return { tag, text, label };
+  }
+
+  function dismissModal(confirmButton) {
+    const dialog = confirmButton?.closest('[role="dialog"],[role="alertdialog"]');
+    if (!dialog) {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return;
+    }
+    const cancel = dialog.querySelector('button[aria-label*="cancel" i], button.secondary');
+    if (cancel) {
+      cancel.click();
+    } else {
+      dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }
+  }
+}
