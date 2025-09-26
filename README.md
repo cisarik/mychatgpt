@@ -3,7 +3,8 @@
 Search Cleaner keeps short, search-like ChatGPT conversations in a local backup so you can reopen and delete them in the official UI without touching private APIs.
 
 ## What it does
-- Watches active `chatgpt.com` conversations and stores the first user/assistant turns when they meet the heuristics (message count, age, prompt/answer length).
+- Watches active `chatgpt.com` conversations and stores only the first user message plus the first assistant reply once they pass the age and length guards.
+- Tracks turn counts as `{user, assistant}` (each 0–1) so streaming tokens, tool panes, or follow-up suggestions never inflate eligibility.
 - Saves each match into IndexedDB (`search-cleaner-db`) so nothing ever leaves your device.
 - Lets you reopen the next batch of conversations for manual deletion and export any backup as standalone HTML.
 - Keeps everything local-first with an optional console debug toggle (no log panels, no remote calls).
@@ -19,11 +20,17 @@ Search Cleaner keeps short, search-like ChatGPT conversations in a local backup 
 4. Switch to the newly opened ChatGPT tabs, press **Delete** in the official UI, and confirm.
 5. Return to the popup to export or “Forget” completed backups if you want to clear the local snapshot.
 
+## Eligibility
+- Only the first visible user bubble and the first assistant bubble inside the main conversation view count toward eligibility.
+- Turn counts live in the stored record as `{ user: 0|1, assistant: 0|1 }`; streaming updates, tool output, banners, or suggestions never add extra turns.
+- If an older capture still shows `too_many_messages` or `eligible` is blank, press **Re-evaluate eligibility** (with a selection to target specific rows, or with none selected to refresh the current view). For brand-new chats, run **Force capture (active tab)** first and re-evaluate right after.
+
 ## No items appear?
 1. Open a short conversation and press **Force capture (active tab)** in the popup.
-2. Want to sweep everything at once? Use **Scan all tabs** to ping every open chatgpt.com window.
-3. Toggle **Show all (ignore filter)** and inspect the **Why not eligible** column for heuristics rejections.
-4. Tweak the heuristic limits in **Settings** and press **Refresh** to apply the new thresholds.
+2. Click **Re-evaluate eligibility** (with the current selection, or with none selected to refresh the visible list) to apply the strict two-turn rule to stored items.
+3. Want to sweep everything at once? Use **Scan all tabs** to ping every open chatgpt.com window.
+4. Toggle **Show all (ignore filter)** and inspect the **Why not eligible** column for guards that are still failing.
+5. Tweak the heuristic limits in **Settings** and press **Refresh** to apply the new thresholds.
 
 ## Risky mode (UI automation)
 - **Use at your own risk.** The automation only simulates official UI clicks, but it still depends on DOM selectors that can break without warning.

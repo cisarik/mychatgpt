@@ -135,7 +135,8 @@
         summary.convoId,
         summary.userPromptText,
         summary.assistantHTML,
-        summary.meta?.messageCountsApprox || 0,
+        summary.counts?.user || 0,
+        summary.counts?.assistant || 0,
         summary.meta?.streamIncomplete ? 1 : 0
       ]);
       if (signature === lastSignature) {
@@ -158,34 +159,31 @@
       return null;
     }
     await ensureConversationReady();
-    const turns = await waitForFirstTurns({ timeoutMs: 6000 });
-    if (!turns?.userTurn || !turns?.assistantTurn) {
+    const pair = await extractFirstPair({ timeoutMs: 6000 });
+    if (!pair || !pair.userTurn || !pair.userText || !pair.assistantHTML) {
       return null;
     }
-    const userPromptText = readTurnText(turns.userTurn);
-    const assistantRawHtml = turns.assistantHtml || readAssistantHtml(turns.assistantTurn);
-    const assistantHTML = sanitizeHTML(assistantRawHtml);
-    if (!userPromptText || !assistantHTML) {
-      return null;
-    }
-    const createdAt = readTurnTimestamp(turns.userTurn);
-    const meta = {
-      messageCountsApprox: Number.isFinite(turns.messageCountsApprox) ? turns.messageCountsApprox : undefined,
-      streamIncomplete: turns.streamIncomplete || undefined
+    const createdAt = readTurnTimestamp(pair.userTurn);
+    const counts = {
+      user: Number.isFinite(pair.counts?.user) ? pair.counts.user : 0,
+      assistant: Number.isFinite(pair.counts?.assistant) ? pair.counts.assistant : 0
     };
-    if (!meta.streamIncomplete) {
-      delete meta.streamIncomplete;
+    const meta = {};
+    const turnsTotal = counts.user + counts.assistant;
+    if (turnsTotal > 0) {
+      meta.messageCountsApprox = turnsTotal;
     }
-    if (meta.messageCountsApprox === undefined) {
-      delete meta.messageCountsApprox;
+    if (pair.streamIncomplete) {
+      meta.streamIncomplete = true;
     }
     return {
       convoId,
       url: window.location.href,
       createdAt,
       capturedAt: Date.now(),
-      userPromptText,
-      assistantHTML,
+      userPromptText: pair.userText,
+      assistantHTML: pair.assistantHTML,
+      counts,
       meta
     };
   }
@@ -208,54 +206,221 @@
     }
   }
 
-  /** Slovensky: Čaká na prvý užívateľský a asistenčný turn. */
-  async function waitForFirstTurns({ timeoutMs = 6000 } = {}) {
+  /** Slovensky: Vyextrahuje prvú dvojicu user/assistant z hlavného pohľadu. */
+  async function extractFirstPair({ timeoutMs = 6000 } = {}) {
+    const view = await resolveConversationView();
+    if (!view) {
+      return null;
+    }
     const settleMs = 360;
     const pollMs = 140;
     const deadline = Date.now() + Math.max(0, timeoutMs);
+    let latest = null;
     let lastSignature = '';
     let stableSince = Date.now();
-    let latest = null;
 
     while (Date.now() <= deadline) {
-      const turns = getConversationTurns();
-      const userTurn = turns.find((turn) => getTurnRole(turn) === 'user');
-      const assistantTurn = turns.find((turn) => getTurnRole(turn) === 'assistant');
-      if (userTurn && assistantTurn) {
-        const userText = readTurnText(userTurn);
-        const assistantContent = readAssistantContent(assistantTurn);
-        if (userText && assistantContent.text) {
-          const candidate = {
-            userTurn,
-            assistantTurn,
-            userText,
-            assistantHtml: assistantContent.html,
-            assistantText: assistantContent.text,
-            messageCountsApprox: turns.length,
-            streamIncomplete: true
-          };
-          latest = candidate;
-          const signature = `${assistantContent.text.length}:${assistantContent.html.length}`;
-          if (signature !== lastSignature) {
-            lastSignature = signature;
-            stableSince = Date.now();
-          } else if (Date.now() - stableSince >= settleMs) {
-            candidate.streamIncomplete = false;
-            return candidate;
-          }
-        }
+      const snapshot = readFirstPairSnapshot(view);
+      if (!snapshot || !snapshot.userTurn) {
+        await waitDelay(pollMs);
+        continue;
+      }
+      latest = snapshot;
+      if (!snapshot.assistantHTML) {
+        stableSince = Date.now();
+        await waitDelay(pollMs);
+        continue;
+      }
+      if (snapshot.signature !== lastSignature) {
+        lastSignature = snapshot.signature;
+        stableSince = Date.now();
+      } else if (Date.now() - stableSince >= settleMs) {
+        snapshot.streamIncomplete = false;
+        return snapshot;
       }
       await waitDelay(pollMs);
     }
 
-    return latest || {
-      userTurn: null,
-      assistantTurn: null,
-      assistantHtml: '',
-      assistantText: '',
-      messageCountsApprox: 0,
+    return latest;
+  }
+
+  /** Slovensky: Určí hlavný kontajner konverzácie. */
+  async function resolveConversationView() {
+    if (waitForConversationViewFn) {
+      try {
+        const element = await waitForConversationViewFn({ timeoutMs: 4000 });
+        if (element instanceof Element) {
+          return element;
+        }
+      } catch (_error) {
+        // Fallback nižšie.
+      }
+    }
+    return document.querySelector('[data-testid="conversation-main"]') || document.body;
+  }
+
+  /** Slovensky: Prečíta aktuálnu prvú dvojicu turnov. */
+  function readFirstPairSnapshot(view) {
+    const turns = collectTurnCandidates(view);
+    if (!turns.length) {
+      return null;
+    }
+    let userTurn = null;
+    let assistantTurn = null;
+    for (const turn of turns) {
+      const role = getTurnRole(turn);
+      if (role === 'user' && !userTurn) {
+        if (isValidTurn(turn, role)) {
+          const text = readTurnText(turn);
+          if (text) {
+            userTurn = turn;
+          }
+        }
+      } else if (role === 'assistant' && userTurn && !assistantTurn) {
+        if (isValidTurn(turn, role)) {
+          assistantTurn = turn;
+        }
+      }
+      if (userTurn && assistantTurn) {
+        break;
+      }
+    }
+    if (!userTurn) {
+      return null;
+    }
+    const userText = readTurnText(userTurn);
+    const assistantContent = assistantTurn ? readAssistantContent(assistantTurn) : null;
+    const assistantHTML = assistantContent?.html ? sanitizeHTML(assistantContent.html) : '';
+    const assistantText = assistantContent?.text || '';
+    const counts = {
+      user: userText ? 1 : 0,
+      assistant: assistantHTML ? 1 : 0
+    };
+    return {
+      userTurn,
+      assistantTurn,
+      userText,
+      assistantHTML,
+      assistantText,
+      counts,
+      signature: `${assistantText.length}:${assistantHTML.length}`,
       streamIncomplete: true
     };
+  }
+
+  /** Slovensky: Zoženie kandidátov na turny len z hlavného pohľadu. */
+  function collectTurnCandidates(view) {
+    const seen = new Set();
+    const result = [];
+    const selectors = ['[data-testid*="conversation-turn" i]', '[data-message-author-role]'];
+    for (const selector of selectors) {
+      const matches = safeQueryAllDeep(selector, view);
+      for (const node of matches) {
+        if (!(node instanceof Element)) {
+          continue;
+        }
+        let element = node;
+        if (!hasTurnMarker(element)) {
+          element = element.closest('[data-message-author-role], [data-testid*="conversation-turn" i]') || element;
+        }
+        if (!(element instanceof Element)) {
+          continue;
+        }
+        if (seen.has(element)) {
+          continue;
+        }
+        if (!view.contains(element)) {
+          continue;
+        }
+        seen.add(element);
+        result.push(element);
+      }
+    }
+    result.sort((a, b) => {
+      if (a === b) {
+        return 0;
+      }
+      const position = a.compareDocumentPosition(b);
+      if (position & Node.DOCUMENT_POSITION_FOLLOWING) {
+        return -1;
+      }
+      if (position & Node.DOCUMENT_POSITION_PRECEDING) {
+        return 1;
+      }
+      return 0;
+    });
+    return result;
+  }
+
+  /** Slovensky: Zistí, či ide o relevantný turn. */
+  function isValidTurn(node, role) {
+    if (!(node instanceof Element)) {
+      return false;
+    }
+    if (!isElementVisible(node)) {
+      return false;
+    }
+    if (isIgnoredContainer(node)) {
+      return false;
+    }
+    if (role === 'user') {
+      return Boolean(readTurnText(node));
+    }
+    if (role === 'assistant') {
+      const content = readAssistantContent(node);
+      return Boolean(content?.text?.trim());
+    }
+    return false;
+  }
+
+  /** Slovensky: Zistí, či je element viditeľný. */
+  function isElementVisible(node) {
+    if (!(node instanceof Element)) {
+      return false;
+    }
+    if (!node.isConnected) {
+      return false;
+    }
+    const style = window.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden') {
+      return false;
+    }
+    const opacity = Number.parseFloat(style.opacity || '1');
+    if (Number.isFinite(opacity) && opacity === 0) {
+      return false;
+    }
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  /** Slovensky: Filtruje bannery, návrhy a nástroje. */
+  function isIgnoredContainer(node) {
+    if (!(node instanceof Element)) {
+      return true;
+    }
+    const testId = (node.getAttribute('data-testid') || '').toLowerCase();
+    if (testId.includes('suggest') || testId.includes('banner') || testId.includes('toast')) {
+      return true;
+    }
+    if (node.closest('[data-testid*="suggest" i]')) {
+      return true;
+    }
+    if (node.closest('[data-testid*="banner" i]')) {
+      return true;
+    }
+    if (node.closest('[data-testid*="toast" i]')) {
+      return true;
+    }
+    if (node.matches('[data-message-author-role="tool"], [data-message-author-role="system"]')) {
+      return true;
+    }
+    if (node.querySelector('[data-message-author-role="tool"]')) {
+      return true;
+    }
+    if (node.querySelector('[data-testid*="add-to-project" i]')) {
+      return true;
+    }
+    return false;
   }
 
   /** Slovensky: Bezpečne čaká daný čas. */
@@ -265,30 +430,6 @@
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, Math.max(0, ms || 0)));
-  }
-
-  /** Slovensky: Získa zoznam turnov naprieč shadow DOM. */
-  function getConversationTurns() {
-    const seen = new Set();
-    const result = [];
-    const candidates = [
-      ...safeQueryAllDeep('[data-testid*="conversation-turn" i]'),
-      ...safeQueryAllDeep('[data-message-author-role]')
-    ];
-    for (const node of candidates) {
-      if (!(node instanceof Element)) {
-        continue;
-      }
-      let element = node;
-      if (!hasTurnMarker(element)) {
-        element = element.closest('[data-message-author-role], [data-testid*="conversation-turn" i]') || element;
-      }
-      if (element instanceof Element && !seen.has(element)) {
-        seen.add(element);
-        result.push(element);
-      }
-    }
-    return result;
   }
 
   /** Slovensky: Overí, či uzol vyzerá ako turn. */

@@ -10,6 +10,7 @@ const testSelectorsButton = document.getElementById('test-selectors-button');
 const refreshButton = document.getElementById('refresh-button');
 const forceCaptureButton = document.getElementById('force-capture-button');
 const scanAllButton = document.getElementById('scan-all-button');
+const reEvaluateButton = document.getElementById('re-evaluate-button');
 const emptyState = document.getElementById('empty-state');
 const settingsForm = document.getElementById('settings-form');
 const riskyModeCheckbox = document.getElementById('risky_mode_enabled');
@@ -50,6 +51,9 @@ async function bootstrap() {
 function bindEvents() {
   refreshButton.addEventListener('click', () => {
     void loadBackups();
+  });
+  reEvaluateButton.addEventListener('click', () => {
+    void reEvaluateEligibility();
   });
   forceCaptureButton.addEventListener('click', () => {
     void forceCaptureActiveTab();
@@ -189,6 +193,7 @@ function setBusy(state) {
   refreshButton.disabled = state;
   forceCaptureButton.disabled = state;
   scanAllButton.disabled = state;
+  reEvaluateButton.disabled = state;
   showAllToggle.disabled = state;
   riskyEnableSessionButton.disabled = state;
   settingsForm.querySelectorAll('input, button').forEach((node) => {
@@ -240,7 +245,7 @@ function getVisibleBackups() {
   if (showAll) {
     return [...backups];
   }
-  return backups.filter((item) => item && item.eligible !== false);
+  return backups.filter((item) => item && item.eligible === true);
 }
 
 /** Slovensky: Vytvorí riadok tabuľky pre zálohu. */
@@ -269,6 +274,9 @@ function renderRow(item) {
 
   const promptCell = document.createElement('td');
   promptCell.textContent = previewPrompt(item.userPrompt || '');
+
+  const turnsCell = document.createElement('td');
+  turnsCell.textContent = formatTurns(item);
 
   const backupCell = document.createElement('td');
   backupCell.textContent = item.answerHTML ? 'Yes' : 'No';
@@ -321,7 +329,7 @@ function renderRow(item) {
   });
   actionsCell.append(openButton, exportButton, deleteButton);
 
-  row.append(selectCell, timeCell, promptCell, backupCell, eligibleCell, reasonCell, statusCell, actionsCell);
+  row.append(selectCell, timeCell, promptCell, turnsCell, backupCell, eligibleCell, reasonCell, statusCell, actionsCell);
   return row;
 }
 
@@ -371,6 +379,36 @@ function formatOutcomeReason(outcome) {
   return outcome.reason ? outcome.reason.replace(/_/g, ' ') : 'Unknown';
 }
 
+/** Slovensky: Zobrazí počet turnov ako "u+a". */
+function formatTurns(item) {
+  if (!item || typeof item !== 'object') {
+    return '0+0';
+  }
+  const messageCount = Number.isFinite(item.messageCount) ? Math.max(0, Math.floor(item.messageCount)) : 0;
+  const userHasText = Boolean(String(item.userPrompt || '').trim());
+  const assistantHasHtml = Boolean(String(item.answerHTML || '').trim());
+  const user = coerceTurnDisplay(item.counts?.user, messageCount, 1, userHasText);
+  const assistant = coerceTurnDisplay(item.counts?.assistant, messageCount, 2, assistantHasHtml);
+  return `${user}+${assistant}`;
+}
+
+function coerceTurnDisplay(value, messageCount, threshold, hasText) {
+  if (Number.isFinite(value)) {
+    const floored = Math.floor(value);
+    if (floored >= 1) {
+      return 1;
+    }
+    return 0;
+  }
+  if (hasText) {
+    return 1;
+  }
+  if (Number.isFinite(messageCount) && messageCount >= threshold) {
+    return 1;
+  }
+  return 0;
+}
+
 /** Slovensky: Formátuje dôvod neeligibility. */
 function formatEligibilityReason(code) {
   const mapping = {
@@ -380,6 +418,8 @@ function formatEligibilityReason(code) {
     too_long_answer: 'Answer too long',
     empty_prompt: 'Empty prompt',
     empty_answer: 'Empty answer',
+    no_turns: 'No turns',
+    internal_count_error: 'Internal count error',
     has_attachments: 'Has attachments',
     invalid_summary: 'Invalid capture',
     unknown: 'Unknown'
@@ -648,6 +688,45 @@ async function scanAllTabs() {
     await showStatus('Scan failed');
   } finally {
     scanAllButton.disabled = busy;
+  }
+}
+
+/** Slovensky: Prepočíta eligibility pre vybrané alebo viditeľné riadky. */
+async function reEvaluateEligibility() {
+  if (busy) {
+    return;
+  }
+  reEvaluateButton.disabled = true;
+  try {
+    const selectedConvoIds = backups
+      .filter((item) => selectedIds.has(item.id))
+      .map((item) => item.convoId)
+      .filter((convoId) => typeof convoId === 'string' && convoId.trim().length > 0);
+    let targetConvoIds = selectedConvoIds;
+    if (!targetConvoIds.length) {
+      targetConvoIds = getVisibleBackups()
+        .map((item) => item.convoId)
+        .filter((convoId) => typeof convoId === 'string' && convoId.trim().length > 0);
+    }
+    const unique = Array.from(new Set(targetConvoIds));
+    if (!unique.length) {
+      await showStatus('Nothing to re-evaluate');
+      return;
+    }
+    const response = await chrome.runtime.sendMessage({ type: 'RE_EVALUATE_SELECTED', convoIds: unique });
+    if (response?.ok) {
+      const processed = Number.isFinite(response.processed) ? response.processed : unique.length;
+      const eligible = Number.isFinite(response.eligible) ? response.eligible : 0;
+      const suffix = processed === eligible ? '' : ` (${eligible} eligible)`;
+      await showStatus(`Re-evaluated ${processed} item(s)${suffix}`);
+      await loadBackups();
+    } else {
+      await showStatus('Re-evaluation failed');
+    }
+  } catch (_error) {
+    await showStatus('Re-evaluation failed');
+  } finally {
+    reEvaluateButton.disabled = busy;
   }
 }
 

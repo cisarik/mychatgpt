@@ -15,7 +15,8 @@ import {
   normalizeChatUrl,
   normalizeSettings,
   now,
-  passesHeuristics,
+  computeEligibility,
+  reEvaluate,
   sanitizeHTML,
   SETTINGS_KEY,
   sleep
@@ -100,6 +101,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return captureActiveTabNow();
       case 'scanAllChatgptTabs':
         return scanAllChatgptTabs();
+      case 'RE_EVALUATE_SELECTED':
+        return reEvaluateSelected(message.convoIds);
       case 'BACKUPS_UPDATED':
         return { ok: true };
       case 'DELETE_SELECTED':
@@ -129,15 +132,16 @@ async function handleCandidate(candidate, sender) {
   if (!cleaned) {
     return { ok: false, rejected: ['invalid_candidate'] };
   }
-  const heuristic = applyHeuristics(cleaned);
-  if (!heuristic.eligible) {
+  const evaluation = computeEligibility(cleaned, settingsCache);
+  if (!evaluation.eligible) {
     await log(LogLevel.INFO, 'capture', 'Candidate rejected', {
       convoId: cleaned.convoId,
-      reasons: heuristic.reasons
+      reason: evaluation.reason || 'unknown'
     });
-    return { ok: false, rejected: heuristic.reasons };
+    return { ok: false, rejected: [evaluation.reason || 'unknown'] };
   }
-  const stored = await persistCandidate(cleaned, heuristic, { storeWhenIneligible: false });
+  const prepared = reEvaluate(cleaned, settingsCache, evaluation);
+  const stored = await persistCandidate(prepared, evaluation, { storeWhenIneligible: false });
   await log(LogLevel.INFO, 'capture', 'Backup stored', {
     convoId: stored.convoId,
     createdAt: stored.createdAt,
@@ -163,6 +167,7 @@ function sanitizeCandidate(candidate, sender) {
   }
   const createdAt = Number.isFinite(candidate?.createdAt) ? candidate.createdAt : Date.now();
   const capturedAt = Date.now();
+  const counts = normalizeCapturedCounts(candidate?.counts);
   return {
     convoId,
     url: normalizeChatUrl(baseUrl) || `https://chatgpt.com/c/${convoId}`,
@@ -170,46 +175,45 @@ function sanitizeCandidate(candidate, sender) {
     answerHTML,
     createdAt,
     capturedAt,
-    messageCount: resolveMessageCount(candidate)
+    counts,
+    messageCount: (counts.user ?? 0) + (counts.assistant ?? 0)
   };
 }
 
-/** Slovensky: Vráti približný počet správ. */
-function resolveMessageCount(candidate) {
-  if (Number.isFinite(candidate?.messageCount)) {
-    return candidate.messageCount;
+/** Slovensky: Normalizuje počty turnov z content skriptu. */
+function normalizeCapturedCounts(rawCounts) {
+  const result = {};
+  if (!rawCounts || typeof rawCounts !== 'object') {
+    return result;
   }
-  if (Number.isFinite(candidate?.meta?.messageCountsApprox)) {
-    return candidate.meta.messageCountsApprox;
+  if (Number.isFinite(rawCounts.user)) {
+    result.user = clampTurnCount(rawCounts.user);
   }
-  return 0;
+  if (Number.isFinite(rawCounts.assistant)) {
+    result.assistant = clampTurnCount(rawCounts.assistant);
+  }
+  return result;
 }
 
-/** Slovensky: Aplikuje heuristiky na kandidáta. */
-function applyHeuristics(candidate) {
-  const verdict = passesHeuristics(candidate, settingsCache);
-  return {
-    eligible: verdict.allowed,
-    reason: verdict.allowed ? null : verdict.reason || verdict.reasons?.[0] || 'unknown',
-    reasons: Array.isArray(verdict.reasons) ? verdict.reasons : []
-  };
+function clampTurnCount(value) {
+  const floored = Math.floor(Number(value));
+  if (!Number.isFinite(floored) || floored <= 0) {
+    return 0;
+  }
+  return floored >= 1 ? 1 : 0;
 }
 
 /**
- * Slovensky: Uloží kandidáta do DB s metadátami heuristík.
- * @param {ReturnType<typeof sanitizeCandidate>} cleaned
- * @param {{eligible:boolean,reason:string|null,reasons:string[]}} heuristics
+ * Slovensky: Uloží (alebo aktualizuje) kandidáta s aktuálnym verdictom.
+ * @param {object} prepared
+ * @param {{eligible:boolean,reason:string|null}} evaluation
  * @param {{storeWhenIneligible?:boolean}} options
  */
-async function persistCandidate(cleaned, heuristics, { storeWhenIneligible = false } = {}) {
-  if (!heuristics.eligible && !storeWhenIneligible) {
+async function persistCandidate(prepared, evaluation, { storeWhenIneligible = false } = {}) {
+  if (!evaluation.eligible && !storeWhenIneligible) {
     return null;
   }
-  const stored = await backups.save({
-    ...cleaned,
-    eligible: heuristics.eligible ? true : false,
-    eligibilityReason: heuristics.eligible ? null : heuristics.reason || 'unknown'
-  });
+  const stored = await backups.save(prepared);
   await notifyBackupsUpdated();
   return stored;
 }
@@ -272,18 +276,68 @@ async function captureFromTab(tabId, { storeWhenIneligible = false, source = 'ma
   if (!cleaned) {
     return { ok: false, error: 'invalid_candidate' };
   }
-  const heuristics = applyHeuristics(cleaned);
-  const stored = await persistCandidate(cleaned, heuristics, { storeWhenIneligible });
+  const evaluation = computeEligibility(cleaned, settingsCache);
+  const prepared = reEvaluate(cleaned, settingsCache, evaluation);
+  const stored = await persistCandidate(prepared, evaluation, { storeWhenIneligible });
   if (!stored) {
-    return { ok: false, error: 'rejected_by_heuristics', heuristics };
+    return { ok: false, error: 'rejected_by_eligibility', evaluation };
   }
   await log(LogLevel.INFO, 'capture', 'Manual capture stored', {
     convoId: stored.convoId,
-    eligible: heuristics.eligible,
-    reason: heuristics.reason,
+    eligible: evaluation.eligible,
+    reason: evaluation.reason,
     source
   });
-  return { ok: true, stored, heuristics };
+  return { ok: true, stored, heuristics: evaluation };
+}
+
+/** Slovensky: Prepočíta eligibility na vybraných záznamoch. */
+async function reEvaluateSelected(convoIds) {
+  const filteredIds = Array.isArray(convoIds)
+    ? Array.from(
+        new Set(
+          convoIds
+            .map((value) => (typeof value === 'string' ? value.trim() : ''))
+            .filter((value) => value.length > 0)
+        )
+      )
+    : [];
+  let records = [];
+  if (filteredIds.length > 0) {
+    for (const convoId of filteredIds) {
+      const record = await backups.byConvoId(convoId);
+      if (record) {
+        records.push(record);
+      }
+    }
+  } else {
+    records = await backups.list();
+  }
+  if (!records.length) {
+    return { ok: true, processed: 0, eligible: 0 };
+  }
+  let processed = 0;
+  let eligibleCount = 0;
+  for (const record of records) {
+    if (!record?.convoId) {
+      continue;
+    }
+    const evaluation = computeEligibility(record, settingsCache);
+    if (evaluation.eligible) {
+      eligibleCount += 1;
+    }
+    const prepared = reEvaluate(record, settingsCache, evaluation);
+    await backups.save(prepared);
+    processed += 1;
+  }
+  if (processed > 0) {
+    await notifyBackupsUpdated();
+  }
+  return {
+    ok: true,
+    processed,
+    eligible: eligibleCount
+  };
 }
 
 /** Slovensky: Odošle signál pre popup na obnovenie zoznamu. */

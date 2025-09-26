@@ -77,6 +77,7 @@ let debugWaiter = null;
  * @property {number} capturedAt
  * @property {number} messageCount
  * @property {string} url
+ * @property {{user:number,assistant:number}} counts
  * @property {number|null} lastDeletionAttemptAt
  * @property {DeletionOutcome|null} lastDeletionOutcome
  * @property {boolean|null} eligible
@@ -218,78 +219,129 @@ export function normalizeSettings(raw) {
 }
 
 /**
- * Slovensky: Posúdi kandidáta podľa heuristík.
- * @param {object} summary
+ * Slovensky: Vyhodnotí eligibility podľa prvej dvojice turnov.
+ * @param {object} item
  * @param {HeuristicsConfig} settings
- * @returns {{allowed:boolean,reasons:string[],reason:string|null,settings:HeuristicsConfig}}
+ * @returns {{eligible:boolean,reason:string|null,counts:{user:number,assistant:number},turns:number,userText:string,assistantTextPlain:string,ageMinutes:number}}
  */
-export function passesHeuristics(summary, settings) {
+export function computeEligibility(item, settings) {
   const normalized = normalizeSettings(settings);
-  if (!summary || typeof summary !== 'object') {
-    return { allowed: false, reasons: ['invalid_summary'], reason: 'unknown', settings: normalized };
-  }
-  const reasons = [];
-  const messageCount = resolveMessageCount(summary);
-  if (messageCount > normalized.maxMessageCount) {
-    reasons.push('too_many_messages');
-  }
-  const prompt = String(summary.userPrompt || summary.userPromptText || '').trim();
-  if (!prompt.length) {
-    reasons.push('empty_prompt');
-  }
-  if (prompt.length > normalized.maxPromptLength) {
-    reasons.push('too_long_prompt');
-  }
-  const answerSource = summary.answerHTML || summary.firstAnswerHTML || summary.assistantHTML || '';
-  const answerLength = countAnswerLength(answerSource);
-  if (!answerLength) {
-    reasons.push('empty_answer');
-  }
-  if (answerLength > normalized.maxAnswerLength) {
-    reasons.push('too_long_answer');
-  }
-  const createdAt = Number.isFinite(summary.createdAt) ? summary.createdAt : Date.now();
-  const capturedAt = Number.isFinite(summary.capturedAt) ? summary.capturedAt : Date.now();
+  const source = item && typeof item === 'object' ? item : {};
+  const userText = String(source.userPrompt ?? source.userPromptText ?? '').trim();
+  const assistantSource =
+    source.answerHTML ?? source.assistantHTML ?? source.firstAnswerHTML ?? '';
+  const assistantTextPlain = stripHtml(String(assistantSource));
+  const messageCount = resolveApproxMessageCount(source);
+  const counts = deriveCounts(source, {
+    userText,
+    assistantTextPlain,
+    messageCount
+  });
+  const turns = counts.user + counts.assistant;
+  const createdAt = Number.isFinite(source.createdAt) ? source.createdAt : Date.now();
+  const capturedAt = Number.isFinite(source.capturedAt) ? source.capturedAt : Date.now();
   const ageMinutes = Math.max(0, (capturedAt - createdAt) / 60000);
-  if (ageMinutes > normalized.maxAgeMinutes) {
-    reasons.push('too_old');
+
+  let reason = null;
+  let eligible = false;
+
+  if (turns === 0) {
+    reason = 'no_turns';
+  } else if (turns > 2) {
+    reason = 'internal_count_error';
+  } else if (userText.length > normalized.maxPromptLength) {
+    reason = 'too_long_prompt';
+  } else if (assistantTextPlain.length > normalized.maxAnswerLength) {
+    reason = 'too_long_answer';
+  } else if (ageMinutes > normalized.maxAgeMinutes) {
+    reason = 'too_old';
+  } else if (counts.user === 1 && (counts.assistant === 0 || counts.assistant === 1)) {
+    eligible = true;
   }
-  if (Array.isArray(summary.attachments) && summary.attachments.length) {
-    reasons.push('has_attachments');
-  }
-  return { allowed: reasons.length === 0, reasons, reason: pickEligibilityReason(reasons), settings: normalized };
+
+  return {
+    eligible,
+    reason,
+    counts,
+    turns,
+    userText,
+    assistantTextPlain,
+    ageMinutes
+  };
 }
 
-/** Slovensky: Odvodí hlavný dôvod neeligibility. */
-function pickEligibilityReason(reasons) {
-  if (!Array.isArray(reasons) || reasons.length === 0) {
-    return null;
+/**
+ * Slovensky: Vráti položku doplnenú o aktuálnu eligibility.
+ * @param {object} item
+ * @param {HeuristicsConfig} settings
+ * @param {{eligible:boolean,reason:string|null,counts:{user:number,assistant:number},turns:number}=} evaluation
+ * @returns {object}
+ */
+export function reEvaluate(item, settings, evaluation = null) {
+  const source = item && typeof item === 'object' ? item : {};
+  const verdict = evaluation || computeEligibility(source, settings);
+  const reasonText = verdict.eligible ? null : verdict.reason || 'unknown';
+  return {
+    ...source,
+    counts: verdict.counts,
+    messageCount: verdict.turns,
+    eligible: verdict.eligible,
+    eligibilityReason: reasonText
+  };
+}
+
+/** Slovensky: Odhadne počty turnov zo starých polí. */
+function resolveApproxMessageCount(entry) {
+  if (Number.isFinite(entry?.messageCount)) {
+    return entry.messageCount;
   }
-  const priority = [
-    'invalid_summary',
-    'empty_prompt',
-    'empty_answer',
-    'too_many_messages',
-    'too_old',
-    'too_long_prompt',
-    'too_long_answer',
-    'has_attachments'
-  ];
-  for (const code of priority) {
-    if (reasons.includes(code)) {
-      return code;
+  if (Number.isFinite(entry?.meta?.messageCountsApprox)) {
+    return entry.meta.messageCountsApprox;
+  }
+  return 0;
+}
+
+/** Slovensky: Normalizuje počty turnov na 0/1. */
+function deriveCounts(entry, context) {
+  const fallback = interpretMessageCount(context.messageCount);
+  const userFallback = context.userText ? 1 : fallback.user;
+  const assistantFallback = context.assistantTextPlain ? 1 : fallback.assistant;
+  const user = coerceTurnCount(entry?.counts?.user, userFallback);
+  const assistant = coerceTurnCount(entry?.counts?.assistant, assistantFallback);
+  return {
+    user,
+    assistant
+  };
+}
+
+/** Slovensky: Preloží starý messageCount na dvojicu turnov. */
+function interpretMessageCount(value) {
+  if (!Number.isFinite(value)) {
+    return { user: 0, assistant: 0 };
+  }
+  const floored = Math.floor(value);
+  if (floored >= 2) {
+    return { user: 1, assistant: 1 };
+  }
+  if (floored === 1) {
+    return { user: 1, assistant: 0 };
+  }
+  return { user: 0, assistant: 0 };
+}
+
+/** Slovensky: Prevedie akékoľvek číslo na 0/1 s fallbackom. */
+function coerceTurnCount(value, fallback = 0) {
+  if (Number.isFinite(value)) {
+    const floored = Math.floor(value);
+    if (floored <= 0) {
+      return 0;
+    }
+    if (floored >= 1) {
+      return 1;
     }
   }
-  return reasons[0] || 'unknown';
-}
-
-/** Slovensky: Určí približný počet správ v kandidátovi. */
-function resolveMessageCount(summary) {
-  if (Number.isFinite(summary?.messageCount)) {
-    return summary.messageCount;
-  }
-  if (Number.isFinite(summary?.meta?.messageCountsApprox)) {
-    return summary.meta.messageCountsApprox;
+  if (fallback >= 1) {
+    return 1;
   }
   return 0;
 }

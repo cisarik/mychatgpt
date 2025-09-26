@@ -102,6 +102,17 @@ function mapRecord(input = {}, existing = null) {
   const capturedAt = Number.isFinite(input.capturedAt) ? input.capturedAt : Number.isFinite(existing?.capturedAt) ? existing.capturedAt : Date.now();
   const recordId = existing?.id || input.id || input.convoId || uuidv4();
   const titleSource = input.title || existing?.title || input.userPrompt || existing?.userPrompt || '';
+  const messageCountFallback = Number.isFinite(input.messageCount)
+    ? input.messageCount
+    : Number.isFinite(existing?.messageCount)
+    ? existing.messageCount
+    : 0;
+  const counts = normalizeCountsRecord(input.counts, existing?.counts, {
+    userPrompt: input.userPrompt || existing?.userPrompt || '',
+    answerHTML: input.answerHTML || existing?.answerHTML || '',
+    messageCount: messageCountFallback
+  });
+  const messageCount = counts.user + counts.assistant;
   return {
     id: recordId,
     convoId: input.convoId || existing?.convoId || '',
@@ -110,7 +121,8 @@ function mapRecord(input = {}, existing = null) {
     answerHTML: input.answerHTML || existing?.answerHTML || '',
     createdAt,
     capturedAt,
-    messageCount: Number.isFinite(input.messageCount) ? input.messageCount : Number.isFinite(existing?.messageCount) ? existing.messageCount : 0,
+    messageCount,
+    counts,
     url: input.url || existing?.url || '',
     lastDeletionAttemptAt: Number.isFinite(input.lastDeletionAttemptAt)
       ? input.lastDeletionAttemptAt
@@ -143,6 +155,52 @@ function normalizeEligibilityReason(nextValue, existingValue) {
     return existingValue.trim();
   }
   return null;
+}
+
+/** Slovensky: Zlúči počty turnov z nového aj starého záznamu. */
+function normalizeCountsRecord(currentCounts, existingCounts, context) {
+  const pick = (role) => {
+    const sources = [currentCounts, existingCounts];
+    for (const source of sources) {
+      if (source && Number.isFinite(source[role])) {
+        const floored = Math.floor(source[role]);
+        if (floored <= 0) {
+          return 0;
+        }
+        if (floored >= 1) {
+          return 1;
+        }
+      }
+    }
+    return null;
+  };
+  let user = pick('user');
+  let assistant = pick('assistant');
+  const promptText = String(context?.userPrompt || '').trim();
+  const answerHtml = String(context?.answerHTML || '').trim();
+  const messageCount = Number.isFinite(context?.messageCount) ? Math.max(0, Math.floor(context.messageCount)) : 0;
+  if (user === null) {
+    if (promptText) {
+      user = 1;
+    } else if (messageCount >= 1) {
+      user = 1;
+    } else {
+      user = 0;
+    }
+  }
+  if (assistant === null) {
+    if (answerHtml) {
+      assistant = 1;
+    } else if (messageCount >= 2) {
+      assistant = 1;
+    } else {
+      assistant = 0;
+    }
+  }
+  return {
+    user,
+    assistant
+  };
 }
 
 /** Slovensky: Vyrobí krátky titulok zo zadania. */
