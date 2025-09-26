@@ -144,5 +144,29 @@ const SettingsStore = {
   save: persistSettings
 };
 
+/* Slovensky komentar: Overi, ci URL zodpoveda niektoremu z povolenych patternov. */
+function urlMatchesAnyPattern(url, patterns) {
+  if (!url || !Array.isArray(patterns) || !patterns.length) {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    const pathname = parsed.pathname || '/';
+    return patterns.some((patternRaw) => {
+      const pattern = typeof patternRaw === 'string' ? patternRaw.trim() : '';
+      if (!pattern) {
+        return false;
+      }
+      if (pattern.includes('://')) {
+        return url.startsWith(pattern);
+      }
+      return pathname.startsWith(pattern);
+    });
+  } catch (_error) {
+    return false;
+  }
+}
+
 globalTarget.Logger = Logger;
 globalTarget.SettingsStore = SettingsStore;
+globalTarget.urlMatchesAnyPattern = urlMatchesAnyPattern;

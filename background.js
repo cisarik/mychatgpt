@@ -89,6 +89,28 @@ function sendPingRequest(tabId, traceId) {
   });
 }
 
+/* Slovensky komentar: Odošle poziadavku na citanie metadata bez zasahu do DOM. */
+function sendProbeRequest(tabId, traceId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(
+      tabId,
+      {
+        type: 'probe_metadata',
+        traceId,
+        want: { url: true, title: true, ids: true, counts: true }
+      },
+      (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(new Error(runtimeError.message || 'sendMessage failed'));
+          return;
+        }
+        resolve(response || null);
+      }
+    );
+  });
+}
+
 self.addEventListener('install', () => {
   /* Slovensky komentar: Okamzite aktivuje novu verziu. */
   self.skipWaiting();
@@ -200,6 +222,100 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           url: activeTab.url,
           title: activeTab.title || null,
           markers: null,
+          error: error && error.message
+        });
+        sendResponse({ ok: false, reasonCode, error: error && error.message });
+      }
+    })();
+    return true;
+  }
+  if (message && message.type === 'probe_request') {
+    (async () => {
+      const traceId = `probe:${Date.now()}`;
+      let activeTab = null;
+      let reasonCode = 'no_match';
+      try {
+        activeTab = await getActiveTab();
+      } catch (error) {
+        await Logger.log('info', 'scan', 'Metadata probe summary', {
+          reasonCode: 'error',
+          url: null,
+          title: null,
+          error: error && error.message
+        });
+        sendResponse({ ok: false, reasonCode: 'error', error: error && error.message });
+        return;
+      }
+
+      if (!activeTab || !activeTab.url || !activeTab.url.startsWith('https://chatgpt.com/')) {
+        reasonCode = 'no_match';
+        await Logger.log('info', 'scan', 'Metadata probe summary', {
+          reasonCode,
+          url: activeTab && activeTab.url ? activeTab.url : null,
+          title: activeTab && activeTab.title ? activeTab.title : null
+        });
+        sendResponse({ ok: false, reasonCode, error: 'Active tab is not chatgpt.com' });
+        return;
+      }
+
+      try {
+        const { settings } = await SettingsStore.load();
+        if (urlMatchesAnyPattern(activeTab.url, settings.SAFE_URL_PATTERNS)) {
+          reasonCode = 'safe_url';
+          const payload = {
+            ok: true,
+            traceId,
+            url: activeTab.url,
+            title: activeTab.title || null,
+            convoId: null,
+            counts: { total: null, user: null, assistant: null },
+            markers: { hasAppRoot: false, hasComposer: false, guessChatView: false },
+            skipped: true,
+            reason: 'safe_url_pattern'
+          };
+          await Logger.log('info', 'scan', 'Metadata probe summary', {
+            reasonCode,
+            url: activeTab.url,
+            title: activeTab.title || null,
+            convoId: null,
+            counts: payload.counts,
+            skipped: true
+          });
+          sendResponse({ ok: true, reasonCode, payload });
+          return;
+        }
+
+        const response = await sendProbeRequest(activeTab.id, traceId);
+        if (response && response.ok) {
+          reasonCode = 'probe_ok';
+          await Logger.log('info', 'scan', 'Metadata probe summary', {
+            reasonCode,
+            url: response.url,
+            title: response.title,
+            convoId: response.convoId || null,
+            counts: response.counts,
+            skipped: Boolean(response.skipped)
+          });
+          sendResponse({ ok: true, reasonCode, payload: response });
+          return;
+        }
+        reasonCode = 'error';
+        await Logger.log('info', 'scan', 'Metadata probe summary', {
+          reasonCode,
+          url: activeTab.url,
+          title: activeTab.title || null,
+          convoId: null,
+          counts: null
+        });
+        sendResponse({ ok: false, reasonCode, error: 'Content script did not respond' });
+      } catch (error) {
+        reasonCode = 'error';
+        await Logger.log('info', 'scan', 'Metadata probe summary', {
+          reasonCode,
+          url: activeTab.url,
+          title: activeTab.title || null,
+          convoId: null,
+          counts: null,
           error: error && error.message
         });
         sendResponse({ ok: false, reasonCode, error: error && error.message });

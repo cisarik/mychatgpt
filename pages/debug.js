@@ -9,6 +9,8 @@
   const scanResultContainer = document.getElementById('scan-result');
   const connectivityButton = document.getElementById('connectivity-btn');
   const connectivityContainer = document.getElementById('connectivity-results');
+  const probeButton = document.getElementById('probe-btn');
+  const metadataContainer = document.getElementById('metadata-results');
 
   async function loadAndRenderLogs() {
     const filterValue = filterInput.value.trim().toLowerCase();
@@ -172,6 +174,73 @@
       connectivityButton.textContent = originalLabel;
     }
   });
+
+  /* Slovensky komentar: Vytvori zaznam o metadata probe v historii. */
+  function appendProbeRecord(text) {
+    if (!metadataContainer) {
+      return;
+    }
+    const block = document.createElement('div');
+    block.className = 'log-entry';
+    block.textContent = text;
+    metadataContainer.prepend(block);
+    while (metadataContainer.childElementCount > 5) {
+      metadataContainer.removeChild(metadataContainer.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Vyziada z backgroundu prehliadanie metadata. */
+  function requestMetadataProbe() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'probe_request' }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(runtimeError);
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
+  if (probeButton) {
+    probeButton.addEventListener('click', async () => {
+      const originalLabel = probeButton.textContent;
+      probeButton.disabled = true;
+      probeButton.textContent = 'Prebieha…';
+      try {
+        const response = await requestMetadataProbe();
+        if (response && response.ok && response.payload) {
+          const payload = response.payload;
+          if (payload.skipped && payload.reason === 'safe_url_pattern') {
+            appendProbeRecord('Preskocené: Aktívna stránka je chránená vzorom SAFE_URL.');
+          } else {
+            appendProbeRecord(`OK: ${JSON.stringify(payload)}`);
+          }
+          await Logger.log('info', 'debug', 'Metadata probe completed', {
+            reasonCode: response.reasonCode,
+            traceId: payload.traceId,
+            skipped: Boolean(payload.skipped)
+          });
+        } else {
+          const errorMessage = (response && response.error) || 'Neznáma chyba';
+          appendProbeRecord(`Chyba: ${errorMessage}`);
+          await Logger.log('warn', 'debug', 'Metadata probe returned warning', {
+            reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
+            message: errorMessage
+          });
+        }
+      } catch (error) {
+        appendProbeRecord(`Chyba: ${error && error.message}`);
+        await Logger.log('error', 'debug', 'Metadata probe request threw error', {
+          message: error && error.message
+        });
+      } finally {
+        probeButton.disabled = false;
+        probeButton.textContent = originalLabel;
+      }
+    });
+  }
 
   await Logger.log('info', 'db', 'Debug page opened');
   await loadAndRenderLogs();

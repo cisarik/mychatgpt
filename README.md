@@ -38,3 +38,9 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 1. Navigate to [https://chatgpt.com](https://chatgpt.com) in the active browser tab.
 2. Open the extension’s **Debug** page and click **Connectivity test (chatgpt.com)**.
 3. Review the inline history for the most recent responses and cross-check the `scan` scope logs for the summarized ping result.
+
+## Metadata probe
+1. Open a conversation on [https://chatgpt.com](https://chatgpt.com) and launch the **Debug** page.
+2. Click **Probe metadata (read-only)** to request a deterministic snapshot of the current tab.
+3. If the active URL matches any entry under `SAFE_URL_PATTERNS`, the probe is skipped with a clear notice so you can adjust the page or pattern list.
+4. Successful probes return the resolved URL, title, conversation ID (if present), heuristic message counts, and UI markers that feed future `MAX_MESSAGES` controls.

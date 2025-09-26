@@ -25,7 +25,8 @@
       white-space: pre-wrap;
     }
 
-    #connectivity-results {
+    #connectivity-results,
+    #metadata-results {
       display: grid;
       gap: 8px;
       margin-top: 12px;
@@ -44,9 +45,11 @@
     <button id="clear-btn">Clear logs</button>
     <button id="scan-btn">Scan now (stub)</button>
     <button id="connectivity-btn">Connectivity test (chatgpt.com)</button>
+    <button id="probe-btn">Probe metadata (read-only)</button>
   </div>
   <div id="scan-result" role="status" aria-live="polite"></div>
   <div id="connectivity-results" role="status" aria-live="polite"></div>
+  <div id="metadata-results" role="status" aria-live="polite"></div>
   <div id="logs" aria-live="polite"></div>
 
   <script src="../utils.js"></script>
