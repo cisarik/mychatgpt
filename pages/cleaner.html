@@ -8,68 +8,57 @@
   </head>
   <body>
     <main class="page">
-      <header class="page__header">
-        <div>
-          <h1>Conversation cleaner</h1>
-          <p>Capture short chats and remove them safely.</p>
-        </div>
-        <div class="header__actions">
-          <button id="scan-button" type="button" class="secondary">Scan</button>
-          <button id="refresh-button" type="button" class="secondary">Refresh</button>
-          <button id="force-capture-button" type="button">Force capture (active tab)</button>
-          <button id="probe-button" type="button" class="secondary">Test selectors (active tab)</button>
-          <button id="delete-current-tab-button" type="button" class="danger">Delete current tab (risky)</button>
-        </div>
+      <header class="hero">
+        <h1>Conversation cleaner</h1>
+        <p>Single-button capture with optional risky delete.</p>
       </header>
 
-      <div id="inline-confirm" class="inline-confirm" hidden role="alertdialog" aria-live="assertive">
-        <span>This chat is not marked as search-like. Delete anyway?</span>
-        <div class="inline-confirm__actions">
-          <button id="inline-confirm-accept" type="button">Delete anyway</button>
-          <button id="inline-confirm-cancel" type="button" class="secondary">Cancel</button>
-        </div>
-      </div>
+      <section class="primary-action">
+        <button id="refresh-button" type="button" class="refresh-button">
+          <span class="refresh-label">Refresh</span>
+        </button>
+        <span id="status-line" class="status-label">Ready.</span>
+      </section>
 
-      <section class="toolbar">
-        <div class="toolbar__left">
-          <label class="field-inline">
-            <input id="show-all-toggle" type="checkbox" />
-            <span>Show all (ignore filter)</span>
+      <details class="settings" id="settings-panel">
+        <summary>Settings</summary>
+        <div class="settings-body">
+          <label class="toggle">
+            <input id="risky-enabled-toggle" type="checkbox" />
+            <span>Risky mode</span>
           </label>
-          <span id="status-line" class="status-muted"></span>
+          <div class="settings-grid">
+            <label class="field">
+              <span>Step timeout (ms)</span>
+              <input id="risky-step-timeout" type="number" inputmode="numeric" min="0" />
+            </label>
+            <label class="field">
+              <span>Wait after open (ms)</span>
+              <input id="risky-wait-open" type="number" inputmode="numeric" min="0" />
+            </label>
+            <label class="field">
+              <span>Wait after click (ms)</span>
+              <input id="risky-wait-click" type="number" inputmode="numeric" min="0" />
+            </label>
+            <label class="field">
+              <span>Between tabs (ms)</span>
+              <input id="risky-between-tabs" type="number" inputmode="numeric" min="0" />
+            </label>
+          </div>
         </div>
-        <div class="toolbar__actions">
-          <button id="re-evaluate-button" type="button" class="secondary">Re-evaluate eligibility</button>
-          <button id="cancel-deletion-button" type="button" class="secondary">Cancel deletion</button>
-          <button id="delete-button" type="button" disabled>Delete selected</button>
-        </div>
-      </section>
+      </details>
 
-      <section class="settings-inline">
-        <label class="field-inline">
-          <input id="risky-enabled-toggle" type="checkbox" />
-          <span>Risky mode</span>
-        </label>
-        <label class="field-inline">
-          <input id="dry-run-toggle" type="checkbox" />
-          <span>Dry run</span>
-        </label>
-      </section>
-
-      <section>
+      <section class="table-section">
         <table class="backup-table" aria-live="polite">
           <thead>
             <tr>
-              <th scope="col" class="col-select">
-                <input id="select-all" type="checkbox" aria-label="Select all" />
-              </th>
               <th scope="col" class="col-time">Time</th>
-              <th scope="col">Prompt</th>
+              <th scope="col">Prompt preview</th>
               <th scope="col">Backup?</th>
               <th scope="col">Turns</th>
-              <th scope="col">Why not eligible</th>
+              <th scope="col">Eligibility reason</th>
               <th scope="col">Last deletion</th>
-              <th scope="col" class="col-actions">Actions</th>
+              <th scope="col">Deleted at</th>
             </tr>
           </thead>
           <tbody id="items-body"></tbody>

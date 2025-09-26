@@ -1,14 +1,14 @@
 {
   "manifest_version": 3,
   "name": "MyChatGPT",
-  "version": "0.2.5",
-  "description": "Capture first turns locally and clean them via header-only automation.",
+  "version": "0.3.0",
+  "description": "Single-click backup with optional header delete for short ChatGPT chats.",
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
   "action": {
-    "default_title": "Search Cleaner",
+    "default_title": "MyChatGPT Cleaner",
     "default_popup": "pages/cleaner.html",
     "default_icon": {
       "16": "assets/icon-16.png",

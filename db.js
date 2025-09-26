@@ -1,30 +1,24 @@
-import { normalizeSettings, SETTINGS_KEY, log } from './utils.js';
+import { normalizeSettings, SETTINGS_KEY } from './utils.js';
 
 const DB_KEY = 'backups_v2_store';
 
 export async function init() {
-  const existing = await chrome.storage.local.get([SETTINGS_KEY]);
-  if (!existing?.[SETTINGS_KEY]) {
-    await chrome.storage.local.set({ [SETTINGS_KEY]: normalizeSettings() });
+  const stored = await chrome.storage.local.get([SETTINGS_KEY, DB_KEY]);
+  if (!stored?.[SETTINGS_KEY]) {
+    await chrome.storage.local.set({ [SETTINGS_KEY]: normalizeSettings(stored?.[SETTINGS_KEY]) });
+  }
+  if (!stored?.[DB_KEY]) {
+    await chrome.storage.local.set({ [DB_KEY]: {} });
   }
 }
 
 export async function getAll() {
   const store = await readStore();
   return Object.values(store).sort((a, b) => {
-    const aTime = new Date(a.createdAt || 0).getTime();
-    const bTime = new Date(b.createdAt || 0).getTime();
-    return bTime - aTime;
+    const aTime = normalizeTimestamp(a?.createdAt);
+    const bTime = normalizeTimestamp(b?.createdAt);
+    return (bTime || 0) - (aTime || 0);
   });
-}
-
-export async function getMany(ids) {
-  const wanted = new Set(ids || []);
-  if (!wanted.size) {
-    return [];
-  }
-  const store = await readStore();
-  return Object.values(store).filter((item) => wanted.has(item.convoId));
 }
 
 export async function put(item) {
@@ -32,7 +26,12 @@ export async function put(item) {
     throw new Error('missing_convo_id');
   }
   const store = await readStore();
-  const payload = { ...item, id: item.id || item.convoId };
+  const current = store[item.convoId] || {};
+  const payload = {
+    ...current,
+    ...item,
+    id: current.id || item.id || item.convoId
+  };
   store[item.convoId] = payload;
   await writeStore(store);
   return payload;
@@ -64,5 +63,17 @@ async function readStore() {
 
 async function writeStore(map) {
   await chrome.storage.local.set({ [DB_KEY]: map });
-  log('DB updated', Object.keys(map).length);
+}
+
+function normalizeTimestamp(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
 }

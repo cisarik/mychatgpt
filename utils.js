@@ -1,6 +1,4 @@
 const SETTINGS_KEY = 'cleaner_settings_v2';
-const WAIT_MIN = 40;
-const WAIT_MAX = 5000;
 
 export const DEFAULT_SETTINGS = Object.freeze({
   heuristics: Object.freeze({
@@ -10,11 +8,10 @@ export const DEFAULT_SETTINGS = Object.freeze({
   }),
   risky: Object.freeze({
     enabled: false,
-    dry_run: false,
     risky_step_timeout_ms: 10000,
-    risky_between_tabs_ms: 800,
     risky_wait_after_open_ms: 260,
-    risky_wait_after_click_ms: 160
+    risky_wait_after_click_ms: 160,
+    risky_between_tabs_ms: 800
   })
 });
 
@@ -25,9 +22,9 @@ export function normalizeSettings(candidate) {
   const riskyRaw = { ...DEFAULT_SETTINGS.risky, ...(candidate?.risky || {}) };
   const risky = {
     ...riskyRaw,
+    risky_step_timeout_ms: coerceWait(riskyRaw.risky_step_timeout_ms, 500, 60000, DEFAULT_SETTINGS.risky.risky_step_timeout_ms),
     risky_wait_after_open_ms: coerceWait(riskyRaw.risky_wait_after_open_ms, 40, 5000, DEFAULT_SETTINGS.risky.risky_wait_after_open_ms),
     risky_wait_after_click_ms: coerceWait(riskyRaw.risky_wait_after_click_ms, 40, 5000, DEFAULT_SETTINGS.risky.risky_wait_after_click_ms),
-    risky_step_timeout_ms: coerceWait(riskyRaw.risky_step_timeout_ms, 500, 60000, DEFAULT_SETTINGS.risky.risky_step_timeout_ms),
     risky_between_tabs_ms: coerceWait(riskyRaw.risky_between_tabs_ms, 40, 60000, DEFAULT_SETTINGS.risky.risky_between_tabs_ms)
   };
   return { heuristics, risky };
@@ -36,15 +33,17 @@ export function normalizeSettings(candidate) {
 export function computeEligibility(item, rawSettings) {
   const settings = normalizeSettings(rawSettings);
   const counts = item?.counts || {};
+  const userTurns = Number.isFinite(counts.user) ? Number(counts.user) : 0;
+  const assistantTurns = Number.isFinite(counts.assistant) ? Number(counts.assistant) : 0;
   const userText = (item?.userText || '').trim();
   const assistantHTML = String(item?.assistantHTML || '');
   const assistantText = stripHtml(assistantHTML);
-  const createdAt = normalizeDate(item?.createdAt);
+  const createdAt = normalizeTimestamp(item?.createdAt);
 
-  if (counts.user !== 1) {
+  if (userTurns !== 1) {
     return { eligible: false, reason: 'missing_user_turn' };
   }
-  if (counts.assistant !== 1) {
+  if (assistantTurns !== 1) {
     return { eligible: false, reason: 'missing_assistant_turn' };
   }
   if (!userText) {
@@ -63,10 +62,10 @@ export function computeEligibility(item, rawSettings) {
     return { eligible: false, reason: 'missing_created_at' };
   }
   const ageMinutes = (Date.now() - createdAt) / 60000;
-  if (ageMinutes > settings.heuristics.MAX_AGE_MINUTES) {
+  if (!Number.isFinite(ageMinutes) || ageMinutes > settings.heuristics.MAX_AGE_MINUTES) {
     return { eligible: false, reason: 'too_old' };
   }
-  return { eligible: true };
+  return { eligible: true, reason: null };
 }
 
 export function getConvoUrl(convoId) {
@@ -85,44 +84,52 @@ export function getConvoIdFromUrl(href) {
       return parts[idx + 1];
     }
   } catch (_error) {
-    // ignore
+    return null;
   }
   return null;
 }
 
-export function log(...args) {
-  console.log('[Cleaner]', ...args);
-}
-
 export function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  const value = Number(ms);
+  return new Promise((resolve) => setTimeout(resolve, Number.isFinite(value) ? Math.max(0, value) : 0));
 }
 
-export function delay(ms) {
-  return sleep(ms);
-}
-
-export function coerceWait(value, min = WAIT_MIN, max = WAIT_MAX, fallback = DEFAULT_SETTINGS.risky.risky_wait_after_click_ms) {
-  const numeric = Number.isFinite(value) ? Number(value) : Number.parseFloat(value);
-  const candidate = Number.isFinite(numeric) ? numeric : fallback;
-  return clampWait(candidate, min, max);
+export async function focusTab(tabId, windowId) {
+  if (typeof windowId === 'number') {
+    await chrome.windows.update(windowId, { focused: true });
+  }
+  await chrome.tabs.update(tabId, { active: true });
+  await sleep(randomBetween(120, 180));
 }
 
 export function randomBetween(min, max) {
-  const clampedMin = Number.isFinite(min) ? Math.max(0, Math.floor(min)) : 0;
-  const clampedMax = Number.isFinite(max) ? Math.max(clampedMin, Math.floor(max)) : clampedMin;
-  if (clampedMax <= clampedMin) {
-    return clampedMin;
+  const safeMin = Number.isFinite(min) ? Math.max(0, Math.floor(min)) : 0;
+  const safeMax = Number.isFinite(max) ? Math.max(safeMin, Math.floor(max)) : safeMin;
+  if (safeMax <= safeMin) {
+    return safeMin;
   }
-  const span = clampedMax - clampedMin + 1;
-  return clampedMin + Math.floor(Math.random() * span);
+  const span = safeMax - safeMin + 1;
+  return safeMin + Math.floor(Math.random() * span);
 }
 
 export function stripHtml(value) {
   return String(value).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function normalizeDate(value) {
+export function logBg(...args) {
+  console.log('[Cleaner][bg]', ...args);
+}
+
+function coerceWait(value, min, max, fallback) {
+  const numeric = Number.isFinite(value) ? Number(value) : Number.parseFloat(value);
+  const candidate = Number.isFinite(numeric) ? numeric : fallback;
+  const boundedMin = Math.max(0, Number.isFinite(min) ? Number(min) : 0);
+  const boundedMax = Math.max(boundedMin, Number.isFinite(max) ? Number(max) : boundedMin);
+  const clamped = Math.max(boundedMin, Math.min(boundedMax, Number(candidate) || 0));
+  return Math.round(clamped);
+}
+
+function normalizeTimestamp(value) {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
   }
@@ -133,31 +140,4 @@ function normalizeDate(value) {
     }
   }
   return null;
-}
-
-function clampWait(raw, min, max) {
-  const clampedMin = Number.isFinite(min) ? Math.max(0, min) : 0;
-  const clampedMax = Number.isFinite(max) ? Math.max(clampedMin, max) : clampedMin;
-  const next = Math.max(clampedMin, Math.min(clampedMax, Number(raw) || 0));
-  return Math.round(next);
-}
-
-export async function getActiveChatgptTab() {
-  const [tab] = await chrome.tabs.query({
-    active: true,
-    currentWindow: true,
-    url: 'https://chatgpt.com/*'
-  });
-  if (!tab) {
-    throw new Error('no_active_chatgpt_tab');
-  }
-  return tab;
-}
-
-export async function focusTab(tabId, windowId) {
-  if (typeof windowId === 'number') {
-    await chrome.windows.update(windowId, { focused: true });
-  }
-  await chrome.tabs.update(tabId, { active: true });
-  await sleep(150);
 }
