@@ -353,6 +353,17 @@ async function runDeletionAutomation(payload) {
     details: toErrorMeta(error)
   });
 
+  const dispatchClick = (element) => {
+    element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
+  };
+
+  const maybeClick = (element, evidence) => {
+    if (dryRun) {
+      console.log(`${prefix} DRY RUN would click:`, evidence);
+    }
+    dispatchClick(element);
+  };
+
   const timedStep = async (step, path, action) => {
     const started = Date.now();
     try {
@@ -370,10 +381,6 @@ async function runDeletionAutomation(payload) {
       log('warn', `step=${step} path=${path} failed in ${duration}ms`, toErrorMeta(error));
       return { ok: false, error, duration };
     }
-  };
-
-  const dispatchClick = (element) => {
-    element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
   };
 
   log('log', `attempt=${attempt} start`, { convoId, url });
@@ -418,6 +425,9 @@ async function runDeletionAutomation(payload) {
 
   if (!kebabResult) {
     path = 'sidebar';
+    if (!convoId) {
+      return failure('findKebab', { code: 'convo_id_missing', message: 'Conversation ID missing for sidebar lookup' });
+    }
     const ensureSidebar = await timedStep('ensureSidebar', path, () => selectors.ensureSidebarVisible({ timeoutMs: stepTimeout }));
     if (!ensureSidebar.ok) {
       return failure('findKebab', ensureSidebar.error);
@@ -436,10 +446,7 @@ async function runDeletionAutomation(payload) {
 
   await selectors.reveal(kebab);
   log('log', `step=reveal path=${path}`, kebabResult.evidence);
-  if (dryRun) {
-    console.log(`${prefix} DRY RUN would click:`, kebabResult.evidence);
-  }
-  dispatchClick(kebab);
+  maybeClick(kebab, kebabResult.evidence);
   await selectors.sleep(150);
 
   const menuResult = await timedStep('findMenu', path, () => selectors.findDeleteMenuItem({ timeoutMs: stepTimeout }));
@@ -448,12 +455,8 @@ async function runDeletionAutomation(payload) {
   }
   const deleteButton = menuResult.result.element;
   await selectors.reveal(deleteButton);
-  if (dryRun) {
-    console.log(`${prefix} DRY RUN would click:`, menuResult.result.evidence);
-    dispatchClick(deleteButton);
-  } else {
-    dispatchClick(deleteButton);
-  }
+  log('log', `step=reveal path=${path} target=delete`, menuResult.result.evidence);
+  maybeClick(deleteButton, menuResult.result.evidence);
   await selectors.sleep(150);
 
   const confirmResult = await timedStep('findConfirm', path, () => selectors.findConfirmDeleteButton({ timeoutMs: stepTimeout }));
@@ -462,6 +465,7 @@ async function runDeletionAutomation(payload) {
   }
   const confirmButton = confirmResult.result.element;
   await selectors.reveal(confirmButton);
+  log('log', `step=reveal path=${path} target=confirm`, confirmResult.result.evidence);
   if (dryRun) {
     console.log(`${prefix} DRY RUN would click:`, confirmResult.result.evidence);
     dismissDialog(confirmButton);

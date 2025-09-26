@@ -193,6 +193,32 @@
     return flat;
   }
 
+  function closestDeep(start, predicate) {
+    let current = start instanceof Element ? start : null;
+    while (current) {
+      if (predicate(current)) {
+        return current;
+      }
+      current = parentThroughShadow(current);
+    }
+    return null;
+  }
+
+  function parentThroughShadow(node) {
+    if (!(node instanceof Element)) {
+      return null;
+    }
+    if (node.parentElement) {
+      return node.parentElement;
+    }
+    const root = typeof node.getRootNode === 'function' ? node.getRootNode() : null;
+    if (root instanceof ShadowRoot) {
+      const host = root.host;
+      return host instanceof Element ? host : null;
+    }
+    return null;
+  }
+
   function ensureRegex(value) {
     if (value instanceof RegExp) {
       return value;
@@ -278,11 +304,21 @@
     if (!(node instanceof Element)) {
       return '';
     }
-    return Array.from(node.childNodes)
-      .filter((child) => child.nodeType === Node.TEXT_NODE)
-      .map((child) => child.textContent || '')
-      .join(' ')
-      .trim();
+    const doc = node.ownerDocument || document;
+    const walker = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT, {
+      acceptNode(textNode) {
+        const parent = textNode.parentElement;
+        if (!parent) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return isVisible(parent) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      }
+    });
+    let text = '';
+    while (walker.nextNode()) {
+      text += (walker.currentNode.textContent || '') + ' ';
+    }
+    return text.trim();
   }
 
   function accessibleName(node) {
@@ -454,11 +490,18 @@
         if (!(anchor instanceof Element)) {
           continue;
         }
-        const container = anchor.closest('[role="option"], li, div');
+        const container = closestDeep(anchor, (node) => {
+          if (!(node instanceof Element)) {
+            return false;
+          }
+          return node.matches('[role="option"], li, div');
+        });
         if (!container || !(container instanceof Element)) {
+          attempted.push('sidebar-container-missing');
           continue;
         }
         if (!isVisible(container)) {
+          attempted.push('sidebar-container-hidden');
           continue;
         }
         const kebab = locateKebabInContainer(container, attempted, 'sidebar');
@@ -506,13 +549,13 @@
 
   function locateKebabInContainer(container, attempted, scopeLabel) {
     for (const selector of KEBAB_FALLBACK_SELECTORS) {
-      const candidate = container.querySelector(selector);
+      const candidate = queryAllDeep(container, selector)[0];
       attempted.push(`${scopeLabel}:${selector}`);
       if (candidate && candidate instanceof Element && isActionable(candidate)) {
         return ensureInteractive(candidate);
       }
     }
-    const fallback = Array.from(container.querySelectorAll('button, [role="button"]')).find((node) => looksLikeKebab(node));
+    const fallback = queryAllDeep(container, 'button', '[role="button"]').find((node) => looksLikeKebab(node));
     attempted.push(`${scopeLabel}:svg-kebab`);
     if (fallback && fallback instanceof Element && isActionable(fallback)) {
       return ensureInteractive(fallback);

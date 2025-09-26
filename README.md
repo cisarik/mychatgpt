@@ -24,7 +24,11 @@ Search Cleaner keeps short, search-like ChatGPT conversations in a local backup 
 - It is off by default. Toggle *Enable Risky mode (UI automation)* and press **Enable for 10 minutes** to start a session. When the timer expires (or you disable the toggle), deletion falls back to opening tabs manually.
 - The flow: **Scan** → select rows → enable Risky mode session → **Delete selected**. Watch DevTools console for `[RiskyMode]` traces (use the settings toggle if you want extra `[Cleaner]` debug lines).
 - Dry run support: enable *Dry run (no clicks)* to verify selectors without confirming deletion. The automation locates buttons, logs intent, and exits before the destructive click.
-- Troubleshooting: use **Test selectors** on the active tab to probe kebab/delete/confirm buttons, or adjust jitter/timeout/retry settings under the Risky mode fieldset. The automation respects **Cancel deletion**, stopping after the current tab.
+- Troubleshooting:
+  - Run **Test selectors** on the active tab; it logs a `[RiskyMode] Probe summary` (header/sidebar/menu/confirm) in the tab console and returns a ✓/× readout in the popup.
+  - If the probe times out, increase `risky_step_timeout_ms`, make sure the conversation view is fully loaded, and try the sidebar path by selecting the chat in the left navigation.
+  - If the kebab button only shows on hover, the automation reveals it automatically—ensure the element can scroll into view.
+  - Still failing? Capture the `[RiskyMode]` console logs (including evidence payloads) and tune selectors or timeouts.
 - Everything runs locally—no hidden APIs, only `chrome.scripting.executeScript` driving the public UI.
 
 ### Selector diagnostics

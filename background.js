@@ -529,20 +529,148 @@ async function testSelectorsOnActiveTab() {
       world: 'ISOLATED',
       func: async ({ timeoutMs, prefix }) => {
         const selectors = globalThis.RiskySelectors;
-        if (!selectors?.probeSelectorsOnce) {
-          console.warn(`${prefix} Probe helpers missing`);
+        if (!selectors?.waitForAppShell) {
+          console.warn(`${prefix} Probe missing selectors`);
           return { ok: false, error: 'selectors_missing' };
         }
-        console.log(`${prefix} Probe start`);
+        const summary = {
+          headerFound: false,
+          sidebarFound: false,
+          menuFound: false,
+          confirmFound: false
+        };
+
+        const logMeta = (message, meta, level = 'log') => {
+          if (meta !== undefined) {
+            console[level](`${prefix} ${message}`, meta);
+          } else {
+            console[level](`${prefix} ${message}`);
+          }
+        };
+
+        const convoIdFromLocation = () => {
+          try {
+            const url = new URL(window.location.href);
+            const parts = url.pathname.split('/').filter(Boolean);
+            if (parts[0] === 'c' && parts[1]) {
+              return parts[1];
+            }
+            return null;
+          } catch (_error) {
+            return null;
+          }
+        };
+
         try {
           await selectors.waitForAppShell({ timeoutMs });
-          const outcome = await selectors.probeSelectorsOnce({ timeoutMs, prefix });
-          console.log(`${prefix} Probe done`, outcome);
-          return { ok: true, result: outcome };
         } catch (error) {
-          console.error(`${prefix} Probe failed`, error?.message || error);
-          return { ok: false, error: error?.message || 'probe_failed' };
+          logMeta('Probe appShell timeout', {
+            code: error?.code || 'waitForAppShell',
+            timeoutMs: error?.timeoutMs,
+            message: error?.message || String(error)
+          }, 'warn');
+          return { ok: false, error: error?.code || 'app_shell_timeout' };
         }
+
+        const conversationStatus = await selectors.waitForConversationView({ timeoutMs });
+        if (!conversationStatus.ready) {
+          logMeta('Probe conversation not ready', {
+            attempted: conversationStatus.attempted,
+            timeoutMs: conversationStatus.timeoutMs
+          }, 'warn');
+        }
+
+        let kebabResult = null;
+        let path = 'header';
+
+        if (conversationStatus.ready) {
+          try {
+            kebabResult = await selectors.findHeaderKebab({ timeoutMs });
+            summary.headerFound = Boolean(kebabResult?.element);
+          } catch (error) {
+            logMeta('Probe header kebab missing', {
+              code: error?.code,
+              attempted: error?.attempted,
+              timeoutMs: error?.timeoutMs
+            }, 'warn');
+          }
+        }
+
+        const convoId = convoIdFromLocation();
+        if (!kebabResult) {
+          path = 'sidebar';
+          try {
+            await selectors.ensureSidebarVisible({ timeoutMs });
+            if (convoId) {
+              kebabResult = await selectors.findSidebarSelectedItemByConvoId(convoId, { timeoutMs });
+              summary.sidebarFound = Boolean(kebabResult?.element);
+            } else {
+              logMeta('Probe sidebar skipped (missing convoId)');
+            }
+          } catch (error) {
+            logMeta('Probe sidebar kebab missing', {
+              code: error?.code,
+              attempted: error?.attempted,
+              timeoutMs: error?.timeoutMs
+            }, 'warn');
+          }
+        }
+
+        if (kebabResult?.element) {
+          await selectors.reveal(kebabResult.element);
+          kebabResult.element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
+          await selectors.sleep(150);
+        }
+
+        let menuResult = null;
+        if (kebabResult?.element) {
+          try {
+            menuResult = await selectors.findDeleteMenuItem({ timeoutMs });
+            if (menuResult?.element) {
+              summary.menuFound = true;
+            }
+          } catch (error) {
+            logMeta('Probe delete menu missing', {
+              code: error?.code,
+              attempted: error?.attempted,
+              timeoutMs: error?.timeoutMs
+            }, 'warn');
+          }
+        }
+
+        if (menuResult?.element) {
+          await selectors.reveal(menuResult.element);
+          menuResult.element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
+          await selectors.sleep(180);
+        }
+
+        let confirmResult = null;
+        if (menuResult?.element) {
+          try {
+            confirmResult = await selectors.findConfirmDeleteButton({ timeoutMs });
+            if (confirmResult?.element) {
+              summary.confirmFound = true;
+            }
+          } catch (error) {
+            logMeta('Probe confirm missing', {
+              code: error?.code,
+              attempted: error?.attempted,
+              timeoutMs: error?.timeoutMs
+            }, 'warn');
+          }
+        }
+
+        if (confirmResult?.element) {
+          await selectors.reveal(confirmResult.element);
+          confirmResult.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          confirmResult.element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', bubbles: true }));
+        } else if (menuResult?.element) {
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', bubbles: true }));
+        }
+
+        console.log(`${prefix} Probe summary`, summary);
+        return { ok: true, summary, path };
       },
       args: [{ timeoutMs: settings.risky_step_timeout_ms, prefix: '[RiskyMode]' }]
     });
@@ -550,13 +678,14 @@ async function testSelectorsOnActiveTab() {
     if (!outcome?.ok) {
       return { ok: false, error: outcome?.error || 'probe_failed' };
     }
-    const summary = outcome.result || {};
+    const summary = outcome.summary || {};
     return {
       ok: true,
       result: {
-        kebab: Boolean(summary.kebab),
-        deleteMenu: Boolean(summary.deleteMenu),
-        confirm: Boolean(summary.confirm)
+        header: Boolean(summary.headerFound),
+        sidebar: Boolean(summary.sidebarFound),
+        menu: Boolean(summary.menuFound),
+        confirm: Boolean(summary.confirmFound)
       }
     };
   } catch (error) {

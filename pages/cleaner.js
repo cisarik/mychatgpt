@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, getConvoUrl, isRiskySessionActive, normalizeSettings } from '../utils.js';
+import { DEFAULT_SETTINGS, DeletionStrategyIds, getConvoUrl, isRiskySessionActive, normalizeSettings } from '../utils.js';
 
 const tableBody = document.getElementById('backup-body');
 const selectAllInput = document.getElementById('select-all');
@@ -162,6 +162,10 @@ function updateRiskySessionStatus() {
 function setBusy(state) {
   busy = state;
   cancelDeletionButton.disabled = !state;
+  testSelectorsButton.disabled = state;
+  refreshButton.disabled = state;
+  scanButton.disabled = state;
+  riskyEnableSessionButton.disabled = state;
   updateSelectionState();
 }
 
@@ -400,6 +404,13 @@ async function runDeletion() {
   }
   setBusy(true);
   try {
+    const expectAutomation =
+      settings.deletionStrategyId === DeletionStrategyIds.UI_AUTOMATION &&
+      settings.risky_mode_enabled &&
+      isRiskySessionActive(settings);
+    if (expectAutomation) {
+      void showStatus('Running… see page console');
+    }
     const payload = backups
       .filter((item) => selectedIds.has(item.id))
       .map((item) => ({ convoId: item.convoId, url: item.url || getConvoUrl(item.convoId) }));
@@ -444,8 +455,9 @@ async function testSelectors() {
     if (response?.ok) {
       const result = response.result || {};
       const summary = [
-        result.kebab ? 'kebab ✓' : 'kebab ×',
-        result.deleteMenu ? 'delete ✓' : 'delete ×',
+        result.header ? 'header ✓' : 'header ×',
+        result.sidebar ? 'sidebar ✓' : 'sidebar ×',
+        result.menu ? 'menu ✓' : 'menu ×',
         result.confirm ? 'confirm ✓' : 'confirm ×'
       ].join(', ');
       await showStatus(`Probe done – check page console (${summary})`);
