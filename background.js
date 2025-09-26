@@ -81,6 +81,9 @@ const liveRateLimiter = {
 
 const PATCH_DIAG_CACHE_LIMIT = 50;
 const patchDiagCache = new Map();
+const ENDPOINT_HINT_LIMIT = 100;
+const endpointHints = new Map();
+const ALLOWED_ENDPOINT_METHODS = new Set(['PATCH', 'POST', 'PUT']);
 
 function rememberPatchDiag(diag) {
   const requestId = typeof diag?.requestId === 'string' ? diag.requestId : null;
@@ -105,6 +108,60 @@ function consumePatchDiag(requestId) {
     patchDiagCache.delete(requestId);
   }
   return diag;
+}
+
+function rememberEndpointHint(convoId, hint) {
+  const key = typeof convoId === 'string' ? convoId.trim() : '';
+  if (!key) {
+    return;
+  }
+  let url = '';
+  let method = null;
+  if (typeof hint === 'string') {
+    url = hint.trim();
+  } else if (hint && typeof hint === 'object') {
+    url = typeof hint.url === 'string' ? hint.url.trim() : '';
+    if (typeof hint.method === 'string' && hint.method.trim()) {
+      const normalizedMethod = hint.method.trim().toUpperCase();
+      if (ALLOWED_ENDPOINT_METHODS.has(normalizedMethod)) {
+        method = normalizedMethod;
+      }
+    }
+  }
+  if (!url) {
+    return;
+  }
+  if (endpointHints.size >= ENDPOINT_HINT_LIMIT && !endpointHints.has(key)) {
+    const [firstKey] = endpointHints.keys();
+    if (firstKey) {
+      endpointHints.delete(firstKey);
+    }
+  }
+  if (method) {
+    endpointHints.set(key, { url, method });
+  } else {
+    endpointHints.set(key, { url });
+  }
+}
+
+function getEndpointHint(convoId) {
+  const key = typeof convoId === 'string' ? convoId.trim() : '';
+  if (!key) {
+    return null;
+  }
+  const stored = endpointHints.get(key);
+  if (!stored || typeof stored.url !== 'string') {
+    return null;
+  }
+  const url = stored.url.trim();
+  if (!url) {
+    return null;
+  }
+  const method = typeof stored.method === 'string' ? stored.method.trim().toUpperCase() : null;
+  if (method && ALLOWED_ENDPOINT_METHODS.has(method)) {
+    return { url, method };
+  }
+  return { url };
 }
 
 const runnerTrace = (msg, meta = {}) => logTrace(RUNNER_SCOPE, msg, meta);
@@ -303,12 +360,13 @@ async function dispatchBridgePatch({ tabId, convoId, visible }) {
   const requestId = createBridgeRequestId();
   const waitPromise = awaitBridgeResponse(requestId, BRIDGE_REQUEST_TIMEOUT_MS);
   try {
+    const endpointHint = getEndpointHint(convoId) || getPatchEndpoint(convoId) || null;
     await sendMessageToTab(tabId, {
       type: 'PATCH_VISIBILITY',
       requestId,
       convoId,
       visible,
-      endpoint: getPatchEndpoint(convoId)
+      endpoint: endpointHint
     });
   } catch (error) {
     settleBridgeResponse(requestId, {
@@ -325,12 +383,13 @@ async function dispatchBridgeProbe({ tabId, convoId, dryRun, endpoint }) {
   const requestId = createBridgeRequestId();
   const waitPromise = awaitBridgeResponse(requestId, BRIDGE_REQUEST_TIMEOUT_MS);
   try {
+    const endpointHint = endpoint || getEndpointHint(convoId) || getPatchEndpoint(convoId) || null;
     await sendMessageToTab(tabId, {
       type: 'PATCH_ENDPOINT_PROBE',
       requestId,
       convoId,
       dryRun: dryRun !== false,
-      endpoint
+      endpoint: endpointHint
     });
   } catch (error) {
     settleBridgeResponse(requestId, {
@@ -1080,6 +1139,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         probeResult.totalElapsedMs = measurement.elapsedMs;
         probeResult.dryRun = dryRun;
+        if (probeResult?.ok && probeResult?.firstOk?.url) {
+          rememberEndpointHint(convoId, {
+            url: probeResult.firstOk.url,
+            method: probeResult.firstOk.method || null
+          });
+        }
         try {
           await chrome.storage.local.set({ debug_last_endpoint_probe: { ts: Date.now(), result: probeResult } });
         } catch (_error) {}
@@ -1312,6 +1377,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             result.ok = true;
             result.reasonCode = ReasonCodes.PATCH_OK;
             result.status = patchResult.status ?? null;
+            rememberEndpointHint(convoId, {
+              url: patchResult?.endpoint || null,
+              method: patchResult?.method || null
+            });
             historyEntries.push({
               ts: Date.now(),
               convoId,
@@ -1484,6 +1553,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             result.ok = true;
             result.reasonCode = ReasonCodes.UNDO_OK;
             result.status = patchResult.status ?? null;
+            rememberEndpointHint(convoId, {
+              url: patchResult?.endpoint || null,
+              method: patchResult?.method || null
+            });
             historyEntries.push({
               ts: Date.now(),
               convoId,

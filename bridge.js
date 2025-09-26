@@ -12,6 +12,8 @@
 
   const PATCH_METHOD = 'PATCH';
   const POST_METHOD = 'POST';
+  const PUT_METHOD = 'PUT';
+  const ALLOWED_METHODS = new Set([PATCH_METHOD, POST_METHOD, PUT_METHOD]);
 
   if (window.__MYCHATGPT_PAGE_BRIDGE__) {
     return;
@@ -69,12 +71,34 @@
       return [];
     }
     const encoded = encodeURIComponent(trimmed);
-    return [
-      { method: PATCH_METHOD, url: `${PATCH_ENDPOINT_PREFIX}${encoded}` },
-      { method: PATCH_METHOD, url: `/backend-api/conversations/${encoded}` },
-      { method: POST_METHOD, url: `/backend-api/conversations/${encoded}` },
-      { method: POST_METHOD, url: `${PATCH_ENDPOINT_PREFIX}${encoded}` }
-    ];
+    const candidates = [];
+    const push = (method, url) => {
+      candidates.push({ method, url });
+    };
+    const base = `${PATCH_ENDPOINT_PREFIX}${encoded}`;
+    const plural = `/backend-api/conversations/${encoded}`;
+    const legacy = `${LEGACY_PATCH_ENDPOINT_PREFIX}${encoded}`;
+
+    [base, plural].forEach((url) => {
+      [PATCH_METHOD, POST_METHOD, PUT_METHOD].forEach((method) => {
+        push(method, url);
+      });
+    });
+
+    [PATCH_METHOD, POST_METHOD].forEach((method) => {
+      push(method, legacy);
+    });
+
+    [
+      `${base}/visibility`,
+      `${plural}/visibility`
+    ].forEach((url) => {
+      [PATCH_METHOD, POST_METHOD, PUT_METHOD].forEach((method) => {
+        push(method, url);
+      });
+    });
+
+    return candidates;
   }
 
   function normalizeCandidate(raw) {
@@ -89,7 +113,7 @@
     if (!url) {
       return null;
     }
-    if (method !== PATCH_METHOD && method !== POST_METHOD) {
+    if (!ALLOWED_METHODS.has(method)) {
       return null;
     }
     return { method, url };
@@ -241,8 +265,9 @@
       return;
     }
     const hints = [];
-    if (typeof endpoint === 'string' && endpoint.trim()) {
-      hints.push({ method: PATCH_METHOD, url: endpoint.trim() });
+    const normalizedHint = normalizeCandidate(endpoint);
+    if (normalizedHint) {
+      hints.push(normalizedHint);
     }
     const start = nowMs();
     const attempts = [];
@@ -398,8 +423,9 @@
     }
     const desiredVisibility = typeof visible === 'boolean' ? visible : Boolean(makeVisible);
     const hints = [];
-    if (typeof endpoint === 'string' && endpoint.trim()) {
-      hints.push({ method: PATCH_METHOD, url: endpoint.trim() });
+    const normalizedHint = normalizeCandidate(endpoint);
+    if (normalizedHint) {
+      hints.push(normalizedHint);
     }
     let toggleResult;
     try {
