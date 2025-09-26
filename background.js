@@ -5,11 +5,11 @@ import {
   DeletionStrategyIds,
   ensureRiskyNotExpired,
   getConvoUrl,
-  getDeletionStrategy,
   getConversationIdFromUrl,
   getActiveTabId,
   getActiveChatgptTabId,
   getAllChatgptTabIds,
+  isRiskySessionActive,
   log,
   LogLevel,
   normalizeChatUrl,
@@ -513,19 +513,27 @@ async function deleteSelected(selection) {
       message: error?.message || String(error)
     });
   }
-  const desiredStrategy = getDeletionStrategy(settings);
   let report;
   try {
-    if (desiredStrategy === DeletionStrategyIds.UI_AUTOMATION) {
-      const available = await automationStrategy.isAvailable();
-      if (available) {
-        report = await automationStrategy.deleteMany(items.map((item) => item.url));
-      } else {
-        await log(LogLevel.WARN, 'deletion', 'Automation unavailable – using manual fallback');
-        report = await runManualDeletion(items, settings, true);
-      }
+    if (!isRiskySessionActive(settings)) {
+      report = {
+        strategyId: DeletionStrategyIds.UI_AUTOMATION,
+        attempted: items.length,
+        opened: 0,
+        notes: ['risky_inactive'],
+        results: items.map((item) => ({
+          convoId: item.convoId,
+          url: item.url,
+          ok: false,
+          reason: 'risky_inactive',
+          strategyId: DeletionStrategyIds.UI_AUTOMATION,
+          step: 'guard',
+          attempt: 0
+        }))
+      };
+      await log(LogLevel.WARN, 'deletion', 'Risky mode inactive – skipping automation');
     } else {
-      report = await runManualDeletion(items, settings, false);
+      report = await automationStrategy.deleteMany(items.map((item) => item.url));
     }
     await recordDeletionResults(report.results || [], settings);
     return { ok: true, report };
@@ -578,57 +586,6 @@ function normalizeSelection(selection) {
 }
 
 /** Slovensky: Otvorí manuálne potrebné taby (fallback mód). */
-async function runManualDeletion(items, settings, fromFallback) {
-  const canonicalItems = items.map((item) => ({ ...item, url: normalizeChatUrl(item.url) || item.url }));
-  const available = await filterAvailableTabs(canonicalItems.map((item) => item.url));
-  const availableSet = new Set(available);
-  const results = [];
-  let cancelled = false;
-  for (const item of canonicalItems) {
-    const convoId = item.convoId;
-    if (!convoId) {
-      continue;
-    }
-    if (await readCancelFlag()) {
-      cancelled = true;
-      break;
-    }
-    if (!availableSet.has(item.url)) {
-      results.push({
-        convoId,
-        url: item.url,
-        ok: false,
-        reason: 'already_open',
-        strategyId: DeletionStrategyIds.MANUAL_OPEN,
-        attempt: 0
-      });
-      availableSet.delete(item.url);
-      continue;
-    }
-    await openConversationTab(item.url, { active: false });
-    results.push({
-      convoId,
-      url: item.url,
-      ok: false,
-      reason: fromFallback ? 'manual_fallback' : 'manual_open',
-      strategyId: DeletionStrategyIds.MANUAL_OPEN,
-      attempt: 1
-    });
-    availableSet.delete(item.url);
-    if (settings.risky_between_tabs_ms) {
-      await sleep(settings.risky_between_tabs_ms);
-    }
-  }
-  const opened = results.filter((row) => row.reason === 'manual_open' || row.reason === 'manual_fallback').length;
-  return {
-    strategyId: DeletionStrategyIds.MANUAL_OPEN,
-    attempted: canonicalItems.length,
-    opened,
-    notes: cancelled ? ['cancelled'] : [],
-    results
-  };
-}
-
 /** Slovensky: Zapíše výsledok pokusu do IndexedDB. */
 async function recordDeletionResults(results, settings) {
   const timestamp = now();
@@ -694,16 +651,12 @@ async function testSelectorsOnActiveTab() {
       world: 'ISOLATED',
       func: async ({ timeoutMs, prefix }) => {
         const selectors = globalThis.RiskySelectors;
-        if (!selectors?.waitForAppShell) {
+        if (!selectors?.waitForHeaderToolbar) {
           console.warn(`${prefix} Probe missing selectors`);
           return { ok: false, error: 'selectors_missing' };
         }
-        const summary = {
-          headerFound: false,
-          sidebarFound: false,
-          menuFound: false,
-          confirmFound: false
-        };
+
+        const summary = { header: false, menu: false, confirm: false };
         const profile = detectUiProfile();
 
         const logMeta = (message, meta, level = 'log') => {
@@ -714,18 +667,105 @@ async function testSelectorsOnActiveTab() {
           }
         };
 
-        const convoIdFromLocation = () => {
-          try {
-            const url = new URL(window.location.href);
-            const parts = url.pathname.split('/').filter(Boolean);
-            if (parts[0] === 'c' && parts[1]) {
-              return parts[1];
-            }
-            return null;
-          } catch (_error) {
-            return null;
+        const toMeta = (error) => {
+          if (!error) {
+            return { code: 'error', message: 'unknown' };
           }
+          const meta = {
+            code: error.code || error.reason || 'error',
+            message: error.message || error.reason || String(error)
+          };
+          if (Array.isArray(error.attempted) && error.attempted.length) {
+            meta.attempted = error.attempted;
+          }
+          if (Number.isFinite(error.timeoutMs)) {
+            meta.timeoutMs = error.timeoutMs;
+          }
+          return meta;
         };
+
+        try {
+          await selectors.waitForAppShell({ timeoutMs });
+        } catch (error) {
+          logMeta('Probe appShell timeout', toMeta(error), 'warn');
+          return { ok: false, error: error?.code || 'app_shell_timeout', summary };
+        }
+
+        let toolbarResult = null;
+        try {
+          toolbarResult = await selectors.waitForHeaderToolbar({ timeoutMs });
+          if (toolbarResult?.shareEl instanceof Element) {
+            summary.header = true;
+          }
+          logMeta('Probe share', toolbarResult?.evidence || toolbarResult?.describe);
+        } catch (error) {
+          logMeta('Probe share missing', toMeta(error), 'warn');
+        }
+
+        let kebabEl = null;
+        if (toolbarResult?.toolbarEl instanceof Element && toolbarResult?.shareEl instanceof Element) {
+          try {
+            const match = await selectors.findHeaderKebabNearShare(toolbarResult.toolbarEl, toolbarResult.shareEl, { timeoutMs });
+            kebabEl = match?.kebabEl || match?.element;
+            if (kebabEl instanceof Element) {
+              summary.header = true;
+            }
+            logMeta('Probe kebab', match?.evidence);
+          } catch (error) {
+            logMeta('Probe kebab missing', toMeta(error), 'warn');
+          }
+        }
+
+        let menuResult = null;
+        let confirmResult = null;
+        let menuOpened = false;
+
+        if (kebabEl instanceof Element) {
+          await selectors.reveal(kebabEl);
+          await selectors.clickHard(kebabEl);
+          await selectors.sleep(160);
+          menuOpened = true;
+          try {
+            menuResult = await selectors.findDeleteInOpenMenu(profile, { timeoutMs });
+            if (menuResult?.element instanceof Element) {
+              summary.menu = true;
+            }
+            logMeta('Probe delete', menuResult?.evidence);
+          } catch (error) {
+            logMeta('Probe delete missing', toMeta(error), 'warn');
+          }
+
+          if (menuResult?.element instanceof Element && !menuResult?.evidence?.hidden) {
+            await selectors.reveal(menuResult.element);
+            await selectors.clickHard(menuResult.element);
+            await selectors.sleep(180);
+            try {
+              confirmResult = await selectors.findConfirmDelete(profile, { timeoutMs });
+              if (confirmResult?.element instanceof Element) {
+                summary.confirm = true;
+              }
+              logMeta('Probe confirm', confirmResult?.evidence);
+            } catch (error) {
+              logMeta('Probe confirm missing', toMeta(error), 'warn');
+            }
+          }
+        }
+
+        if (confirmResult?.element instanceof Element) {
+          const doc = confirmResult.element.ownerDocument || document;
+          const keyInit = { key: 'Escape', bubbles: true, cancelable: true };
+          doc.dispatchEvent(new KeyboardEvent('keydown', keyInit));
+          doc.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+          await selectors.sleep(120);
+        } else if (menuOpened) {
+          const keyInit = { key: 'Escape', bubbles: true, cancelable: true };
+          document.dispatchEvent(new KeyboardEvent('keydown', keyInit));
+          document.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+          await selectors.sleep(120);
+        }
+
+        console.log(`${prefix} Probe summary`, summary);
+        return { ok: true, summary };
 
         function detectUiProfile() {
           const langs = [];
@@ -751,122 +791,6 @@ async function testSelectorsOnActiveTab() {
             confirm_buttons: [/^(delete|delete conversation)$/i, /^yes, delete$/i]
           };
         }
-
-        try {
-          await selectors.waitForAppShell({ timeoutMs });
-        } catch (error) {
-          logMeta('Probe appShell timeout', {
-            code: error?.code || 'waitForAppShell',
-            timeoutMs: error?.timeoutMs,
-            message: error?.message || String(error)
-          }, 'warn');
-          return { ok: false, error: error?.code || 'app_shell_timeout' };
-        }
-
-        const conversationStatus = await selectors.waitForConversationView({ timeoutMs });
-        if (!conversationStatus.ready) {
-          logMeta('Probe conversation not ready', {
-            attempted: conversationStatus.attempted,
-            timeoutMs: conversationStatus.timeoutMs
-          }, 'warn');
-        }
-
-        let toolbarResult = null;
-        let kebabResult = null;
-        let path = 'header';
-
-        if (conversationStatus.ready) {
-          try {
-            toolbarResult = await selectors.waitForHeaderToolbar({ timeoutMs });
-            if (toolbarResult?.share) {
-              summary.headerFound = true;
-            }
-            kebabResult = await selectors.findHeaderKebabNearShare(toolbarResult, { timeoutMs });
-            summary.headerFound = summary.headerFound || Boolean(kebabResult?.element);
-          } catch (error) {
-            logMeta('Probe header kebab missing', {
-              code: error?.code,
-              attempted: error?.attempted,
-              timeoutMs: error?.timeoutMs
-            }, 'warn');
-          }
-        }
-
-        const convoId = convoIdFromLocation();
-        if (!kebabResult) {
-          path = 'sidebar';
-          try {
-            await selectors.ensureSidebarVisible({ timeoutMs });
-            if (convoId) {
-              kebabResult = await selectors.findSidebarSelectedItemByConvoId(convoId, { timeoutMs });
-              summary.sidebarFound = Boolean(kebabResult?.element);
-            } else {
-              logMeta('Probe sidebar skipped (missing convoId)');
-            }
-          } catch (error) {
-            logMeta('Probe sidebar kebab missing', {
-              code: error?.code,
-              attempted: error?.attempted,
-              timeoutMs: error?.timeoutMs
-            }, 'warn');
-          }
-        }
-
-        if (kebabResult?.element) {
-          await selectors.reveal(kebabResult.element);
-          kebabResult.element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
-          await selectors.sleep(150);
-        }
-
-        let menuResult = null;
-        if (kebabResult?.element) {
-          try {
-            menuResult = await selectors.findDeleteInOpenMenu(profile, { timeoutMs });
-            if (menuResult?.element) {
-              summary.menuFound = true;
-            }
-          } catch (error) {
-            logMeta('Probe delete menu missing', {
-              code: error?.code,
-              attempted: error?.attempted,
-              timeoutMs: error?.timeoutMs
-            }, 'warn');
-          }
-        }
-
-        if (menuResult?.element) {
-          await selectors.reveal(menuResult.element);
-          menuResult.element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
-          await selectors.sleep(180);
-        }
-
-        let confirmResult = null;
-        if (menuResult?.element) {
-          try {
-            confirmResult = await selectors.findConfirmDelete(profile, { timeoutMs });
-            if (confirmResult?.element) {
-              summary.confirmFound = true;
-            }
-          } catch (error) {
-            logMeta('Probe confirm missing', {
-              code: error?.code,
-              attempted: error?.attempted,
-              timeoutMs: error?.timeoutMs
-            }, 'warn');
-          }
-        }
-
-        if (confirmResult?.element) {
-          await selectors.reveal(confirmResult.element);
-          confirmResult.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-          confirmResult.element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', bubbles: true }));
-        } else if (menuResult?.element) {
-          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-          document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', bubbles: true }));
-        }
-
-        console.log(`${prefix} Probe summary`, summary);
-        return { ok: true, summary, path };
       },
       args: [{ timeoutMs: settings.risky_step_timeout_ms, prefix: '[RiskyMode]' }]
     });
@@ -878,10 +802,9 @@ async function testSelectorsOnActiveTab() {
     return {
       ok: true,
       result: {
-        header: Boolean(summary.headerFound),
-        sidebar: Boolean(summary.sidebarFound),
-        menu: Boolean(summary.menuFound),
-        confirm: Boolean(summary.confirmFound)
+        header: Boolean(summary.header),
+        menu: Boolean(summary.menu),
+        confirm: Boolean(summary.confirm)
       }
     };
   } catch (error) {

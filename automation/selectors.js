@@ -7,6 +7,7 @@
   });
   const WALK_STOP = Symbol('walk-stop');
   const TOAST_REGEX = /(deleted|removed|odstránen|odstranen|zmazan|zmazané)/i;
+  const LOG_PREFIX = '[RiskyMode]';
   const MENUITEM_PATTERNS = [
     /^(delete|delete chat|delete conversation|remove)$/i,
     /^(odstrániť|odstranit|zmazať|zmazat)$/i
@@ -24,12 +25,6 @@
     '[data-testid*="conversation"] header',
     '[data-testid*="thread"] header'
   ];
-  const SIDEBAR_ROOT_SELECTORS = [
-    'nav[aria-label*="conversations" i]',
-    'nav [data-testid*="sidebar" i]',
-    'aside nav',
-    '[data-testid*="sidebar" i]'
-  ];
   const HEADER_TOOLBAR_HINTS = [
     '[role="toolbar"]',
     '[data-testid*="header-actions" i]',
@@ -37,27 +32,7 @@
     '[class*="header-actions" i]'
   ];
   const SHARE_LABEL_REGEX = /share/i;
-  const HEADER_MORE_LABEL_REGEX = /(more|options|menu)/i;
-  const CONVERSATION_ACTIONS_REGEX = /conversation actions/i;
-  const KEBAB_FALLBACK_SELECTORS = [
-    'button[aria-label*="conversation actions" i]',
-    '[data-testid*="actions" i] button',
-    'button[aria-label*="more" i]',
-    'button[title*="more" i]',
-    'button[aria-label*="options" i]',
-    'button[title*="options" i]',
-    'button[data-testid*="actions" i]',
-    'button[data-testid*="menu" i]',
-    '[role="button"][aria-label*="more" i]',
-    '[role="button"][title*="more" i]'
-  ];
-  const SIDEBAR_ITEM_SELECTORS = [
-    '[data-testid*="conversation-item" i][data-selected="true"], [data-testid*="conversation-item" i].bg-token-sidebar-surface-selected',
-    'a[aria-current="page" i]',
-    'li[aria-selected="true" i]',
-    '[role="option"][aria-selected="true" i]'
-  ];
-  const TOGGLE_BUTTON_LABEL = /(sidebar|menu|toggle|panel)/i;
+  const HEADER_ACTION_LABEL_REGEX = /(more|options|menu|actions)/i;
 
   function now() {
     return Date.now();
@@ -449,441 +424,383 @@
 
   async function waitForHeaderToolbar(options = {}) {
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
+    await waitForAppShell({ timeoutMs });
     const deadline = now() + timeoutMs;
     const attempted = [];
     while (now() <= deadline) {
-      const share = locateShareButton();
-      if (share) {
-        const toolbar = deriveToolbarFromShare(share);
-        if (toolbar) {
-          return {
-            toolbar,
-            share,
-            evidence: {
-              toolbar: describeElement(toolbar),
-              share: describeElement(share)
-            }
-          };
-        }
-        attempted.push('header:toolbar-missing');
-      } else {
-        attempted.push('header:share-missing');
+      const context = findShare();
+      if (context) {
+        return context;
       }
+      attempted.push('share-missing');
       await sleep(POLL_STEP_MS);
     }
     throw selectorError('waitForHeaderToolbar', attempted, timeoutMs);
   }
 
-  async function ensureSidebarVisible(options = {}) {
-    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
-    const deadline = now() + timeoutMs;
-    while (now() <= deadline) {
-      const sidebar = locateSidebar();
-      if (sidebar?.visible) {
-        return sidebar;
-      }
-      const toggle = queryAllDeep(document, 'button', '[role="button"]').find((node) => {
-        if (!(node instanceof Element)) {
-          return false;
-        }
-        const label = accessibleName(node).toLowerCase();
-        return TOGGLE_BUTTON_LABEL.test(label);
-      });
-      if (toggle instanceof Element) {
-        await reveal(toggle);
-        toggle.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
-        await sleep(180);
-      } else {
-        await sleep(POLL_STEP_MS);
-      }
-    }
-    throw {
-      code: 'ensureSidebarVisible_timeout',
-      message: 'Sidebar toggle not found',
-      timeoutMs,
-      attempted: ['sidebar-visible', 'toggle-button']
-    };
-  }
-
-  function locateSidebar() {
-    const containers = queryAllDeep(document, SIDEBAR_ROOT_SELECTORS);
-    for (const container of containers) {
-      if (container instanceof Element && isVisible(container)) {
-        return { root: container, visible: true, evidence: describeElement(container) };
-      }
-    }
-    return null;
-  }
-
-  async function findSidebarSelectedItemByConvoId(convoId, options = {}) {
-    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
-    const deadline = now() + timeoutMs;
-    const attempted = [];
-    const needle = `/c/${convoId}`;
-    while (now() <= deadline) {
-      const anchors = queryAllDeep(document, `a[href*="${needle}"]`);
-      for (const anchor of anchors) {
-        if (!(anchor instanceof Element)) {
-          continue;
-        }
-        const container = closestDeep(anchor, (node) => {
-          if (!(node instanceof Element)) {
-            return false;
-          }
-          return node.matches('[role="option"], li, div');
-        });
-        if (!container || !(container instanceof Element)) {
-          attempted.push('sidebar-container-missing');
-          continue;
-        }
-        if (!isVisible(container)) {
-          attempted.push('sidebar-container-hidden');
-          continue;
-        }
-        const kebab = locateKebabInContainer(container, attempted, 'sidebar');
-        if (kebab) {
-          return {
-            element: kebab,
-            evidence: {
-              item: describeElement(container),
-              button: describeElement(kebab)
-            }
-          };
-        }
-        attempted.push('sidebar-kebab-missing');
-      }
-      await sleep(POLL_STEP_MS);
-    }
-    throw selectorError('findSidebarKebab', attempted, timeoutMs);
-  }
-
-  async function findHeaderKebab(options = {}) {
-    const context = await waitForHeaderToolbar({ timeoutMs: options.timeoutMs });
-    return findHeaderKebabNearShare(context, options);
-  }
-
-  async function findHeaderKebabNearShare(context, options = {}) {
-    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
-    const deadline = now() + timeoutMs;
-    const attempted = [];
-    const toolbar = context?.toolbar instanceof Element ? context.toolbar : context;
-    const share = context?.share instanceof Element ? context.share : null;
-    if (!(toolbar instanceof Element)) {
-      throw selectorError('findHeaderKebabNearShare', ['header:invalid-toolbar'], timeoutMs);
-    }
-    while (now() <= deadline) {
-      const match = locateHeaderKebab(toolbar, share, attempted);
-      if (match) {
-        return {
-          element: match.element,
-          evidence: {
-            button: describeElement(match.element),
-            rule: match.rule,
-            toolbar: describeElement(toolbar)
-          }
-        };
-      }
-      await sleep(POLL_STEP_MS);
-    }
-    throw selectorError('findHeaderKebabNearShare', attempted, timeoutMs);
-  }
-
-  function locateKebabInContainer(container, attempted, scopeLabel) {
-    for (const selector of KEBAB_FALLBACK_SELECTORS) {
-      const candidate = queryAllDeep(container, selector)[0];
-      attempted.push(`${scopeLabel}:${selector}`);
-      if (candidate && candidate instanceof Element && isActionable(candidate)) {
-        return ensureInteractive(candidate);
-      }
-    }
-    const fallback = queryAllDeep(container, 'button', '[role="button"]').find((node) => looksLikeKebab(node));
-    attempted.push(`${scopeLabel}:svg-kebab`);
-    if (fallback && fallback instanceof Element && isActionable(fallback)) {
-      return ensureInteractive(fallback);
-    }
-    return null;
-  }
-
-  function locateHeaderKebab(container, share, attempted = []) {
-    const shareButton = share instanceof Element ? ensureInteractive(share) : null;
-
-    const runRule = (rule, finder) => {
-      attempted.push(`header:${rule}`);
-      try {
-        const found = finder();
-        if (found && found instanceof Element && isActionable(found)) {
-          const interactive = ensureInteractive(found);
-          if (interactive && (!shareButton || !interactive.isSameNode(shareButton))) {
-            return { element: interactive, rule };
-          }
-        }
-      } catch (_error) {}
-      return null;
-    };
-
-    const byActions = runRule('aria-conversation-actions', () => {
-      return queryAllDeep(
-        container,
-        'button[aria-label*="conversation actions" i]',
-        '[data-testid*="conversation-actions" i] button',
-        'button[data-testid*="conversation-actions" i]'
-      )[0];
-    });
-    if (byActions) {
-      return byActions;
-    }
-
-    const byLabel = runRule('label-more', () => {
-      const candidates = queryAllDeep(container, 'button', '[role="button"]');
-      return candidates.find((node) => {
-        if (!(node instanceof Element)) {
-          return false;
-        }
-        if (shareButton && node.isSameNode(shareButton)) {
-          return false;
-        }
-        const label = accessibleName(node);
-        return HEADER_MORE_LABEL_REGEX.test(label);
-      });
-    });
-    if (byLabel) {
-      return byLabel;
-    }
-
-    const sibling = runRule('sibling-kebab', () => {
-      if (!shareButton) {
-        return null;
-      }
-      const siblings = collectSiblingButtons(shareButton);
-      return siblings.find((node) => looksLikeKebab(node) && isActionable(node));
-    });
-    if (sibling) {
-      return sibling;
-    }
-
-    const fallback = runRule('toolbar-kebab', () => {
-      const candidate = queryAllDeep(container, 'button', '[role="button"]').find((node) => {
-        if (!(node instanceof Element)) {
-          return false;
-        }
-        if (shareButton && node.isSameNode(shareButton)) {
-          return false;
-        }
-        return looksLikeKebab(node) && isActionable(node);
-      });
-      return candidate || null;
-    });
-    if (fallback) {
-      return fallback;
-    }
-
-    return null;
-  }
-
-  function locateShareButton() {
+  function findShare() {
     const headerAreas = queryAllDeep(document, CONVO_HEADER_SELECTORS);
     const headerSet = new Set(headerAreas.filter((node) => node instanceof Element));
-    const candidates = [];
-    const pushCandidate = (node) => {
-      if (!(node instanceof Element)) {
-        return;
+    const rules = [
+      () => roleQueryDeep(document, 'button', SHARE_LABEL_REGEX),
+      () => queryAllDeep(document, '[aria-label*="share" i]'),
+      () => queryAllDeep(document, '[data-testid*="share" i]')
+    ];
+    for (let index = 0; index < rules.length; index += 1) {
+      const rawMatches = ensureArray(rules[index]()).filter((node) => node instanceof Element);
+      if (!rawMatches.length) {
+        continue;
       }
-      const interactive = ensureInteractive(node);
-      if (!interactive || !isActionable(interactive)) {
-        return;
+      const candidates = Array.from(new Set(rawMatches.map((node) => ensureInteractive(node)).filter(Boolean)));
+      if (!candidates.length) {
+        continue;
       }
-      candidates.push(interactive);
-    };
-
-    roleQueryDeep(document, 'button', SHARE_LABEL_REGEX).forEach(pushCandidate);
-    queryAllDeep(document, '[aria-label*="share" i]', '[data-testid*="share" i]').forEach(pushCandidate);
-
-    const unique = Array.from(new Set(candidates));
-    if (!unique.length) {
-      return null;
+      const prioritized = candidates.find((node) => isWithinHeader(node, headerSet)) || candidates[0];
+      if (!prioritized) {
+        continue;
+      }
+      const toolbarEl = deriveToolbarFromShare(prioritized, headerSet);
+      if (!toolbarEl) {
+        continue;
+      }
+      const shareEl = ensureInteractive(prioritized);
+      const evidence = {
+        toolbar: describeElement(toolbarEl),
+        share: describeElement(shareEl)
+      };
+      console.log(`${LOG_PREFIX} share rule=${index + 1}`, evidence);
+      return { toolbarEl, shareEl, evidence, ruleIndex: index + 1 };
     }
-
-    const prioritized = unique.find((candidate) => isWithinHeader(candidate, headerSet));
-    return prioritized || unique[0];
+    return null;
   }
 
-  function deriveToolbarFromShare(share) {
-    if (!(share instanceof Element)) {
-      return null;
-    }
-    let current = ensureInteractive(share);
-    while (current) {
-      if (current instanceof Element) {
-        const role = (current.getAttribute('role') || '').toLowerCase();
-        if (role === 'toolbar') {
-          return current;
-        }
-        for (const selector of HEADER_TOOLBAR_HINTS) {
-          try {
-            if (current.matches(selector)) {
-              return current;
-            }
-          } catch (_error) {}
-        }
-      }
-      current = parentThroughShadow(current);
-    }
-    const header = closestDeep(share, (node) => {
-      if (!(node instanceof Element)) {
-        return false;
-      }
-      return CONVO_HEADER_SELECTORS.some((selector) => {
-        try {
-          return node.matches(selector);
-        } catch (_error) {
-          return false;
-        }
-      });
-    });
-    if (header instanceof Element) {
-      return header;
-    }
-    return share.parentElement || null;
-  }
-
-  function collectSiblingButtons(node) {
-    const siblings = [];
-    const parent = node?.parentElement;
-    const maybePush = (candidate) => {
-      if (candidate instanceof Element && candidate !== node) {
-        siblings.push(candidate);
-      }
-    };
-    if (node?.previousElementSibling) {
-      maybePush(node.previousElementSibling);
-    }
-    if (node?.nextElementSibling) {
-      maybePush(node.nextElementSibling);
-    }
-    if (parent) {
-      const candidates = parent.querySelectorAll('button, [role="button"]');
-      candidates.forEach((candidate) => maybePush(candidate));
-    }
-    return siblings.map((item) => ensureInteractive(item)).filter(Boolean);
-  }
-
-  function isWithinHeader(node, headerSet) {
-    if (!(node instanceof Element)) {
-      return false;
-    }
-    const found = closestDeep(node, (candidate) => headerSet.has(candidate));
-    return Boolean(found);
-  }
-
-  async function findDeleteMenuItem(options = {}) {
-    const profile = options.profile || {};
-    const deletePatterns = patternsFromProfile(profile, 'delete_menu_items', MENUITEM_PATTERNS);
-    const deleteTestIdRegex = profileRegex(profile, 'delete_menu_testid_regex', MENUITEM_TESTID_REGEX);
-    return pollForMenuMatch({
-      timeoutMs: options.timeoutMs,
-      code: 'findDelete',
-      search: () => {
-        const menus = queryAllDeep(document, '[role="menu"], [data-testid*="menu" i]');
-        const candidates = [];
-        for (const menu of menus) {
-          if (!(menu instanceof Element) || !isVisible(menu)) {
-            continue;
+  async function findHeaderKebabNearShare(toolbarEl, shareEl, options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
+    const shareButton = shareEl instanceof Element ? ensureInteractive(shareEl) : null;
+    const rules = [
+      {
+        label: 'aria-haspopup',
+        finder: () => pickToolbarCandidate(toolbarEl, shareButton, (node) => {
+          const value = (node.getAttribute('aria-haspopup') || '').toLowerCase();
+          return value === 'menu' || value === 'true';
+        })
+      },
+      {
+        label: 'label',
+        finder: () => pickToolbarCandidate(toolbarEl, shareButton, (node) => HEADER_ACTION_LABEL_REGEX.test(accessibleName(node)))
+      },
+      {
+        label: 'sibling',
+        finder: () => {
+          if (!shareButton) {
+            return null;
           }
-          const byRole = roleQueryDeep(menu, 'menuitem');
-          candidates.push(...byRole.filter((node) => matchesPatterns(node, deletePatterns)));
-          const byTestId = Array.from(menu.querySelectorAll('[data-testid]')).filter((node) => {
+          const baseContainer = toolbarEl instanceof Element ? toolbarEl : shareButton.parentElement;
+          if (!(baseContainer instanceof Element)) {
+            return null;
+          }
+          const siblings = collectToolbarButtons(baseContainer, shareButton);
+          const candidate = siblings.find((node) => looksLikeKebab(node) && isActionable(node));
+          return candidate ? wrapMatch(candidate) : null;
+        }
+      },
+      {
+        label: 'svg',
+        finder: () => pickToolbarCandidate(toolbarEl, shareButton, (node) => looksLikeKebab(node))
+      }
+    ];
+    const match = await pollRules('kebab', rules, timeoutMs);
+    return { kebabEl: match.element, evidence: match.evidence };
+  }
+
+  async function findDeleteInOpenMenu(profile, options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
+    const deletePatterns = patternsFromProfile(profile || {}, 'delete_menu_items', MENUITEM_PATTERNS);
+    const deleteTestIdRegex = profileRegex(profile || {}, 'delete_menu_testid_regex', MENUITEM_TESTID_REGEX);
+    const rules = [
+      {
+        label: 'menuitem-text',
+        finder: () => {
+          const items = roleQueryDeep(document, 'menuitem');
+          const matches = items.filter((node) => matchesPatterns(node, deletePatterns));
+          return selectMenuCandidate(matches, { includeHidden: true });
+        }
+      },
+      {
+        label: 'data-testid',
+        finder: () => {
+          const matches = queryAllDeep(document, '[data-testid]').filter((node) => {
             if (!(node instanceof Element)) {
               return false;
             }
             const value = node.getAttribute('data-testid') || '';
             return deleteTestIdRegex.test(value);
           });
-          candidates.push(...byTestId);
+          return selectMenuCandidate(matches, { includeHidden: true });
         }
-        if (!candidates.length) {
-          const fallback = candidatesFromDocument(deletePatterns);
-          candidates.push(...fallback);
+      },
+      {
+        label: 'aria-label',
+        finder: () => {
+          const matches = queryAllDeep(document, 'button[aria-label], [role="menuitem"][aria-label]');
+          const filtered = matches.filter((node) => matchesPatterns(node, deletePatterns));
+          return selectMenuCandidate(filtered, { includeHidden: true });
         }
-        const first = candidates.find((node) => node instanceof Element && isVisible(node));
-        if (first) {
-          return {
-            element: ensureInteractive(first),
-            evidence: { button: describeElement(first) }
-          };
-        }
-        return null;
       }
-    });
+    ];
+    const match = await pollRules('menu', rules, timeoutMs);
+    return { element: match.element, evidence: match.evidence };
   }
 
-  async function findConfirmDeleteButton(options = {}) {
-    const profile = options.profile || {};
-    const confirmPatterns = patternsFromProfile(profile, 'confirm_buttons', CONFIRM_PATTERNS);
-    const confirmTestIdRegex = profileRegex(profile, 'confirm_testid_regex', CONFIRM_TESTID_REGEX);
-    return pollForMenuMatch({
-      timeoutMs: options.timeoutMs,
-      code: 'findConfirm',
-      search: () => {
-        const dialogs = queryAllDeep(document, '[role="dialog"], [role="alertdialog"]').filter(isVisible);
-        const candidates = [];
-        for (const dialog of dialogs) {
-          const buttons = roleQueryDeep(dialog, 'button');
-          candidates.push(...buttons.filter((node) => matchesPatterns(node, confirmPatterns)));
-          const byTestId = Array.from(dialog.querySelectorAll('[data-testid]')).filter((node) => {
+  async function findConfirmDelete(profile, options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
+    const confirmPatterns = patternsFromProfile(profile || {}, 'confirm_buttons', CONFIRM_PATTERNS);
+    const confirmTestIdRegex = profileRegex(profile || {}, 'confirm_testid_regex', CONFIRM_TESTID_REGEX);
+    const rules = [
+      {
+        label: 'dialog-button',
+        finder: () => {
+          const dialogs = queryAllDeep(document, '[role="dialog"], [role="alertdialog"]');
+          const buttons = dialogs.flatMap((dialog) => roleQueryDeep(dialog, 'button'));
+          const matches = buttons.filter((node) => matchesPatterns(node, confirmPatterns));
+          return selectMenuCandidate(matches, { includeHidden: true });
+        }
+      },
+      {
+        label: 'data-testid',
+        finder: () => {
+          const matches = queryAllDeep(document, '[data-testid]').filter((node) => {
             if (!(node instanceof Element)) {
               return false;
             }
-            return confirmTestIdRegex.test(node.getAttribute('data-testid') || '');
+            const value = node.getAttribute('data-testid') || '';
+            return confirmTestIdRegex.test(value);
           });
-          candidates.push(...byTestId);
+          return selectMenuCandidate(matches, { includeHidden: true });
         }
-        if (!candidates.length) {
-          candidates.push(...candidatesFromDocument(confirmPatterns));
+      },
+      {
+        label: 'aria-label',
+        finder: () => {
+          const matches = queryAllDeep(document, 'button[aria-label]');
+          const filtered = matches.filter((node) => matchesPatterns(node, confirmPatterns));
+          return selectMenuCandidate(filtered, { includeHidden: true });
         }
-        const first = candidates.find((node) => node instanceof Element && isVisible(node));
-        if (first) {
-          return {
-            element: ensureInteractive(first),
-            evidence: { button: describeElement(first) }
-          };
-        }
-        return null;
       }
+    ];
+    const match = await pollRules('confirm', rules, timeoutMs);
+    return { element: match.element, evidence: match.evidence };
+  }
+
+  function pickToolbarCandidate(toolbarEl, shareButton, predicate) {
+    if (!(toolbarEl instanceof Element)) {
+      return null;
+    }
+    const buttons = queryAllDeep(toolbarEl, 'button', '[role="button"]');
+    const seen = new Set();
+    for (const button of buttons) {
+      if (!(button instanceof Element)) {
+        continue;
+      }
+      const interactive = ensureInteractive(button);
+      if (!(interactive instanceof Element)) {
+        continue;
+      }
+      if (seen.has(interactive)) {
+        continue;
+      }
+      seen.add(interactive);
+      if (shareButton && interactive.isSameNode(shareButton)) {
+        continue;
+      }
+      if (typeof predicate === 'function' && !predicate(interactive)) {
+        continue;
+      }
+      if (!isActionable(interactive)) {
+        continue;
+      }
+      return wrapMatch(interactive);
+    }
+    return null;
+  }
+
+  function selectMenuCandidate(nodes, options = {}) {
+    const includeHidden = options.includeHidden !== false;
+    let hidden = null;
+    for (const node of nodes) {
+      if (!(node instanceof Element)) {
+        continue;
+      }
+      const interactive = ensureInteractive(node);
+      if (!(interactive instanceof Element)) {
+        continue;
+      }
+      if (isActionable(interactive)) {
+        return wrapMatch(interactive);
+      }
+      if (includeHidden && !hidden) {
+        hidden = wrapMatch(interactive, { hidden: true });
+      }
+    }
+    return hidden;
+  }
+
+  function deriveToolbarFromShare(shareButton, headerSet = new Set()) {
+    const interactive = ensureInteractive(shareButton);
+    if (!(interactive instanceof Element)) {
+      return null;
+    }
+    let current = interactive;
+    while (current instanceof Element) {
+      if (matchesToolbarHint(current)) {
+        return current;
+      }
+      current = parentThroughShadow(current);
+    }
+    current = interactive;
+    while (current instanceof Element) {
+      if (headerSet?.has(current)) {
+        return current;
+      }
+      current = parentThroughShadow(current);
+    }
+    return interactive.parentElement instanceof Element ? interactive.parentElement : null;
+  }
+
+  function matchesToolbarHint(node) {
+    if (!(node instanceof Element)) {
+      return false;
+    }
+    return HEADER_TOOLBAR_HINTS.some((selector) => matchesSelector(node, selector));
+  }
+
+  function matchesSelector(node, selector) {
+    if (!(node instanceof Element) || typeof selector !== 'string') {
+      return false;
+    }
+    try {
+      return node.matches(selector);
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function isWithinHeader(node, headerSet) {
+    if (!(node instanceof Element) || !(headerSet instanceof Set)) {
+      return false;
+    }
+    let current = node;
+    while (current instanceof Element) {
+      if (headerSet.has(current)) {
+        return true;
+      }
+      current = parentThroughShadow(current);
+    }
+    return false;
+  }
+
+  function collectToolbarButtons(toolbarEl, exclude) {
+    if (!(toolbarEl instanceof Element)) {
+      return [];
+    }
+    const buttons = queryAllDeep(toolbarEl, 'button', '[role="button"]');
+    const seen = new Set();
+    return buttons.filter((node) => {
+      if (!(node instanceof Element)) {
+        return false;
+      }
+      const interactive = ensureInteractive(node);
+      if (!(interactive instanceof Element)) {
+        return false;
+      }
+      if (exclude && interactive.isSameNode(exclude)) {
+        return false;
+      }
+      if (seen.has(interactive)) {
+        return false;
+      }
+      seen.add(interactive);
+      return true;
     });
   }
 
-  async function pollForMenuMatch({ timeoutMs, code, search }) {
+  async function pollRules(step, rules, timeoutMs) {
     const limit = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : DEFAULT_TIMEOUTS.finder;
     const deadline = now() + limit;
-    const attempted = [];
+    const attempted = new Set();
     while (now() <= deadline) {
-      const match = search();
-      if (match) {
-        return match;
+      for (let index = 0; index < rules.length; index += 1) {
+        const rule = rules[index];
+        attempted.add(rule.label);
+        let result = null;
+        try {
+          result = rule.finder();
+        } catch (_error) {
+          result = null;
+        }
+        if (result && result.element instanceof Element) {
+          const interactive = ensureInteractive(result.element);
+          if (!(interactive instanceof Element)) {
+            continue;
+          }
+          const evidence = {
+            ...(result.evidence || {}),
+            node: describeElement(interactive),
+            rule: rule.label
+          };
+          console.log(`${LOG_PREFIX} ${step} rule=${index + 1}`, evidence);
+          return { element: interactive, evidence };
+        }
       }
-      attempted.push(code);
       await sleep(POLL_STEP_MS);
     }
-    throw selectorError(code, attempted, limit);
+    const codeMap = { kebab: 'findHeaderKebab', menu: 'findDelete', confirm: 'findConfirmDelete' };
+    throw {
+      code: codeMap[step] || step,
+      attempted: Array.from(attempted),
+      timeoutMs: limit
+    };
   }
 
-  function patternsFromProfile(profile, key, fallback) {
-    const list = ensureArray(profile?.[key]).map((item) => ensureRegex(item)).filter(Boolean);
-    return list.length ? list : fallback;
+  function patternsFromProfile(profile, key, defaults) {
+    const raw = ensureArray(profile?.[key]).filter(Boolean);
+    const source = raw.length ? raw : defaults;
+    return source
+      .map((pattern) => {
+        if (pattern instanceof RegExp) {
+          return pattern;
+        }
+        try {
+          return new RegExp(String(pattern), 'i');
+        } catch (_error) {
+          return null;
+        }
+      })
+      .filter((item) => item instanceof RegExp);
   }
 
   function profileRegex(profile, key, fallback) {
-    const value = profile?.[key];
-    const regex = ensureRegex(value);
-    return regex || fallback;
+    const raw = profile?.[key];
+    if (raw instanceof RegExp) {
+      return raw;
+    }
+    if (typeof raw === 'string' && raw) {
+      try {
+        return new RegExp(raw, 'i');
+      } catch (_error) {}
+    }
+    return fallback instanceof RegExp ? fallback : ensureRegex(fallback) || /.^/;
   }
 
-  function findDeleteInOpenMenu(profile, options = {}) {
-    return findDeleteMenuItem({ ...options, profile: profile || {} });
-  }
-
-  function findConfirmDelete(profile, options = {}) {
-    return findConfirmDeleteButton({ ...options, profile: profile || {} });
+  function wrapMatch(element, extra = {}) {
+    if (!(element instanceof Element)) {
+      return null;
+    }
+    const interactive = ensureInteractive(element);
+    if (!(interactive instanceof Element)) {
+      return null;
+    }
+    return { element: interactive, evidence: { ...extra } };
   }
 
   function matchesPatterns(node, patterns) {
@@ -967,13 +884,42 @@
     if (!(node instanceof Element)) {
       return;
     }
-    node.scrollIntoView({ block: 'center', inline: 'center' });
-    node.dispatchEvent(new Event('mouseenter', { bubbles: true, composed: true }));
+    node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const pointerCtor = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+    const pointerOptions = { bubbles: true, composed: true, pointerId: 1, pointerType: 'mouse' };
+    node.dispatchEvent(new pointerCtor('pointerover', pointerOptions));
+    node.dispatchEvent(new pointerCtor('pointerenter', pointerOptions));
+    node.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, composed: true }));
     node.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, composed: true }));
     if (typeof node.focus === 'function') {
-      node.focus({ preventScroll: true });
+      try {
+        node.focus({ preventScroll: true });
+      } catch (_error) {}
     }
-    await sleep(80);
+    await sleep(60);
+  }
+
+  async function clickHard(node) {
+    if (!(node instanceof Element)) {
+      return;
+    }
+    const pointerCtor = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+    const pointerOptions = { bubbles: true, composed: true, pointerId: 1, pointerType: 'mouse' };
+    const sequence = [
+      { ctor: pointerCtor, type: 'pointerover', options: pointerOptions },
+      { ctor: pointerCtor, type: 'pointerenter', options: pointerOptions },
+      { ctor: pointerCtor, type: 'pointerdown', options: { ...pointerOptions, buttons: 1 } },
+      { ctor: MouseEvent, type: 'mousedown', options: { bubbles: true, composed: true, button: 0 } },
+      { ctor: pointerCtor, type: 'pointerup', options: { ...pointerOptions, buttons: 0 } },
+      { ctor: MouseEvent, type: 'mouseup', options: { bubbles: true, composed: true, button: 0 } },
+      { ctor: MouseEvent, type: 'click', options: { bubbles: true, composed: true, button: 0 } }
+    ];
+    for (const step of sequence) {
+      const EventCtor = step.ctor || MouseEvent;
+      const init = step.options || { bubbles: true, composed: true };
+      const event = new EventCtor(step.type, { bubbles: true, cancelable: true, composed: true, ...init });
+      node.dispatchEvent(event);
+    }
   }
 
   function describeElement(node) {
@@ -1001,15 +947,12 @@
     waitForAppShell,
     waitForConversationView,
     waitForHeaderToolbar,
-    ensureSidebarVisible,
-    findSidebarSelectedItemByConvoId,
-    findHeaderKebab,
+    findShare,
     findHeaderKebabNearShare,
-    findDeleteMenuItem,
-    findConfirmDeleteButton,
     findDeleteInOpenMenu,
     findConfirmDelete,
     reveal,
+    clickHard,
     describeElement,
     TOAST_REGEX
   };

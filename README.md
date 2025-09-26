@@ -36,11 +36,13 @@ Search Cleaner keeps short, search-like ChatGPT conversations in a local backup 
 - **Use at your own risk.** The automation only simulates official UI clicks, but it still depends on DOM selectors that can break without warning.
 - It is off by default. Toggle *Enable Risky mode (UI automation)* and press **Enable for 10 minutes** to start a session. When the timer expires (or you disable the toggle), deletion falls back to opening tabs manually.
 - The flow: **Scan** → select rows → enable Risky mode session → **Delete selected**. Watch DevTools console for `[RiskyMode]` traces (use the settings toggle if you want extra `[Cleaner]` debug lines).
-- Simple header mode (default): the automation hovers the conversation header, clicks the kebab next to **Share**, and walks the Delete → Confirm modal. This keeps the script small and screenshot-friendly. If that fails on your layout, enable *Allow sidebar fallback (optional)* in Settings to try the legacy navigation path once.
+- Header-only automation: the script stays in the conversation header, finds **Share**, moves to the adjacent kebab, and clicks **Delete → Confirm**. Keep that toolbar unobstructed; no sidebar paths remain.
 - Dry run support: enable *Dry run (no clicks)* to verify selectors without confirming deletion. The automation locates buttons, logs intent, and exits before the destructive click.
+- Defaults: `risky_step_timeout_ms = 10000`, `risky_between_tabs_ms = 800`, `risky_max_retries = 1`, and jitter `[120, 380]` keep retries controlled while avoiding auto-reloads.
 - Troubleshooting:
-  - Run **Test selectors** on the active tab; it logs a `[RiskyMode] Probe summary` (header/sidebar/menu/confirm) in the tab console and returns a ✓/× readout in the popup.
-  - If the probe times out, increase `risky_step_timeout_ms`, make sure the Share button and three-dot menu are visible (no overlays or zoomed UI), and enable the sidebar fallback toggle if the header controls are hidden.
+  - Run **Test selectors** on the active tab; it logs a `[RiskyMode]` probe summary (header/menu/confirm) in the tab console and returns a ✓/× readout in the popup.
+  - If the probe times out, increase `risky_step_timeout_ms`, ensure the Share button and three-dot menu are visible (no overlays, 100% zoom), and keep the header toolbar scrolled into view.
+  - Screenshot note: grab a quick capture of the header toolbar (Share → kebab) when updating docs so teammates know which controls to target.
   - If the kebab button only shows on hover, the automation reveals it automatically—ensure the element can scroll into view.
   - Still failing? Capture the `[RiskyMode]` console logs (including evidence payloads) and tune selectors or timeouts.
 - Everything runs locally—no hidden APIs, only `chrome.scripting.executeScript` driving the public UI.
@@ -49,7 +51,7 @@ Search Cleaner keeps short, search-like ChatGPT conversations in a local backup 
 1. Open DevTools directly inside the chatgpt.com tab that shows the conversation.
 2. Enable *Debug* in the extension popup so `[Cleaner]` logs stay verbose.
 3. Click **Test selectors (active tab)** in the popup and check the tab console for `[RiskyMode]` entries.
-4. If you see `NOT FOUND` for kebab/delete/confirm, wait a moment—sidebar fallbacks kick in automatically.
-5. When the probe still fails, bump `risky_step_timeout_ms`, toggle *Dry run*, re-run the probe, and share the tab console output.
+4. If you see `NOT FOUND` for header/menu/confirm, bump `risky_step_timeout_ms`, re-run the probe, and double-check that the header toolbar is fully visible.
+5. When the probe still fails, toggle *Dry run*, re-run the probe, and share the tab console output.
 
 > Tip: All debug output now lives in the console. Open DevTools on the extension popup or the target chat tab to inspect `[Cleaner]` and `[RiskyMode]` logs.

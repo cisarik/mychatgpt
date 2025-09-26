@@ -144,7 +144,7 @@ async function attemptAutomation({ convoId, url, settings, maxRetries, debug }) 
           attempt: attempt + 1
         };
         if (attempt < totalAttempts - 1) {
-          await reloadTab(tab.id);
+          await sleep(180);
           continue;
         }
         break;
@@ -184,7 +184,7 @@ async function attemptAutomation({ convoId, url, settings, maxRetries, debug }) 
         attempt: attempt + 1
       };
       if (attempt < totalAttempts - 1) {
-        await reloadTab(tab.id);
+        await sleep(200);
       }
     } catch (error) {
       lastError = {
@@ -277,12 +277,6 @@ async function waitForTabLoad(tabId, timeoutMs, debug) {
 }
 
 /** Slovensky: Po reťazci pokusov reštartuje tab. */
-async function reloadTab(tabId) {
-  try {
-    await chrome.tabs.reload(tabId, { bypassCache: true });
-  } catch (_error) {}
-}
-
 /** Slovensky: Prednačíta selektory do tabu. */
 async function preloadSelectors(tabId) {
   if (!Number.isInteger(tabId)) {
@@ -331,6 +325,7 @@ async function guardConversationReady(tabId, timeoutMs) {
 }
 
 /** Slovensky: Prenos logiky na stránku. */
+
 async function runDeletionAutomation(payload) {
   const {
     url,
@@ -351,6 +346,9 @@ async function runDeletionAutomation(payload) {
   const stepTimeout = Number.isFinite(settings?.risky_step_timeout_ms)
     ? Math.max(500, settings.risky_step_timeout_ms)
     : 8000;
+  const stepRetryLimit = Number.isFinite(settings?.risky_max_retries)
+    ? Math.max(0, settings.risky_max_retries)
+    : 0;
 
   const log = (level, message, meta) => {
     if (meta !== undefined) {
@@ -380,42 +378,43 @@ async function runDeletionAutomation(payload) {
     return meta;
   };
 
+  const logMarker = (label, evidence) => {
+    if (evidence !== undefined) {
+      log('log', label, evidence);
+    } else {
+      log('log', label);
+    }
+  };
+
+  const runStep = async (name, executor, options = {}) => {
+    const retryable = options.retryable !== false;
+    const skip = Boolean(options.skip);
+    const maxRetries = retryable ? stepRetryLimit : 0;
+    for (let index = 0; index <= maxRetries; index += 1) {
+      try {
+        const result = await executor({ skip: skip && index === 0, attempt: index + 1 });
+        const evidence = result?.evidence || result?.meta;
+        logMarker(`${name}✓`, evidence);
+        return result || {};
+      } catch (error) {
+        const meta = toErrorMeta(error);
+        if (index >= maxRetries) {
+          log('error', `FAIL code=${meta.code || meta.reason || 'error'} step=${name}`, meta);
+          throw { ...error, step: name };
+        }
+        log('warn', `retry step=${name}`, meta);
+        await selectors.sleep(120);
+      }
+    }
+    throw { code: 'step_failed', reason: name };
+  };
+
   const failure = (step, error) => ({
     ok: false,
     reason: error?.reason || error?.code || 'automation_failed',
     step,
     details: toErrorMeta(error)
   });
-
-  const dispatchClick = (element) => {
-    element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
-  };
-
-  const maybeClick = (element, evidence) => {
-    if (dryRun) {
-      console.log(`${prefix} DRY RUN would click:`, evidence);
-    }
-    dispatchClick(element);
-  };
-
-  const timedStep = async (step, path, action) => {
-    const started = Date.now();
-    try {
-      const result = await action();
-      const duration = Date.now() - started;
-      const evidence = result?.evidence || result;
-      if (evidence !== undefined) {
-        log('log', `step=${step} path=${path} ok in ${duration}ms`, evidence);
-      } else {
-        log('log', `step=${step} path=${path} ok in ${duration}ms`);
-      }
-      return { ok: true, result, duration };
-    } catch (error) {
-      const duration = Date.now() - started;
-      log('warn', `step=${step} path=${path} failed in ${duration}ms`, toErrorMeta(error));
-      return { ok: false, error, duration };
-    }
-  };
 
   log('log', `attempt=${attempt} start`, { convoId, url });
   if (Number.isFinite(jitter) && jitter > 0) {
@@ -430,285 +429,168 @@ async function runDeletionAutomation(payload) {
 
   await dismissDraftBanner((meta) => log('log', 'closing draft banner', meta));
 
-  const shellStep = await timedStep('guard', 'appShell', () => selectors.waitForAppShell({ timeoutMs: stepTimeout }));
-  if (!shellStep.ok) {
-    return failure('guard', shellStep.error);
-  }
-
-  const conversationStatus = await selectors.waitForConversationView({ timeoutMs: stepTimeout });
-  if (conversationStatus.ready) {
-    log('log', 'step=guard path=conversation ok', conversationStatus.evidence);
-  } else {
-    log('warn', 'step=guard path=conversation not-ready', {
-      attempted: conversationStatus.attempted,
-      timeoutMs: conversationStatus.timeoutMs
-    });
-  }
-
   const profile = detectUiProfile();
-  const toastRegex = profile.toast_regex || selectors.TOAST_REGEX;
-  const useHeader = settings?.risky_simple_header !== false;
-  const allowSidebarFallback = Boolean(settings?.risky_allow_sidebar_fallback);
 
-  const logHeaderSummary = (summary) => {
-    if (!Array.isArray(summary) || !summary.length) {
-      return;
+  try {
+    await selectors.waitForAppShell({ timeoutMs: stepTimeout });
+    await selectors.sleep(50);
+
+    const header = await runStep('share', () => selectors.waitForHeaderToolbar({ timeoutMs: stepTimeout }), { retryable: true });
+    const toolbarEl = header?.toolbarEl;
+    const shareEl = header?.shareEl;
+    if (!(toolbarEl instanceof Element) || !(shareEl instanceof Element)) {
+      return failure('share', { code: 'header_missing', message: 'Header toolbar missing' });
     }
-    const parts = summary.map((entry) => {
-      const label = entry.label || 'step';
-      const okMark = entry.ok ? '✓' : '×';
-      const duration = Number.isFinite(entry.duration) ? `${entry.duration}ms` : '';
-      return `${label}${okMark}${duration ? `(${duration})` : ''}`;
+
+    const kebab = await runStep('kebab', () => selectors.findHeaderKebabNearShare(toolbarEl, shareEl, { timeoutMs: stepTimeout }), {
+      retryable: true
     });
-    log('log', `header: ${parts.join(' ')}`);
-  };
-
-  let headerOutcome = { ok: false, summary: [] };
-  if (useHeader) {
-    headerOutcome = await attemptHeaderPath();
-    logHeaderSummary(headerOutcome.summary);
-  }
-
-  if (headerOutcome.ok) {
-    log('log', `attempt=${attempt} completed`, { reason: headerOutcome.reason, path: 'header' });
-    return { ok: true, reason: headerOutcome.reason, step: 'verify' };
-  }
-
-  if (useHeader && !allowSidebarFallback) {
-    const errorMeta = toErrorMeta(headerOutcome.error || { code: 'header_path_failed' });
-    errorMeta.step = headerOutcome.step || 'header';
-    errorMeta.code = 'header_path_failed';
-    return { ok: false, reason: 'header_path_failed', step: headerOutcome.step || 'header', details: errorMeta };
-  }
-
-  const sidebarOutcome = await attemptSidebarPath();
-  if (!sidebarOutcome.ok) {
-    return sidebarOutcome.failure;
-  }
-
-  log('log', `attempt=${attempt} completed`, { reason: sidebarOutcome.reason, path: 'sidebar' });
-  return { ok: true, reason: sidebarOutcome.reason, step: 'verify' };
-
-  async function attemptHeaderPath() {
-    const summary = [];
-    const record = async (label, action) => {
-      const stepId = `header-${label}`;
-      const outcome = await timedStep(stepId, 'header', action);
-      summary.push({ label, ok: outcome.ok, duration: outcome.duration });
-      return outcome;
-    };
-
-    const toolbarStep = await record('share', () => selectors.waitForHeaderToolbar({ timeoutMs: stepTimeout }));
-    if (!toolbarStep.ok) {
-      return { ok: false, step: 'header-share', error: toolbarStep.error, summary };
+    const kebabEl = kebab?.kebabEl || kebab?.element;
+    if (!(kebabEl instanceof Element)) {
+      return failure('kebab', { code: 'kebab_missing', message: 'Header kebab missing' });
     }
 
-    const toolbarContext = toolbarStep.result;
-    const kebabStep = await record('kebab', () => selectors.findHeaderKebabNearShare(toolbarContext, { timeoutMs: stepTimeout }));
-    if (!kebabStep.ok) {
-      return { ok: false, step: 'header-kebab', error: kebabStep.error, summary };
-    }
+    const menu = await runStep(
+      'menu',
+      async ({ skip }) => {
+        await selectors.reveal(kebabEl);
+        if (skip) {
+          console.log(`${prefix} DRY RUN would click kebab`, kebab?.evidence);
+        } else {
+          await selectors.clickHard(kebabEl);
+        }
+        try {
+          const lookupTimeout = skip ? Math.min(400, stepTimeout) : stepTimeout;
+          const found = await selectors.findDeleteInOpenMenu(profile, { timeoutMs: lookupTimeout });
+          return found;
+        } catch (error) {
+          if (skip) {
+            return { element: null, evidence: { skip: true, ...toErrorMeta(error) } };
+          }
+          throw error;
+        }
+      },
+      { skip: dryRun, retryable: true }
+    );
 
-    const kebab = kebabStep.result?.element;
-    if (!(kebab instanceof HTMLElement)) {
-      return { ok: false, step: 'header-kebab', error: { code: 'kebab_missing', reason: 'header_kebab_missing' }, summary };
-    }
+    const deleteStep = await runStep(
+      'delete',
+      async ({ skip }) => {
+        let target = menu?.element;
+        let evidence = menu?.evidence;
+        if (!target) {
+          try {
+            const lookupTimeout = skip ? Math.min(400, stepTimeout) : stepTimeout;
+            const refreshed = await selectors.findDeleteInOpenMenu(profile, { timeoutMs: lookupTimeout });
+            target = refreshed.element;
+            evidence = refreshed.evidence;
+          } catch (error) {
+            if (!skip) {
+              throw error;
+            }
+            return { evidence: { skip: true, ...toErrorMeta(error) } };
+          }
+        }
+        if (!(target instanceof Element)) {
+          if (skip) {
+            return { evidence: { skip: true, reason: 'delete_missing' } };
+          }
+          throw { code: 'delete_missing', message: 'Delete menu item missing' };
+        }
+        if (skip) {
+          console.log(`${prefix} DRY RUN would click delete`, evidence);
+          return { element: target, evidence: { ...evidence, skip: true } };
+        }
+        await selectors.reveal(target);
+        await selectors.clickHard(target);
+        return { element: target, evidence };
+      },
+      { skip: dryRun, retryable: true }
+    );
 
-    await selectors.reveal(kebab);
-    log('log', 'step=reveal path=header target=kebab', kebabStep.result.evidence);
-    maybeClick(kebab, kebabStep.result.evidence);
-    await selectors.sleep(150);
+    const confirm = await runStep(
+      'confirm',
+      async ({ skip }) => {
+        try {
+          const lookupTimeout = skip ? Math.min(400, stepTimeout) : stepTimeout;
+          const match = await selectors.findConfirmDelete(profile, { timeoutMs: lookupTimeout });
+          if (!(match.element instanceof Element)) {
+            throw { code: 'confirm_missing', message: 'Confirm button missing' };
+          }
+          if (skip) {
+            console.log(`${prefix} DRY RUN would click confirm`, match.evidence);
+            return { element: match.element, evidence: { ...match.evidence, skip: true } };
+          }
+          await selectors.reveal(match.element);
+          await selectors.clickHard(match.element);
+          return match;
+        } catch (error) {
+          if (skip) {
+            return { evidence: { skip: true, ...toErrorMeta(error) } };
+          }
+          throw error;
+        }
+      },
+      { skip: dryRun, retryable: true }
+    );
 
-    const menuStep = await record('menu', () => selectors.findDeleteInOpenMenu(profile, { timeoutMs: stepTimeout }));
-    if (!menuStep.ok) {
-      return { ok: false, step: 'header-menu', error: menuStep.error, summary };
-    }
-
-    const deleteButton = menuStep.result?.element;
-    if (!(deleteButton instanceof HTMLElement)) {
-      return { ok: false, step: 'header-menu', error: { code: 'delete_missing', reason: 'delete_button_missing' }, summary };
-    }
-
-    await selectors.reveal(deleteButton);
-    log('log', 'step=reveal path=header target=delete', menuStep.result.evidence);
-    maybeClick(deleteButton, menuStep.result.evidence);
-    await selectors.sleep(150);
-
-    const confirmStep = await record('confirm', () => selectors.findConfirmDelete(profile, { timeoutMs: stepTimeout }));
-    if (!confirmStep.ok) {
-      return { ok: false, step: 'header-confirm', error: confirmStep.error, summary };
-    }
-
-    const confirmButton = confirmStep.result?.element;
-    if (!(confirmButton instanceof HTMLElement)) {
-      return { ok: false, step: 'header-confirm', error: { code: 'confirm_missing', reason: 'confirm_button_missing' }, summary };
-    }
-
-    await selectors.reveal(confirmButton);
-    log('log', 'step=reveal path=header target=confirm', confirmStep.result.evidence);
     if (dryRun) {
-      console.log(`${prefix} DRY RUN would click:`, confirmStep.result.evidence);
-      dismissDialog(confirmButton);
-      return { ok: true, reason: 'dry_run', summary };
+      log('log', 'dry_run complete', {
+        kebab: kebab?.evidence,
+        delete: deleteStep?.evidence,
+        confirm: confirm?.evidence
+      });
+      return { ok: true, reason: 'dry_run', step: 'dry_run' };
     }
 
-    dispatchClick(confirmButton);
+    const verify = await runStep(
+      'verify',
+      async () => {
+        const outcome = await verifyDeletion({ selectors, profile, convoId, timeoutMs: stepTimeout });
+        if (!outcome.ok) {
+          throw outcome;
+        }
+        return { evidence: outcome.evidence, reason: outcome.reason };
+      },
+      { retryable: false }
+    );
 
-    const verifyStep = await timedStep('verify', 'header', async () => {
-      const outcome = await verifyDeletion({ selectors, convoId, url, timeout: stepTimeout, toastRegex });
-      if (!outcome.ok) {
-        throw { code: outcome.reason || 'verify_timeout', reason: outcome.reason || 'verify_timeout', timeoutMs: outcome.timeoutMs };
-      }
-      return outcome;
-    });
-
-    if (!verifyStep.ok) {
-      return { ok: false, step: 'verify', error: verifyStep.error, summary };
-    }
-
-    return { ok: true, reason: verifyStep.result.reason, summary };
-  }
-
-  async function attemptSidebarPath() {
-    if (!convoId) {
-      return { ok: false, failure: failure('findKebab', { code: 'convo_id_missing', message: 'Conversation ID missing for sidebar lookup' }) };
-    }
-
-    const ensureSidebar = await timedStep('ensureSidebar', 'sidebar', () => selectors.ensureSidebarVisible({ timeoutMs: stepTimeout }));
-    if (!ensureSidebar.ok) {
-      return { ok: false, failure: failure('findKebab', ensureSidebar.error) };
-    }
-
-    const sidebarAttempt = await timedStep('findKebab', 'sidebar', () => selectors.findSidebarSelectedItemByConvoId(convoId, { timeoutMs: stepTimeout }));
-    if (!sidebarAttempt.ok) {
-      return { ok: false, failure: failure('findKebab', sidebarAttempt.error) };
-    }
-
-    const kebabResult = sidebarAttempt.result;
-    const kebab = kebabResult?.element;
-    if (!(kebab instanceof HTMLElement)) {
-      return { ok: false, failure: failure('findKebab', { code: 'kebab_missing', message: 'Conversation kebab missing' }) };
-    }
-
-    await selectors.reveal(kebab);
-    log('log', 'step=reveal path=sidebar target=kebab', kebabResult.evidence);
-    maybeClick(kebab, kebabResult.evidence);
-    await selectors.sleep(150);
-
-    const menuResult = await timedStep('findMenu', 'sidebar', () => selectors.findDeleteInOpenMenu(profile, { timeoutMs: stepTimeout }));
-    if (!menuResult.ok) {
-      return { ok: false, failure: failure('findMenu', menuResult.error) };
-    }
-
-    const deleteButton = menuResult.result?.element;
-    if (!(deleteButton instanceof HTMLElement)) {
-      return { ok: false, failure: failure('findMenu', { code: 'delete_missing', message: 'Delete menu item missing' }) };
-    }
-
-    await selectors.reveal(deleteButton);
-    log('log', 'step=reveal path=sidebar target=delete', menuResult.result.evidence);
-    maybeClick(deleteButton, menuResult.result.evidence);
-    await selectors.sleep(150);
-
-    const confirmResult = await timedStep('findConfirm', 'sidebar', () => selectors.findConfirmDelete(profile, { timeoutMs: stepTimeout }));
-    if (!confirmResult.ok) {
-      return { ok: false, failure: failure('findConfirm', confirmResult.error) };
-    }
-
-    const confirmButton = confirmResult.result?.element;
-    if (!(confirmButton instanceof HTMLElement)) {
-      return { ok: false, failure: failure('findConfirm', { code: 'confirm_missing', message: 'Confirm button missing' }) };
-    }
-
-    await selectors.reveal(confirmButton);
-    log('log', 'step=reveal path=sidebar target=confirm', confirmResult.result.evidence);
-    if (dryRun) {
-      console.log(`${prefix} DRY RUN would click:`, confirmResult.result.evidence);
-      dismissDialog(confirmButton);
-      return { ok: true, reason: 'dry_run' };
-    }
-
-    dispatchClick(confirmButton);
-
-    const verifyStep = await timedStep('verify', 'sidebar', async () => {
-      const outcome = await verifyDeletion({ selectors, convoId, url, timeout: stepTimeout, toastRegex });
-      if (!outcome.ok) {
-        throw { code: outcome.reason || 'verify_timeout', reason: outcome.reason || 'verify_timeout', timeoutMs: outcome.timeoutMs };
-      }
-      return outcome;
-    });
-
-    if (!verifyStep.ok) {
-      return { ok: false, failure: failure('verify', verifyStep.error) };
-    }
-
-    return { ok: true, reason: verifyStep.result.reason };
+    log('log', `attempt=${attempt} completed`, { reason: verify.reason || 'deleted', path: 'header' });
+    return { ok: true, reason: verify.reason || 'deleted', step: 'verify' };
+  } catch (error) {
+    return failure(error?.step || 'automation', error);
   }
 }
 
-/** Slovensky: Overí, že konverzácia zmizla. */
-async function verifyDeletion({ selectors, convoId, url, timeout, toastRegex }) {
-  const timeoutMs = Math.max(2000, Number.isFinite(timeout) ? timeout : 5000);
-  const deadline = Date.now() + timeoutMs;
-  const targetPath = (() => {
-    try {
-      return new URL(url, location.origin).pathname;
-    } catch (_error) {
-      return null;
+function verifyDeletion({ selectors, profile, convoId, timeoutMs }) {
+  const limit = Number.isFinite(timeoutMs) ? Math.max(500, timeoutMs) : 8000;
+  const deadline = Date.now() + limit;
+  const toastRegex = profile?.toast_regex || selectors.TOAST_REGEX;
+  const convoPattern = convoId ? new RegExp(`/c/${escapeRegex(convoId)}\b`) : null;
+
+  return (async () => {
+    while (Date.now() <= deadline) {
+      if (convoPattern && !convoPattern.test(window.location.pathname)) {
+        return { ok: true, reason: 'url_changed', evidence: { url: window.location.href } };
+      }
+      const header = selectors.findShare?.();
+      if (!header || !(header.shareEl instanceof Element)) {
+        return { ok: true, reason: 'header_missing' };
+      }
+      const toastNode = selectors.byTextDeep(document.body, toastRegex);
+      if (toastNode) {
+        const host = toastNode.closest('[role="alert"],[role="status"],[data-testid*="toast" i]') || toastNode;
+        return { ok: true, reason: 'toast', evidence: selectors.describeElement(host) };
+      }
+      await selectors.sleep(150);
     }
+    return { ok: false, reason: 'verify_timeout', timeoutMs: limit, evidence: { url: window.location.href } };
   })();
-  const convoRegex = convoId ? new RegExp(`/c/${convoId}(/|$)`) : null;
-
-  const isVisible = (element) => {
-    if (!(element instanceof HTMLElement)) {
-      return false;
-    }
-    const rect = element.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  };
-
-  while (Date.now() <= deadline) {
-    if (targetPath && location.pathname !== targetPath) {
-      return { ok: true, reason: 'url_changed', evidence: { from: targetPath, to: location.pathname } };
-    }
-    if (convoRegex && !convoRegex.test(location.pathname)) {
-      return { ok: true, reason: 'url_changed', evidence: { to: location.pathname } };
-    }
-
-    const headerVisible = selectors
-      .queryAllDeep(document, 'main header[data-testid*="conversation" i]', 'main [data-testid*="conversation-header" i]')
-      .some(isVisible);
-    if (!headerVisible) {
-      return { ok: true, reason: 'header_missing' };
-    }
-
-    const toast = selectors.byTextDeep(document.body, toastRegex || selectors.TOAST_REGEX);
-    if (toast) {
-      const host = toast.closest('[role="alert"],[role="status"],[data-testid*="toast" i]') || toast;
-      return { ok: true, reason: 'toast', evidence: selectors.describeElement(host) };
-    }
-
-    await selectors.sleep(200);
-  }
-
-  return { ok: false, reason: 'verify_timeout', timeoutMs };
 }
 
-/** Slovensky: Krátko zavrie modálne okno pri dry-run režime. */
-function dismissDialog(button) {
-  const dialog = button?.closest('[role="dialog"],[role="alertdialog"]');
-  if (!dialog) {
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    return;
-  }
-  const closeButton = dialog.querySelector('button[aria-label*="close" i], button[aria-label*="cancel" i]');
-  if (closeButton instanceof HTMLElement) {
-    closeButton.click();
-  } else {
-    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  }
+function escapeRegex(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\$&');
 }
-
 function detectUiProfile() {
   const langs = normalizeLanguages();
   const base = UI_PROFILES.find((profile) => {

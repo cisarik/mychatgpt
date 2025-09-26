@@ -17,8 +17,6 @@ const riskyModeCheckbox = document.getElementById('risky_mode_enabled');
 const riskySessionStatus = document.getElementById('risky-session-status');
 const riskyEnableSessionButton = document.getElementById('risky-enable-session');
 const dryRunInput = document.getElementById('dry_run');
-const riskySimpleHeaderInput = document.getElementById('risky_simple_header');
-const riskySidebarFallbackInput = document.getElementById('risky_allow_sidebar_fallback');
 const riskyStepTimeoutInput = document.getElementById('risky_step_timeout_ms');
 const riskyBetweenTabsInput = document.getElementById('risky_between_tabs_ms');
 const riskyMaxRetriesInput = document.getElementById('risky_max_retries');
@@ -126,8 +124,6 @@ function applySettingsToForm() {
   debugToggle.checked = Boolean(settings.debugLogs);
   riskyModeCheckbox.checked = Boolean(settings.risky_mode_enabled);
   dryRunInput.checked = Boolean(settings.dry_run);
-  riskySimpleHeaderInput.checked = Boolean(settings.risky_simple_header);
-  riskySidebarFallbackInput.checked = Boolean(settings.risky_allow_sidebar_fallback);
   riskyStepTimeoutInput.value = settings.risky_step_timeout_ms;
   riskyBetweenTabsInput.value = settings.risky_between_tabs_ms;
   riskyMaxRetriesInput.value = settings.risky_max_retries;
@@ -147,8 +143,6 @@ async function saveSettings() {
     debugLogs: debugToggle.checked,
     risky_mode_enabled: riskyModeCheckbox.checked,
     dry_run: dryRunInput.checked,
-    risky_simple_header: riskySimpleHeaderInput.checked,
-    risky_allow_sidebar_fallback: riskySidebarFallbackInput.checked,
     risky_step_timeout_ms: Number.parseInt(riskyStepTimeoutInput.value, 10),
     risky_between_tabs_ms: Number.parseInt(riskyBetweenTabsInput.value, 10),
     risky_max_retries: Number.parseInt(riskyMaxRetriesInput.value, 10),
@@ -297,9 +291,24 @@ function renderRow(item) {
   const statusCell = document.createElement('td');
   statusCell.className = 'col-status';
   const statusInfo = formatDeletionStatus(item);
-  statusCell.textContent = statusInfo.text;
+  statusCell.textContent = '';
+  if (statusInfo.pillText) {
+    const pill = document.createElement('span');
+    pill.className = statusInfo.pillClass;
+    pill.textContent = statusInfo.pillText;
+    statusCell.appendChild(pill);
+  }
+  if (statusInfo.since) {
+    const sinceSpan = document.createElement('span');
+    sinceSpan.className = 'status-muted';
+    sinceSpan.style.marginLeft = '6px';
+    sinceSpan.textContent = statusInfo.since;
+    statusCell.appendChild(sinceSpan);
+  }
   if (statusInfo.title) {
     statusCell.title = statusInfo.title;
+  } else {
+    statusCell.removeAttribute('title');
   }
 
   const actionsCell = document.createElement('td');
@@ -343,12 +352,11 @@ function formatTimestamp(ms) {
 function formatDeletionStatus(item) {
   const outcome = item.lastDeletionOutcome;
   if (!outcome) {
-    return { text: '—', title: '' };
+    return { pillText: '—', pillClass: 'status-pill', title: 'No attempts yet', since: '' };
   }
-  const strategy = outcome.strategyId === 'ui-automation' ? 'automation' : 'manual';
+  const strategy = outcome.strategyId === DeletionStrategyIds.UI_AUTOMATION ? 'automation' : 'manual';
   const reasonLabel = formatOutcomeReason(outcome);
   const since = item.lastDeletionAttemptAt ? formatRelativeTime(item.lastDeletionAttemptAt) : '';
-  const text = since ? `${reasonLabel} (${since})` : reasonLabel;
   const detailParts = [reasonLabel, `via ${strategy}`];
   if (outcome.dryRun) {
     detailParts.push('dry-run');
@@ -356,7 +364,14 @@ function formatDeletionStatus(item) {
   if (outcome.step) {
     detailParts.push(`step: ${outcome.step}`);
   }
-  return { text, title: detailParts.join(' · ') };
+  const title = detailParts.join(' · ');
+  if (outcome.ok && outcome.reason === 'dry_run') {
+    return { pillText: 'DRY', pillClass: 'status-pill status-pill--warn', title, since };
+  }
+  if (outcome.ok) {
+    return { pillText: 'OK', pillClass: 'status-pill status-pill--ok', title, since };
+  }
+  return { pillText: 'FAIL', pillClass: 'status-pill status-pill--fail', title, since };
 }
 
 function formatOutcomeReason(outcome) {
@@ -368,7 +383,8 @@ function formatOutcomeReason(outcome) {
     already_open: 'Already open',
     verify_timeout: 'Verify timeout',
     not_logged_in: 'Not logged in',
-    automation_failed: 'Automation failed'
+    automation_failed: 'Automation failed',
+    risky_inactive: 'Risky mode inactive'
   };
   if (outcome.ok) {
     return 'Deleted';
@@ -529,36 +545,30 @@ async function runDeletion() {
     return;
   }
   setBusy(true);
+  void showStatus('Running… see tab console');
   try {
-    const expectAutomation =
-      settings.deletionStrategyId === DeletionStrategyIds.UI_AUTOMATION &&
-      settings.risky_mode_enabled &&
-      isRiskySessionActive(settings);
-    if (expectAutomation) {
-      void showStatus('Running… see tab console');
-    }
     const payload = backups
       .filter((item) => selectedIds.has(item.id))
       .map((item) => ({ convoId: item.convoId, url: item.url || getConvoUrl(item.convoId) }));
     const response = await chrome.runtime.sendMessage({ type: 'DELETE_SELECTED', selection: payload });
-    if (response?.ok) {
-      const report = response.report || {};
-      const okCount = Array.isArray(report.results) ? report.results.filter((entry) => entry.ok).length : 0;
-      const manualOpen = Array.isArray(report.results)
-        ? report.results.filter((entry) => entry.reason === 'manual_open' || entry.reason === 'manual_fallback').length
-        : 0;
-      if (okCount > 0) {
-        await showStatus(`Deleted ${okCount} chat(s)`);
-      } else if (manualOpen > 0) {
-        await showStatus(`Opened ${manualOpen} tab(s) for manual cleanup`);
-      } else {
-        await showStatus('Deletion flow completed');
-      }
-      selectedIds.clear();
-      await loadBackups();
-      updateSelectionState();
+    const report = response?.report || {};
+    const results = Array.isArray(report.results) ? report.results : [];
+    const deletedCount = results.filter((entry) => entry.ok).length;
+    const failedCount = results.filter((entry) => !entry.ok).length;
+
+    if (response?.ok || results.length) {
+      await showStatus(`Deleted ${deletedCount} • Failed ${failedCount}`);
     } else {
       await showStatus('Deletion failed');
+    }
+
+    if (response?.ok) {
+      selectedIds.clear();
+    }
+
+    if (response?.ok || results.length) {
+      await loadBackups();
+      updateSelectionState();
     }
   } catch (_error) {
     await showStatus('Deletion failed');
@@ -582,7 +592,6 @@ async function testSelectors() {
       const result = response.result || {};
       const summary = [
         result.header ? 'header ✓' : 'header ×',
-        result.sidebar ? 'sidebar ✓' : 'sidebar ×',
         result.menu ? 'menu ✓' : 'menu ×',
         result.confirm ? 'confirm ✓' : 'confirm ×'
       ].join(', ');
