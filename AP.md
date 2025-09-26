@@ -48,8 +48,7 @@ ACCEPTANCE:
 - <criterion 1>
 - <criterion 2>
 DELIVERABLES:
-- Proposed Conventional Commit message
-- Exactly one final section: `### Change Summary`
+- Change Summary
 NOTES:
 - Comments/docstrings in Slovak; report in English
 - Determinism; no network in tests; skip UI/Qt tests on CI
@@ -76,8 +75,7 @@ ACCEPTANCE:
 - Blank popup A–Z; ghost score; judge batch; DW on center; bingo +50
 - ruff/mypy --strict/pytest all green
 DELIVERABLES:
-- Conventional Commit message
-- ### Change Summary
+- Change Summary
 NOTES:
 - No new deps; no git commands; Slovak comments
 ```
