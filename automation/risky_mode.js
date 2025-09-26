@@ -12,6 +12,40 @@ import {
 
 const PREFIX = '[RiskyMode]';
 
+const UI_PROFILES = [
+  {
+    id: 'sk-cz',
+    match(langs) {
+      return langs.some((code) => /^sk|^cs|^cz/.test(code));
+    },
+    delete_menu_items: [
+      /^(odstrániť|odstranit)$/i,
+      /^(zmazať|zmazat)$/i
+    ],
+    confirm_buttons: [
+      /^(odstrániť|odstranit)$/i,
+      /^(zmazať|zmazat)$/i,
+      /^(áno, odstrániť|ano, odstranit)$/i
+    ],
+    toast_texts: [/odstránen/i, /odstranen/i, /zmazan/i]
+  },
+  {
+    id: 'en',
+    match() {
+      return true;
+    },
+    delete_menu_items: [
+      /^(delete|delete chat|delete conversation)$/i,
+      /^remove$/i
+    ],
+    confirm_buttons: [
+      /^(delete|delete conversation)$/i,
+      /^yes, delete$/i
+    ],
+    toast_texts: [/deleted/i, /removed/i]
+  }
+];
+
 /**
  * Slovensky: Vytvorí riskantnú automatizačnú stratégiu.
  * @param {{
@@ -411,87 +445,209 @@ async function runDeletionAutomation(payload) {
     });
   }
 
-  let path = 'header';
-  let kebabResult = null;
+  const profile = detectUiProfile();
+  const toastRegex = profile.toast_regex || selectors.TOAST_REGEX;
+  const useHeader = settings?.risky_simple_header !== false;
+  const allowSidebarFallback = Boolean(settings?.risky_allow_sidebar_fallback);
 
-  if (conversationStatus.ready) {
-    const headerAttempt = await timedStep('findKebab', 'header', () => selectors.findHeaderKebab({ timeoutMs: stepTimeout }));
-    if (headerAttempt.ok) {
-      kebabResult = headerAttempt.result;
+  const logHeaderSummary = (summary) => {
+    if (!Array.isArray(summary) || !summary.length) {
+      return;
     }
-  } else {
-    log('log', 'step=findKebab path=header skipped', { reason: 'conversation_not_ready' });
+    const parts = summary.map((entry) => {
+      const label = entry.label || 'step';
+      const okMark = entry.ok ? '✓' : '×';
+      const duration = Number.isFinite(entry.duration) ? `${entry.duration}ms` : '';
+      return `${label}${okMark}${duration ? `(${duration})` : ''}`;
+    });
+    log('log', `header: ${parts.join(' ')}`);
+  };
+
+  let headerOutcome = { ok: false, summary: [] };
+  if (useHeader) {
+    headerOutcome = await attemptHeaderPath();
+    logHeaderSummary(headerOutcome.summary);
   }
 
-  if (!kebabResult) {
-    path = 'sidebar';
+  if (headerOutcome.ok) {
+    log('log', `attempt=${attempt} completed`, { reason: headerOutcome.reason, path: 'header' });
+    return { ok: true, reason: headerOutcome.reason, step: 'verify' };
+  }
+
+  if (useHeader && !allowSidebarFallback) {
+    const errorMeta = toErrorMeta(headerOutcome.error || { code: 'header_path_failed' });
+    errorMeta.step = headerOutcome.step || 'header';
+    errorMeta.code = 'header_path_failed';
+    return { ok: false, reason: 'header_path_failed', step: headerOutcome.step || 'header', details: errorMeta };
+  }
+
+  const sidebarOutcome = await attemptSidebarPath();
+  if (!sidebarOutcome.ok) {
+    return sidebarOutcome.failure;
+  }
+
+  log('log', `attempt=${attempt} completed`, { reason: sidebarOutcome.reason, path: 'sidebar' });
+  return { ok: true, reason: sidebarOutcome.reason, step: 'verify' };
+
+  async function attemptHeaderPath() {
+    const summary = [];
+    const record = async (label, action) => {
+      const stepId = `header-${label}`;
+      const outcome = await timedStep(stepId, 'header', action);
+      summary.push({ label, ok: outcome.ok, duration: outcome.duration });
+      return outcome;
+    };
+
+    const toolbarStep = await record('share', () => selectors.waitForHeaderToolbar({ timeoutMs: stepTimeout }));
+    if (!toolbarStep.ok) {
+      return { ok: false, step: 'header-share', error: toolbarStep.error, summary };
+    }
+
+    const toolbarContext = toolbarStep.result;
+    const kebabStep = await record('kebab', () => selectors.findHeaderKebabNearShare(toolbarContext, { timeoutMs: stepTimeout }));
+    if (!kebabStep.ok) {
+      return { ok: false, step: 'header-kebab', error: kebabStep.error, summary };
+    }
+
+    const kebab = kebabStep.result?.element;
+    if (!(kebab instanceof HTMLElement)) {
+      return { ok: false, step: 'header-kebab', error: { code: 'kebab_missing', reason: 'header_kebab_missing' }, summary };
+    }
+
+    await selectors.reveal(kebab);
+    log('log', 'step=reveal path=header target=kebab', kebabStep.result.evidence);
+    maybeClick(kebab, kebabStep.result.evidence);
+    await selectors.sleep(150);
+
+    const menuStep = await record('menu', () => selectors.findDeleteInOpenMenu(profile, { timeoutMs: stepTimeout }));
+    if (!menuStep.ok) {
+      return { ok: false, step: 'header-menu', error: menuStep.error, summary };
+    }
+
+    const deleteButton = menuStep.result?.element;
+    if (!(deleteButton instanceof HTMLElement)) {
+      return { ok: false, step: 'header-menu', error: { code: 'delete_missing', reason: 'delete_button_missing' }, summary };
+    }
+
+    await selectors.reveal(deleteButton);
+    log('log', 'step=reveal path=header target=delete', menuStep.result.evidence);
+    maybeClick(deleteButton, menuStep.result.evidence);
+    await selectors.sleep(150);
+
+    const confirmStep = await record('confirm', () => selectors.findConfirmDelete(profile, { timeoutMs: stepTimeout }));
+    if (!confirmStep.ok) {
+      return { ok: false, step: 'header-confirm', error: confirmStep.error, summary };
+    }
+
+    const confirmButton = confirmStep.result?.element;
+    if (!(confirmButton instanceof HTMLElement)) {
+      return { ok: false, step: 'header-confirm', error: { code: 'confirm_missing', reason: 'confirm_button_missing' }, summary };
+    }
+
+    await selectors.reveal(confirmButton);
+    log('log', 'step=reveal path=header target=confirm', confirmStep.result.evidence);
+    if (dryRun) {
+      console.log(`${prefix} DRY RUN would click:`, confirmStep.result.evidence);
+      dismissDialog(confirmButton);
+      return { ok: true, reason: 'dry_run', summary };
+    }
+
+    dispatchClick(confirmButton);
+
+    const verifyStep = await timedStep('verify', 'header', async () => {
+      const outcome = await verifyDeletion({ selectors, convoId, url, timeout: stepTimeout, toastRegex });
+      if (!outcome.ok) {
+        throw { code: outcome.reason || 'verify_timeout', reason: outcome.reason || 'verify_timeout', timeoutMs: outcome.timeoutMs };
+      }
+      return outcome;
+    });
+
+    if (!verifyStep.ok) {
+      return { ok: false, step: 'verify', error: verifyStep.error, summary };
+    }
+
+    return { ok: true, reason: verifyStep.result.reason, summary };
+  }
+
+  async function attemptSidebarPath() {
     if (!convoId) {
-      return failure('findKebab', { code: 'convo_id_missing', message: 'Conversation ID missing for sidebar lookup' });
+      return { ok: false, failure: failure('findKebab', { code: 'convo_id_missing', message: 'Conversation ID missing for sidebar lookup' }) };
     }
-    const ensureSidebar = await timedStep('ensureSidebar', path, () => selectors.ensureSidebarVisible({ timeoutMs: stepTimeout }));
+
+    const ensureSidebar = await timedStep('ensureSidebar', 'sidebar', () => selectors.ensureSidebarVisible({ timeoutMs: stepTimeout }));
     if (!ensureSidebar.ok) {
-      return failure('findKebab', ensureSidebar.error);
+      return { ok: false, failure: failure('findKebab', ensureSidebar.error) };
     }
-    const sidebarAttempt = await timedStep('findKebab', path, () => selectors.findSidebarSelectedItemByConvoId(convoId, { timeoutMs: stepTimeout }));
+
+    const sidebarAttempt = await timedStep('findKebab', 'sidebar', () => selectors.findSidebarSelectedItemByConvoId(convoId, { timeoutMs: stepTimeout }));
     if (!sidebarAttempt.ok) {
-      return failure('findKebab', sidebarAttempt.error);
+      return { ok: false, failure: failure('findKebab', sidebarAttempt.error) };
     }
-    kebabResult = sidebarAttempt.result;
-  }
 
-  const kebab = kebabResult?.element;
-  if (!(kebab instanceof HTMLElement)) {
-    return failure('findKebab', { code: 'kebab_missing', message: 'Conversation kebab missing' });
-  }
-
-  await selectors.reveal(kebab);
-  log('log', `step=reveal path=${path}`, kebabResult.evidence);
-  maybeClick(kebab, kebabResult.evidence);
-  await selectors.sleep(150);
-
-  const menuResult = await timedStep('findMenu', path, () => selectors.findDeleteMenuItem({ timeoutMs: stepTimeout }));
-  if (!menuResult.ok) {
-    return failure('findMenu', menuResult.error);
-  }
-  const deleteButton = menuResult.result.element;
-  await selectors.reveal(deleteButton);
-  log('log', `step=reveal path=${path} target=delete`, menuResult.result.evidence);
-  maybeClick(deleteButton, menuResult.result.evidence);
-  await selectors.sleep(150);
-
-  const confirmResult = await timedStep('findConfirm', path, () => selectors.findConfirmDeleteButton({ timeoutMs: stepTimeout }));
-  if (!confirmResult.ok) {
-    return failure('findConfirm', confirmResult.error);
-  }
-  const confirmButton = confirmResult.result.element;
-  await selectors.reveal(confirmButton);
-  log('log', `step=reveal path=${path} target=confirm`, confirmResult.result.evidence);
-  if (dryRun) {
-    console.log(`${prefix} DRY RUN would click:`, confirmResult.result.evidence);
-    dismissDialog(confirmButton);
-    return { ok: true, reason: 'dry_run', step: 'confirm' };
-  }
-
-  dispatchClick(confirmButton);
-
-  const verifyStep = await timedStep('verify', path, async () => {
-    const outcome = await verifyDeletion({ selectors, convoId, url, timeout: stepTimeout });
-    if (!outcome.ok) {
-      throw { code: outcome.reason || 'verify_timeout', reason: outcome.reason || 'verify_timeout', timeoutMs: outcome.timeoutMs };
+    const kebabResult = sidebarAttempt.result;
+    const kebab = kebabResult?.element;
+    if (!(kebab instanceof HTMLElement)) {
+      return { ok: false, failure: failure('findKebab', { code: 'kebab_missing', message: 'Conversation kebab missing' }) };
     }
-    return outcome;
-  });
 
-  if (!verifyStep.ok) {
-    return failure('verify', verifyStep.error);
+    await selectors.reveal(kebab);
+    log('log', 'step=reveal path=sidebar target=kebab', kebabResult.evidence);
+    maybeClick(kebab, kebabResult.evidence);
+    await selectors.sleep(150);
+
+    const menuResult = await timedStep('findMenu', 'sidebar', () => selectors.findDeleteInOpenMenu(profile, { timeoutMs: stepTimeout }));
+    if (!menuResult.ok) {
+      return { ok: false, failure: failure('findMenu', menuResult.error) };
+    }
+
+    const deleteButton = menuResult.result?.element;
+    if (!(deleteButton instanceof HTMLElement)) {
+      return { ok: false, failure: failure('findMenu', { code: 'delete_missing', message: 'Delete menu item missing' }) };
+    }
+
+    await selectors.reveal(deleteButton);
+    log('log', 'step=reveal path=sidebar target=delete', menuResult.result.evidence);
+    maybeClick(deleteButton, menuResult.result.evidence);
+    await selectors.sleep(150);
+
+    const confirmResult = await timedStep('findConfirm', 'sidebar', () => selectors.findConfirmDelete(profile, { timeoutMs: stepTimeout }));
+    if (!confirmResult.ok) {
+      return { ok: false, failure: failure('findConfirm', confirmResult.error) };
+    }
+
+    const confirmButton = confirmResult.result?.element;
+    if (!(confirmButton instanceof HTMLElement)) {
+      return { ok: false, failure: failure('findConfirm', { code: 'confirm_missing', message: 'Confirm button missing' }) };
+    }
+
+    await selectors.reveal(confirmButton);
+    log('log', 'step=reveal path=sidebar target=confirm', confirmResult.result.evidence);
+    if (dryRun) {
+      console.log(`${prefix} DRY RUN would click:`, confirmResult.result.evidence);
+      dismissDialog(confirmButton);
+      return { ok: true, reason: 'dry_run' };
+    }
+
+    dispatchClick(confirmButton);
+
+    const verifyStep = await timedStep('verify', 'sidebar', async () => {
+      const outcome = await verifyDeletion({ selectors, convoId, url, timeout: stepTimeout, toastRegex });
+      if (!outcome.ok) {
+        throw { code: outcome.reason || 'verify_timeout', reason: outcome.reason || 'verify_timeout', timeoutMs: outcome.timeoutMs };
+      }
+      return outcome;
+    });
+
+    if (!verifyStep.ok) {
+      return { ok: false, failure: failure('verify', verifyStep.error) };
+    }
+
+    return { ok: true, reason: verifyStep.result.reason };
   }
-
-  log('log', `attempt=${attempt} completed`, { reason: verifyStep.result.reason });
-  return { ok: true, reason: verifyStep.result.reason, step: 'verify' };
 }
 
 /** Slovensky: Overí, že konverzácia zmizla. */
-async function verifyDeletion({ selectors, convoId, url, timeout }) {
+async function verifyDeletion({ selectors, convoId, url, timeout, toastRegex }) {
   const timeoutMs = Math.max(2000, Number.isFinite(timeout) ? timeout : 5000);
   const deadline = Date.now() + timeoutMs;
   const targetPath = (() => {
@@ -526,7 +682,7 @@ async function verifyDeletion({ selectors, convoId, url, timeout }) {
       return { ok: true, reason: 'header_missing' };
     }
 
-    const toast = selectors.byTextDeep(document.body, selectors.TOAST_REGEX);
+    const toast = selectors.byTextDeep(document.body, toastRegex || selectors.TOAST_REGEX);
     if (toast) {
       const host = toast.closest('[role="alert"],[role="status"],[data-testid*="toast" i]') || toast;
       return { ok: true, reason: 'toast', evidence: selectors.describeElement(host) };
@@ -551,6 +707,49 @@ function dismissDialog(button) {
   } else {
     dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   }
+}
+
+function detectUiProfile() {
+  const langs = normalizeLanguages();
+  const base = UI_PROFILES.find((profile) => {
+    try {
+      return typeof profile.match === 'function' ? profile.match(langs) : false;
+    } catch (_error) {
+      return false;
+    }
+  }) || UI_PROFILES[UI_PROFILES.length - 1];
+  return compileProfile(base);
+}
+
+function normalizeLanguages() {
+  const collected = [];
+  if (Array.isArray(navigator?.languages)) {
+    collected.push(...navigator.languages);
+  }
+  if (typeof navigator?.language === 'string') {
+    collected.push(navigator.language);
+  }
+  if (typeof document?.documentElement?.lang === 'string') {
+    collected.push(document.documentElement.lang);
+  }
+  return collected
+    .map((code) => String(code || '').toLowerCase())
+    .filter(Boolean);
+}
+
+function compileProfile(base) {
+  const toastPatterns = Array.isArray(base?.toast_texts)
+    ? base.toast_texts.map((pattern) => (pattern instanceof RegExp ? pattern : new RegExp(String(pattern), 'i')))
+    : [];
+  const toast_regex = toastPatterns.length
+    ? new RegExp(toastPatterns.map((regex) => regex.source).join('|'), 'i')
+    : null;
+  return {
+    delete_menu_items: base?.delete_menu_items || [],
+    confirm_buttons: base?.confirm_buttons || [],
+    toast_texts: base?.toast_texts || [],
+    toast_regex
+  };
 }
 
 /** Slovensky: Pokus o zatvorenie baneru s draftom. */

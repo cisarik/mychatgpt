@@ -22,9 +22,11 @@ export const DEFAULT_SETTINGS = Object.freeze({
   risky_mode_enabled: false,
   risky_session_until: null,
   risky_jitter_ms: [140, 420],
-  risky_step_timeout_ms: 8000,
+  risky_step_timeout_ms: 10000,
   risky_between_tabs_ms: 900,
   risky_max_retries: 2,
+  risky_simple_header: true,
+  risky_allow_sidebar_fallback: false,
   dry_run: false
 });
 
@@ -48,6 +50,8 @@ let debugWaiter = null;
  * @property {number} risky_step_timeout_ms
  * @property {number} risky_between_tabs_ms
  * @property {number} risky_max_retries
+ * @property {boolean} risky_simple_header
+ * @property {boolean} risky_allow_sidebar_fallback
  * @property {boolean} dry_run
  */
 
@@ -177,6 +181,12 @@ export function normalizeSettings(raw) {
   if (typeof raw.risky_mode_enabled === 'boolean') {
     result.risky_mode_enabled = raw.risky_mode_enabled;
   }
+  if (typeof raw.risky_simple_header === 'boolean') {
+    result.risky_simple_header = raw.risky_simple_header;
+  }
+  if (typeof raw.risky_allow_sidebar_fallback === 'boolean') {
+    result.risky_allow_sidebar_fallback = raw.risky_allow_sidebar_fallback;
+  }
   if (raw.risky_session_until === null) {
     result.risky_session_until = null;
   } else if (Number.isFinite(raw.risky_session_until)) {
@@ -190,6 +200,8 @@ export function normalizeSettings(raw) {
   }
   if (Number.isFinite(raw.risky_step_timeout_ms)) {
     result.risky_step_timeout_ms = clampInt(raw.risky_step_timeout_ms, 1000, 30000);
+  } else if (result.risky_simple_header) {
+    result.risky_step_timeout_ms = clampInt(8000, 1000, 30000);
   }
   if (Number.isFinite(raw.risky_between_tabs_ms)) {
     result.risky_between_tabs_ms = clampInt(raw.risky_between_tabs_ms, 100, 60000);

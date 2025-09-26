@@ -30,6 +30,15 @@
     'aside nav',
     '[data-testid*="sidebar" i]'
   ];
+  const HEADER_TOOLBAR_HINTS = [
+    '[role="toolbar"]',
+    '[data-testid*="header-actions" i]',
+    '[data-testid*="toolbar" i]',
+    '[class*="header-actions" i]'
+  ];
+  const SHARE_LABEL_REGEX = /share/i;
+  const HEADER_MORE_LABEL_REGEX = /(more|options|menu)/i;
+  const CONVERSATION_ACTIONS_REGEX = /conversation actions/i;
   const KEBAB_FALLBACK_SELECTORS = [
     'button[aria-label*="conversation actions" i]',
     '[data-testid*="actions" i] button',
@@ -438,6 +447,33 @@
     })();
   }
 
+  async function waitForHeaderToolbar(options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
+    const deadline = now() + timeoutMs;
+    const attempted = [];
+    while (now() <= deadline) {
+      const share = locateShareButton();
+      if (share) {
+        const toolbar = deriveToolbarFromShare(share);
+        if (toolbar) {
+          return {
+            toolbar,
+            share,
+            evidence: {
+              toolbar: describeElement(toolbar),
+              share: describeElement(share)
+            }
+          };
+        }
+        attempted.push('header:toolbar-missing');
+      } else {
+        attempted.push('header:share-missing');
+      }
+      await sleep(POLL_STEP_MS);
+    }
+    throw selectorError('waitForHeaderToolbar', attempted, timeoutMs);
+  }
+
   async function ensureSidebarVisible(options = {}) {
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
     const deadline = now() + timeoutMs;
@@ -522,29 +558,34 @@
   }
 
   async function findHeaderKebab(options = {}) {
+    const context = await waitForHeaderToolbar({ timeoutMs: options.timeoutMs });
+    return findHeaderKebabNearShare(context, options);
+  }
+
+  async function findHeaderKebabNearShare(context, options = {}) {
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
     const deadline = now() + timeoutMs;
     const attempted = [];
+    const toolbar = context?.toolbar instanceof Element ? context.toolbar : context;
+    const share = context?.share instanceof Element ? context.share : null;
+    if (!(toolbar instanceof Element)) {
+      throw selectorError('findHeaderKebabNearShare', ['header:invalid-toolbar'], timeoutMs);
+    }
     while (now() <= deadline) {
-      const header = queryAllDeep(document, CONVO_HEADER_SELECTORS).find(isVisible);
-      if (header) {
-        const kebab = locateKebabInContainer(header, attempted, 'header');
-        if (kebab) {
-          return {
-            element: kebab,
-            evidence: {
-              header: describeElement(header),
-              button: describeElement(kebab)
-            }
-          };
-        }
-        attempted.push('header-kebab-missing');
-      } else {
-        attempted.push('header-missing');
+      const match = locateHeaderKebab(toolbar, share, attempted);
+      if (match) {
+        return {
+          element: match.element,
+          evidence: {
+            button: describeElement(match.element),
+            rule: match.rule,
+            toolbar: describeElement(toolbar)
+          }
+        };
       }
       await sleep(POLL_STEP_MS);
     }
-    throw selectorError('findHeaderKebab', attempted, timeoutMs);
+    throw selectorError('findHeaderKebabNearShare', attempted, timeoutMs);
   }
 
   function locateKebabInContainer(container, attempted, scopeLabel) {
@@ -563,7 +604,181 @@
     return null;
   }
 
+  function locateHeaderKebab(container, share, attempted = []) {
+    const shareButton = share instanceof Element ? ensureInteractive(share) : null;
+
+    const runRule = (rule, finder) => {
+      attempted.push(`header:${rule}`);
+      try {
+        const found = finder();
+        if (found && found instanceof Element && isActionable(found)) {
+          const interactive = ensureInteractive(found);
+          if (interactive && (!shareButton || !interactive.isSameNode(shareButton))) {
+            return { element: interactive, rule };
+          }
+        }
+      } catch (_error) {}
+      return null;
+    };
+
+    const byActions = runRule('aria-conversation-actions', () => {
+      return queryAllDeep(
+        container,
+        'button[aria-label*="conversation actions" i]',
+        '[data-testid*="conversation-actions" i] button',
+        'button[data-testid*="conversation-actions" i]'
+      )[0];
+    });
+    if (byActions) {
+      return byActions;
+    }
+
+    const byLabel = runRule('label-more', () => {
+      const candidates = queryAllDeep(container, 'button', '[role="button"]');
+      return candidates.find((node) => {
+        if (!(node instanceof Element)) {
+          return false;
+        }
+        if (shareButton && node.isSameNode(shareButton)) {
+          return false;
+        }
+        const label = accessibleName(node);
+        return HEADER_MORE_LABEL_REGEX.test(label);
+      });
+    });
+    if (byLabel) {
+      return byLabel;
+    }
+
+    const sibling = runRule('sibling-kebab', () => {
+      if (!shareButton) {
+        return null;
+      }
+      const siblings = collectSiblingButtons(shareButton);
+      return siblings.find((node) => looksLikeKebab(node) && isActionable(node));
+    });
+    if (sibling) {
+      return sibling;
+    }
+
+    const fallback = runRule('toolbar-kebab', () => {
+      const candidate = queryAllDeep(container, 'button', '[role="button"]').find((node) => {
+        if (!(node instanceof Element)) {
+          return false;
+        }
+        if (shareButton && node.isSameNode(shareButton)) {
+          return false;
+        }
+        return looksLikeKebab(node) && isActionable(node);
+      });
+      return candidate || null;
+    });
+    if (fallback) {
+      return fallback;
+    }
+
+    return null;
+  }
+
+  function locateShareButton() {
+    const headerAreas = queryAllDeep(document, CONVO_HEADER_SELECTORS);
+    const headerSet = new Set(headerAreas.filter((node) => node instanceof Element));
+    const candidates = [];
+    const pushCandidate = (node) => {
+      if (!(node instanceof Element)) {
+        return;
+      }
+      const interactive = ensureInteractive(node);
+      if (!interactive || !isActionable(interactive)) {
+        return;
+      }
+      candidates.push(interactive);
+    };
+
+    roleQueryDeep(document, 'button', SHARE_LABEL_REGEX).forEach(pushCandidate);
+    queryAllDeep(document, '[aria-label*="share" i]', '[data-testid*="share" i]').forEach(pushCandidate);
+
+    const unique = Array.from(new Set(candidates));
+    if (!unique.length) {
+      return null;
+    }
+
+    const prioritized = unique.find((candidate) => isWithinHeader(candidate, headerSet));
+    return prioritized || unique[0];
+  }
+
+  function deriveToolbarFromShare(share) {
+    if (!(share instanceof Element)) {
+      return null;
+    }
+    let current = ensureInteractive(share);
+    while (current) {
+      if (current instanceof Element) {
+        const role = (current.getAttribute('role') || '').toLowerCase();
+        if (role === 'toolbar') {
+          return current;
+        }
+        for (const selector of HEADER_TOOLBAR_HINTS) {
+          try {
+            if (current.matches(selector)) {
+              return current;
+            }
+          } catch (_error) {}
+        }
+      }
+      current = parentThroughShadow(current);
+    }
+    const header = closestDeep(share, (node) => {
+      if (!(node instanceof Element)) {
+        return false;
+      }
+      return CONVO_HEADER_SELECTORS.some((selector) => {
+        try {
+          return node.matches(selector);
+        } catch (_error) {
+          return false;
+        }
+      });
+    });
+    if (header instanceof Element) {
+      return header;
+    }
+    return share.parentElement || null;
+  }
+
+  function collectSiblingButtons(node) {
+    const siblings = [];
+    const parent = node?.parentElement;
+    const maybePush = (candidate) => {
+      if (candidate instanceof Element && candidate !== node) {
+        siblings.push(candidate);
+      }
+    };
+    if (node?.previousElementSibling) {
+      maybePush(node.previousElementSibling);
+    }
+    if (node?.nextElementSibling) {
+      maybePush(node.nextElementSibling);
+    }
+    if (parent) {
+      const candidates = parent.querySelectorAll('button, [role="button"]');
+      candidates.forEach((candidate) => maybePush(candidate));
+    }
+    return siblings.map((item) => ensureInteractive(item)).filter(Boolean);
+  }
+
+  function isWithinHeader(node, headerSet) {
+    if (!(node instanceof Element)) {
+      return false;
+    }
+    const found = closestDeep(node, (candidate) => headerSet.has(candidate));
+    return Boolean(found);
+  }
+
   async function findDeleteMenuItem(options = {}) {
+    const profile = options.profile || {};
+    const deletePatterns = patternsFromProfile(profile, 'delete_menu_items', MENUITEM_PATTERNS);
+    const deleteTestIdRegex = profileRegex(profile, 'delete_menu_testid_regex', MENUITEM_TESTID_REGEX);
     return pollForMenuMatch({
       timeoutMs: options.timeoutMs,
       code: 'findDelete',
@@ -575,18 +790,18 @@
             continue;
           }
           const byRole = roleQueryDeep(menu, 'menuitem');
-          candidates.push(...byRole.filter((node) => matchesPatterns(node, MENUITEM_PATTERNS)));
+          candidates.push(...byRole.filter((node) => matchesPatterns(node, deletePatterns)));
           const byTestId = Array.from(menu.querySelectorAll('[data-testid]')).filter((node) => {
             if (!(node instanceof Element)) {
               return false;
             }
             const value = node.getAttribute('data-testid') || '';
-            return MENUITEM_TESTID_REGEX.test(value);
+            return deleteTestIdRegex.test(value);
           });
           candidates.push(...byTestId);
         }
         if (!candidates.length) {
-          const fallback = candidatesFromDocument(MENUITEM_PATTERNS);
+          const fallback = candidatesFromDocument(deletePatterns);
           candidates.push(...fallback);
         }
         const first = candidates.find((node) => node instanceof Element && isVisible(node));
@@ -602,6 +817,9 @@
   }
 
   async function findConfirmDeleteButton(options = {}) {
+    const profile = options.profile || {};
+    const confirmPatterns = patternsFromProfile(profile, 'confirm_buttons', CONFIRM_PATTERNS);
+    const confirmTestIdRegex = profileRegex(profile, 'confirm_testid_regex', CONFIRM_TESTID_REGEX);
     return pollForMenuMatch({
       timeoutMs: options.timeoutMs,
       code: 'findConfirm',
@@ -610,17 +828,17 @@
         const candidates = [];
         for (const dialog of dialogs) {
           const buttons = roleQueryDeep(dialog, 'button');
-          candidates.push(...buttons.filter((node) => matchesPatterns(node, CONFIRM_PATTERNS)));
+          candidates.push(...buttons.filter((node) => matchesPatterns(node, confirmPatterns)));
           const byTestId = Array.from(dialog.querySelectorAll('[data-testid]')).filter((node) => {
             if (!(node instanceof Element)) {
               return false;
             }
-            return CONFIRM_TESTID_REGEX.test(node.getAttribute('data-testid') || '');
+            return confirmTestIdRegex.test(node.getAttribute('data-testid') || '');
           });
           candidates.push(...byTestId);
         }
         if (!candidates.length) {
-          candidates.push(...candidatesFromDocument(CONFIRM_PATTERNS));
+          candidates.push(...candidatesFromDocument(confirmPatterns));
         }
         const first = candidates.find((node) => node instanceof Element && isVisible(node));
         if (first) {
@@ -647,6 +865,25 @@
       await sleep(POLL_STEP_MS);
     }
     throw selectorError(code, attempted, limit);
+  }
+
+  function patternsFromProfile(profile, key, fallback) {
+    const list = ensureArray(profile?.[key]).map((item) => ensureRegex(item)).filter(Boolean);
+    return list.length ? list : fallback;
+  }
+
+  function profileRegex(profile, key, fallback) {
+    const value = profile?.[key];
+    const regex = ensureRegex(value);
+    return regex || fallback;
+  }
+
+  function findDeleteInOpenMenu(profile, options = {}) {
+    return findDeleteMenuItem({ ...options, profile: profile || {} });
+  }
+
+  function findConfirmDelete(profile, options = {}) {
+    return findConfirmDeleteButton({ ...options, profile: profile || {} });
   }
 
   function matchesPatterns(node, patterns) {
@@ -763,11 +1000,15 @@
     roleQueryDeep,
     waitForAppShell,
     waitForConversationView,
+    waitForHeaderToolbar,
     ensureSidebarVisible,
     findSidebarSelectedItemByConvoId,
     findHeaderKebab,
+    findHeaderKebabNearShare,
     findDeleteMenuItem,
     findConfirmDeleteButton,
+    findDeleteInOpenMenu,
+    findConfirmDelete,
     reveal,
     describeElement,
     TOAST_REGEX

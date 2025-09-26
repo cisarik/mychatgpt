@@ -539,6 +539,7 @@ async function testSelectorsOnActiveTab() {
           menuFound: false,
           confirmFound: false
         };
+        const profile = detectUiProfile();
 
         const logMeta = (message, meta, level = 'log') => {
           if (meta !== undefined) {
@@ -561,6 +562,31 @@ async function testSelectorsOnActiveTab() {
           }
         };
 
+        function detectUiProfile() {
+          const langs = [];
+          if (Array.isArray(navigator?.languages)) {
+            langs.push(...navigator.languages);
+          }
+          if (typeof navigator?.language === 'string') {
+            langs.push(navigator.language);
+          }
+          if (typeof document?.documentElement?.lang === 'string') {
+            langs.push(document.documentElement.lang);
+          }
+          const normalized = langs.map((code) => String(code || '').toLowerCase());
+          const isSk = normalized.some((code) => /^sk|^cs|^cz/.test(code));
+          if (isSk) {
+            return {
+              delete_menu_items: [/^(odstrániť|odstranit)$/i, /^(zmazať|zmazat)$/i],
+              confirm_buttons: [/^(odstrániť|odstranit)$/i, /^(zmazať|zmazat)$/i, /^(áno, odstrániť|ano, odstranit)$/i]
+            };
+          }
+          return {
+            delete_menu_items: [/^(delete|delete chat|delete conversation)$/i, /^remove$/i],
+            confirm_buttons: [/^(delete|delete conversation)$/i, /^yes, delete$/i]
+          };
+        }
+
         try {
           await selectors.waitForAppShell({ timeoutMs });
         } catch (error) {
@@ -580,13 +606,18 @@ async function testSelectorsOnActiveTab() {
           }, 'warn');
         }
 
+        let toolbarResult = null;
         let kebabResult = null;
         let path = 'header';
 
         if (conversationStatus.ready) {
           try {
-            kebabResult = await selectors.findHeaderKebab({ timeoutMs });
-            summary.headerFound = Boolean(kebabResult?.element);
+            toolbarResult = await selectors.waitForHeaderToolbar({ timeoutMs });
+            if (toolbarResult?.share) {
+              summary.headerFound = true;
+            }
+            kebabResult = await selectors.findHeaderKebabNearShare(toolbarResult, { timeoutMs });
+            summary.headerFound = summary.headerFound || Boolean(kebabResult?.element);
           } catch (error) {
             logMeta('Probe header kebab missing', {
               code: error?.code,
@@ -625,7 +656,7 @@ async function testSelectorsOnActiveTab() {
         let menuResult = null;
         if (kebabResult?.element) {
           try {
-            menuResult = await selectors.findDeleteMenuItem({ timeoutMs });
+            menuResult = await selectors.findDeleteInOpenMenu(profile, { timeoutMs });
             if (menuResult?.element) {
               summary.menuFound = true;
             }
@@ -647,7 +678,7 @@ async function testSelectorsOnActiveTab() {
         let confirmResult = null;
         if (menuResult?.element) {
           try {
-            confirmResult = await selectors.findConfirmDeleteButton({ timeoutMs });
+            confirmResult = await selectors.findConfirmDelete(profile, { timeoutMs });
             if (confirmResult?.element) {
               summary.confirmFound = true;
             }

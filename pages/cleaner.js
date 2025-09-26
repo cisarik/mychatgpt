@@ -15,6 +15,8 @@ const riskyModeCheckbox = document.getElementById('risky_mode_enabled');
 const riskySessionStatus = document.getElementById('risky-session-status');
 const riskyEnableSessionButton = document.getElementById('risky-enable-session');
 const dryRunInput = document.getElementById('dry_run');
+const riskySimpleHeaderInput = document.getElementById('risky_simple_header');
+const riskySidebarFallbackInput = document.getElementById('risky_allow_sidebar_fallback');
 const riskyStepTimeoutInput = document.getElementById('risky_step_timeout_ms');
 const riskyBetweenTabsInput = document.getElementById('risky_between_tabs_ms');
 const riskyMaxRetriesInput = document.getElementById('risky_max_retries');
@@ -103,6 +105,8 @@ function applySettingsToForm() {
   debugToggle.checked = Boolean(settings.debugLogs);
   riskyModeCheckbox.checked = Boolean(settings.risky_mode_enabled);
   dryRunInput.checked = Boolean(settings.dry_run);
+  riskySimpleHeaderInput.checked = Boolean(settings.risky_simple_header);
+  riskySidebarFallbackInput.checked = Boolean(settings.risky_allow_sidebar_fallback);
   riskyStepTimeoutInput.value = settings.risky_step_timeout_ms;
   riskyBetweenTabsInput.value = settings.risky_between_tabs_ms;
   riskyMaxRetriesInput.value = settings.risky_max_retries;
@@ -122,6 +126,8 @@ async function saveSettings() {
     debugLogs: debugToggle.checked,
     risky_mode_enabled: riskyModeCheckbox.checked,
     dry_run: dryRunInput.checked,
+    risky_simple_header: riskySimpleHeaderInput.checked,
+    risky_allow_sidebar_fallback: riskySidebarFallbackInput.checked,
     risky_step_timeout_ms: Number.parseInt(riskyStepTimeoutInput.value, 10),
     risky_between_tabs_ms: Number.parseInt(riskyBetweenTabsInput.value, 10),
     risky_max_retries: Number.parseInt(riskyMaxRetriesInput.value, 10),
@@ -166,6 +172,15 @@ function setBusy(state) {
   refreshButton.disabled = state;
   scanButton.disabled = state;
   riskyEnableSessionButton.disabled = state;
+  settingsForm.querySelectorAll('input, button').forEach((node) => {
+    if (node === cancelDeletionButton || node === riskyEnableSessionButton) {
+      return;
+    }
+    node.disabled = state;
+  });
+  tableBody.querySelectorAll('input[type="checkbox"]').forEach((node) => {
+    node.disabled = state;
+  });
   updateSelectionState();
 }
 
@@ -204,6 +219,7 @@ function renderRow(item) {
   selectCell.className = 'col-select';
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
+  checkbox.disabled = busy;
   checkbox.checked = selectedIds.has(item.id);
   checkbox.addEventListener('change', () => {
     if (checkbox.checked) {
@@ -356,6 +372,7 @@ function updateSelectionState() {
   const hasSelection = selectedIds.size > 0;
   openNextButton.disabled = !hasSelection || busy;
   deleteSelectedButton.disabled = !hasSelection || busy;
+  selectAllInput.disabled = busy || !backups.length;
   selectAllInput.checked = backups.length > 0 && selectedIds.size === backups.length;
   selectAllInput.indeterminate = selectedIds.size > 0 && selectedIds.size < backups.length;
 }
@@ -409,7 +426,7 @@ async function runDeletion() {
       settings.risky_mode_enabled &&
       isRiskySessionActive(settings);
     if (expectAutomation) {
-      void showStatus('Running… see page console');
+      void showStatus('Running… see tab console');
     }
     const payload = backups
       .filter((item) => selectedIds.has(item.id))
