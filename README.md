@@ -33,3 +33,8 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 1. Open the **Debug** page and click **Scan now (stub)**.
 2. Observe the inline toast with the deterministic JSON payload (e.g., `{ scanned: 0, matched: 0, dryRun: true }`).
 3. Refresh the logs list to review the corresponding entries under the `scan` scope.
+
+## Connectivity test
+1. Navigate to [https://chatgpt.com](https://chatgpt.com) in the active browser tab.
+2. Open the extension’s **Debug** page and click **Connectivity test (chatgpt.com)**.
+3. Review the inline history for the most recent responses and cross-check the `scan` scope logs for the summarized ping result.

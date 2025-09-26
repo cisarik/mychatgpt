@@ -49,6 +49,46 @@ bootstrapStartup().catch(() => {
   /* Slovensky komentar: Zamedzi neodchytenemu odmietnutiu pri starte. */
 });
 
+/* Slovensky komentar: Ziska aktivnu kartu v aktuálnom okne. */
+function getActiveTab() {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message || 'tabs.query failed'));
+        return;
+      }
+      if (tabs && tabs.length) {
+        resolve(tabs[0]);
+      } else {
+        resolve(null);
+      }
+    });
+  });
+}
+
+/* Slovensky komentar: Odošle ping na obsahový skript a vrati odpoved. */
+function sendPingRequest(tabId, traceId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(
+      tabId,
+      {
+        type: 'ping',
+        traceId,
+        want: { url: true, title: true, markers: true }
+      },
+      (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(new Error(runtimeError.message || 'sendMessage failed'));
+          return;
+        }
+        resolve(response || null);
+      }
+    );
+  });
+}
+
 self.addEventListener('install', () => {
   /* Slovensky komentar: Okamzite aktivuje novu verziu. */
   self.skipWaiting();
@@ -97,6 +137,72 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           message: error && error.message
         });
         sendResponse({ ok: false, error: error && error.message });
+      }
+    })();
+    return true;
+  }
+  if (message && message.type === 'connectivity_test') {
+    (async () => {
+      const traceId = `ping:${Date.now()}`;
+      let activeTab = null;
+      let reasonCode = 'no_response';
+      try {
+        activeTab = await getActiveTab();
+      } catch (error) {
+        await Logger.log('info', 'scan', 'Connectivity ping result', {
+          reasonCode,
+          url: null,
+          title: null,
+          markers: null,
+          error: error && error.message
+        });
+        sendResponse({ ok: false, reasonCode, error: error && error.message });
+        return;
+      }
+
+      if (!activeTab || !activeTab.url || !activeTab.url.startsWith('https://chatgpt.com/')) {
+        reasonCode = 'no_match';
+        await Logger.log('info', 'scan', 'Connectivity ping result', {
+          reasonCode,
+          url: activeTab && activeTab.url ? activeTab.url : null,
+          title: activeTab && activeTab.title ? activeTab.title : null,
+          markers: null
+        });
+        sendResponse({ ok: false, reasonCode, error: 'Active tab is not chatgpt.com' });
+        return;
+      }
+
+      try {
+        const response = await sendPingRequest(activeTab.id, traceId);
+        if (response && response.ok) {
+          reasonCode = 'ping_ok';
+          await Logger.log('info', 'scan', 'Connectivity ping result', {
+            reasonCode,
+            url: response.url,
+            title: response.title,
+            markers: response.markers
+          });
+          sendResponse({ ok: true, reasonCode, payload: response });
+          return;
+        }
+        reasonCode = 'no_response';
+        await Logger.log('info', 'scan', 'Connectivity ping result', {
+          reasonCode,
+          url: activeTab.url,
+          title: activeTab.title || null,
+          markers: null
+        });
+        sendResponse({ ok: false, reasonCode, error: 'Content script did not respond' });
+      } catch (error) {
+        reasonCode = 'no_response';
+        await Logger.log('info', 'scan', 'Connectivity ping result', {
+          reasonCode,
+          url: activeTab.url,
+          title: activeTab.title || null,
+          markers: null,
+          error: error && error.message
+        });
+        sendResponse({ ok: false, reasonCode, error: error && error.message });
       }
     })();
     return true;

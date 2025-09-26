@@ -7,6 +7,8 @@
   const clearButton = document.getElementById('clear-btn');
   const scanButton = document.getElementById('scan-btn');
   const scanResultContainer = document.getElementById('scan-result');
+  const connectivityButton = document.getElementById('connectivity-btn');
+  const connectivityContainer = document.getElementById('connectivity-results');
 
   async function loadAndRenderLogs() {
     const filterValue = filterInput.value.trim().toLowerCase();
@@ -112,6 +114,62 @@
     } finally {
       scanButton.disabled = false;
       scanButton.textContent = originalLabel;
+    }
+  });
+
+  /* Slovensky komentar: Prida zaznam z konektivity do histórie. */
+  function appendConnectivityRecord(text) {
+    const block = document.createElement('div');
+    block.className = 'log-entry';
+    block.textContent = text;
+    connectivityContainer.prepend(block);
+    while (connectivityContainer.childElementCount > 5) {
+      connectivityContainer.removeChild(connectivityContainer.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Poziada background o test konektivity. */
+  function requestConnectivityTest() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'connectivity_test' }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(runtimeError);
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
+  connectivityButton.addEventListener('click', async () => {
+    const originalLabel = connectivityButton.textContent;
+    connectivityButton.disabled = true;
+    connectivityButton.textContent = 'Overujem…';
+    try {
+      const response = await requestConnectivityTest();
+      if (response && response.ok && response.payload) {
+        appendConnectivityRecord(`OK: ${JSON.stringify(response.payload)}`);
+        await Logger.log('info', 'debug', 'Connectivity test succeeded', {
+          reasonCode: response.reasonCode,
+          traceId: response.payload.traceId
+        });
+      } else {
+        const errorMessage = (response && response.error) || 'Neznáma chyba';
+        appendConnectivityRecord(`Chyba: ${errorMessage}`);
+        await Logger.log('warn', 'debug', 'Connectivity test returned warning', {
+          reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
+          message: errorMessage
+        });
+      }
+    } catch (error) {
+      appendConnectivityRecord(`Chyba: ${error && error.message}`);
+      await Logger.log('error', 'debug', 'Connectivity test request threw error', {
+        message: error && error.message
+      });
+    } finally {
+      connectivityButton.disabled = false;
+      connectivityButton.textContent = originalLabel;
     }
   });
 
