@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "MyChatGPT",
   "version": "0.2.5",
-  "description": "Keep ChatGPT history tidy with local backups, safe defaults, and transparent logging.",
+  "description": "Capture first turns locally and clean them via header-only automation.",
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -28,12 +28,6 @@
       "matches": ["https://chatgpt.com/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["utils.js", "automation/selectors.js"],
-      "matches": ["https://chatgpt.com/*"]
     }
   ]
 }
