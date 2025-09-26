@@ -1,23 +1,26 @@
-import { DEFAULT_SETTINGS, normalizeSettings } from '../utils.js';
+import { DEFAULT_SETTINGS, DeletionStrategyIds, normalizeSettings } from '../utils.js';
 
-const listHost = document.getElementById('backup-list');
-const selectionCountEl = document.getElementById('selection-count');
-const refreshButton = document.getElementById('refresh');
-const openSelectedButton = document.getElementById('open-selected');
-const deleteSelectedButton = document.getElementById('delete-selected');
+const tableBody = document.getElementById('backup-body');
+const selectAllInput = document.getElementById('select-all');
+const selectionCounter = document.getElementById('selection-counter');
+const openNextButton = document.getElementById('open-next-button');
+const refreshButton = document.getElementById('refresh-button');
+const scanButton = document.getElementById('scan-button');
+const emptyState = document.getElementById('empty-state');
 const settingsForm = document.getElementById('settings-form');
-const logsSection = document.getElementById('logs-section');
+const debugPanel = document.getElementById('debug-panel');
 const logsOutput = document.getElementById('logs-output');
 const refreshLogsButton = document.getElementById('refresh-logs');
 const clearLogsButton = document.getElementById('clear-logs');
+const statusRoot = document.getElementById('status-root');
 
 let backups = [];
 let selectedIds = new Set();
 let settings = { ...DEFAULT_SETTINGS };
 
-/**
- * Slovensky: Inicializácia udalostí a prvotné načítanie dát.
- */
+void bootstrap();
+
+/** Slovensky: Inicializuje rozhranie čističa. */
 async function bootstrap() {
   bindEvents();
   await loadSettings();
@@ -25,15 +28,19 @@ async function bootstrap() {
   updateSelectionState();
 }
 
+/** Slovensky: Naviaže udalosti na prvky UI. */
 function bindEvents() {
   refreshButton.addEventListener('click', () => {
     void loadBackups();
   });
-  openSelectedButton.addEventListener('click', () => {
+  scanButton.addEventListener('click', () => {
+    void requestManualScan();
+  });
+  openNextButton.addEventListener('click', () => {
     void openSelected();
   });
-  deleteSelectedButton.addEventListener('click', () => {
-    void deleteSelected();
+  selectAllInput.addEventListener('change', () => {
+    toggleSelectAll(selectAllInput.checked);
   });
   settingsForm.addEventListener('submit', (event) => {
     event.preventDefault();
@@ -47,6 +54,7 @@ function bindEvents() {
   });
 }
 
+/** Slovensky: Načíta nastavenia zo služby v pozadí. */
 async function loadSettings() {
   try {
     const response = await chrome.runtime.sendMessage({ type: 'GET_SETTINGS' });
@@ -57,69 +65,78 @@ async function loadSettings() {
     settings = { ...DEFAULT_SETTINGS };
   }
   applySettingsToForm();
-  toggleLogsSection();
+  toggleDebugPanel();
 }
 
+/** Slovensky: Aplikuje nastavenia do formulára. */
 function applySettingsToForm() {
   settingsForm.maxMessageCount.value = settings.maxMessageCount;
   settingsForm.maxAgeMinutes.value = settings.maxAgeMinutes;
   settingsForm.maxPromptLength.value = settings.maxPromptLength;
+  settingsForm.maxAnswerLength.value = settings.maxAnswerLength;
   settingsForm.batchSize.value = settings.batchSize;
-  settingsForm.debugEnabled.checked = Boolean(settings.debugEnabled);
-  refreshOpenButtonLabel();
+  settingsForm.deletionStrategyId.value = settings.deletionStrategyId || DeletionStrategyIds.MANUAL_OPEN;
+  settingsForm.debugLogs.checked = Boolean(settings.debugLogs);
+  updateBatchLabel();
 }
 
+/** Slovensky: Uloží nastavenia cez background. */
 async function saveSettings() {
-  const next = {
+  const update = {
     maxMessageCount: Number.parseInt(settingsForm.maxMessageCount.value, 10),
     maxAgeMinutes: Number.parseInt(settingsForm.maxAgeMinutes.value, 10),
     maxPromptLength: Number.parseInt(settingsForm.maxPromptLength.value, 10),
+    maxAnswerLength: Number.parseInt(settingsForm.maxAnswerLength.value, 10),
     batchSize: Number.parseInt(settingsForm.batchSize.value, 10),
-    debugEnabled: settingsForm.debugEnabled.checked
+    deletionStrategyId: settingsForm.deletionStrategyId.value,
+    debugLogs: settingsForm.debugLogs.checked
   };
-  const response = await chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', update: next });
+  const response = await chrome.runtime.sendMessage({ type: 'SAVE_SETTINGS', update });
   if (response?.ok) {
     settings = normalizeSettings(response.settings || {});
     applySettingsToForm();
-    toggleLogsSection();
+    toggleDebugPanel();
     await showStatus('Settings saved');
   } else {
     await showStatus('Failed to save settings');
   }
 }
 
-function toggleLogsSection() {
-  logsSection.hidden = !settings.debugEnabled;
-  if (!settings.debugEnabled) {
-    logsOutput.textContent = '(debug disabled)';
-  } else {
+/** Slovensky: Prepína panel debug logu. */
+function toggleDebugPanel() {
+  debugPanel.hidden = !settings.debugLogs;
+  if (settings.debugLogs) {
     void loadLogs();
+  } else {
+    logsOutput.textContent = '(debug disabled)';
   }
 }
 
-function refreshOpenButtonLabel() {
-  openSelectedButton.textContent = `Open next (${settings.batchSize})`;
+/** Slovensky: Aktualizuje text tlačidla pre otváranie dávky. */
+function updateBatchLabel() {
+  openNextButton.textContent = `Open next (${settings.batchSize})`;
 }
 
+/** Slovensky: Načíta uložené logy. */
 async function loadLogs() {
-  if (!settings.debugEnabled) {
+  if (!settings.debugLogs) {
     return;
   }
   const response = await chrome.runtime.sendMessage({ type: 'GET_LOGS' });
   if (response?.ok && Array.isArray(response.logs)) {
-    const formatted = response.logs
-      .map((entry) => formatLog(entry))
-      .join('\n');
+    const formatted = response.logs.map(formatLogEntry).join('\n');
     logsOutput.textContent = formatted || '(no entries)';
   }
 }
 
+/** Slovensky: Vymaže debug logy. */
 async function clearLogs() {
   await chrome.runtime.sendMessage({ type: 'CLEAR_LOGS' });
   logsOutput.textContent = '(cleared)';
 }
 
-function formatLog(entry) {
+/** Slovensky: Formátuje položku logu. */
+function formatLogEntry(entry) {
   const date = new Date(entry.timestamp || Date.now()).toISOString();
   const scope = entry.scope || 'general';
   const level = entry.level || 'info';
@@ -128,6 +145,7 @@ function formatLog(entry) {
   return `[${date}] [${level}] [${scope}] ${message}${meta}`;
 }
 
+/** Slovensky: Načíta zálohy z pozadia. */
 async function loadBackups() {
   const response = await chrome.runtime.sendMessage({ type: 'LIST_BACKUPS' });
   if (!response?.ok) {
@@ -138,31 +156,30 @@ async function loadBackups() {
   renderBackups();
 }
 
+/** Slovensky: Vyrenderuje tabuľku záloh. */
 function renderBackups() {
-  listHost.innerHTML = '';
+  tableBody.textContent = '';
   if (!backups.length) {
-    const empty = document.createElement('p');
-    empty.className = 'empty-state';
-    empty.textContent = 'No captured conversations yet.';
-    listHost.appendChild(empty);
+    emptyState.hidden = false;
     return;
   }
+  emptyState.hidden = true;
   const fragment = document.createDocumentFragment();
   backups.forEach((item) => {
-    const card = renderBackupCard(item);
-    fragment.appendChild(card);
+    fragment.appendChild(renderRow(item));
   });
-  listHost.appendChild(fragment);
-  syncSelectionWithList();
+  tableBody.appendChild(fragment);
+  syncSelection();
 }
 
-function renderBackupCard(item) {
-  const wrapper = document.createElement('article');
-  wrapper.className = 'backup-card';
+/** Slovensky: Vytvorí riadok tabuľky pre zálohu. */
+function renderRow(item) {
+  const row = document.createElement('tr');
+
+  const selectCell = document.createElement('td');
+  selectCell.className = 'col-select';
   const checkbox = document.createElement('input');
   checkbox.type = 'checkbox';
-  checkbox.className = 'backup-select';
-  checkbox.dataset.id = item.id;
   checkbox.checked = selectedIds.has(item.id);
   checkbox.addEventListener('change', () => {
     if (checkbox.checked) {
@@ -172,145 +189,168 @@ function renderBackupCard(item) {
     }
     updateSelectionState();
   });
+  selectCell.appendChild(checkbox);
 
-  const main = document.createElement('div');
-  main.className = 'backup-main';
+  const timeCell = document.createElement('td');
+  timeCell.className = 'col-time';
+  timeCell.textContent = formatTimestamp(item.createdAt || item.capturedAt);
 
-  const title = document.createElement('h3');
-  title.className = 'backup-title';
-  title.textContent = item.title || 'Untitled';
+  const promptCell = document.createElement('td');
+  promptCell.textContent = previewPrompt(item.userPrompt || '');
 
-  const meta = document.createElement('p');
-  meta.className = 'backup-meta';
-  const created = new Date(item.createdAt || item.timestamp || Date.now());
-  meta.textContent = `${created.toLocaleString()} • messages: ${item.messageCount ?? 0}`;
+  const backupCell = document.createElement('td');
+  backupCell.textContent = item.answerHTML ? 'Yes' : 'No';
 
-  const prompt = document.createElement('p');
-  prompt.className = 'backup-prompt';
-  prompt.textContent = item.questionText || '';
-
-  main.appendChild(title);
-  main.appendChild(meta);
-  if (prompt.textContent) {
-    main.appendChild(prompt);
-  }
-
-  const actions = document.createElement('div');
-  actions.className = 'backup-actions';
-
-  const openLink = document.createElement('a');
-  openLink.href = item.url || `https://chatgpt.com/c/${item.convoId}`;
-  openLink.target = '_blank';
-  openLink.rel = 'noopener noreferrer';
-  openLink.textContent = 'Open';
-  openLink.className = 'link-button';
-
+  const actionsCell = document.createElement('td');
+  actionsCell.className = 'col-actions';
+  const openButton = document.createElement('button');
+  openButton.type = 'button';
+  openButton.className = 'secondary';
+  openButton.textContent = 'Open';
+  openButton.addEventListener('click', () => {
+    void openLinks([item.url || `https://chatgpt.com/c/${item.convoId}`]);
+  });
   const exportButton = document.createElement('button');
   exportButton.type = 'button';
   exportButton.className = 'secondary';
   exportButton.textContent = 'Export';
+  exportButton.style.marginLeft = '6px';
   exportButton.addEventListener('click', () => {
     void exportBackup(item.id);
   });
-
   const deleteButton = document.createElement('button');
   deleteButton.type = 'button';
   deleteButton.className = 'secondary';
-  deleteButton.textContent = 'Delete';
+  deleteButton.textContent = 'Forget';
+  deleteButton.style.marginLeft = '6px';
   deleteButton.addEventListener('click', () => {
-    void deleteOne(item.id);
+    void deleteBackup(item.id);
   });
+  actionsCell.append(openButton, exportButton, deleteButton);
 
-  actions.appendChild(openLink);
-  actions.appendChild(exportButton);
-  actions.appendChild(deleteButton);
-
-  wrapper.appendChild(checkbox);
-  wrapper.appendChild(main);
-  wrapper.appendChild(actions);
-  return wrapper;
+  row.append(selectCell, timeCell, promptCell, backupCell, actionsCell);
+  return row;
 }
 
-function syncSelectionWithList() {
-  const availableIds = new Set(backups.map((item) => item.id));
+/** Slovensky: Formátuje čas pre zobrazenie. */
+function formatTimestamp(ms) {
+  const date = new Date(ms || Date.now());
+  return date.toLocaleString();
+}
+
+/** Slovensky: Reže prompt pre prehľadné zobrazenie. */
+function previewPrompt(prompt) {
+  const trimmed = prompt.trim();
+  if (trimmed.length <= 140) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, 137)}...`;
+}
+
+/** Slovensky: Synchronizuje výber so zoznamom záznamov. */
+function syncSelection() {
+  const validIds = new Set(backups.map((item) => item.id));
   selectedIds.forEach((id) => {
-    if (!availableIds.has(id)) {
+    if (!validIds.has(id)) {
       selectedIds.delete(id);
     }
   });
   updateSelectionState();
 }
 
+/** Slovensky: Aktualizuje stav vybraných riadkov. */
 function updateSelectionState() {
-  const count = selectedIds.size;
-  selectionCountEl.textContent = `${count} selected`;
-  openSelectedButton.disabled = count === 0;
-  deleteSelectedButton.disabled = count === 0;
+  selectionCounter.textContent = `${selectedIds.size} selected`;
+  openNextButton.disabled = selectedIds.size === 0;
+  selectAllInput.checked = backups.length > 0 && selectedIds.size === backups.length;
+  selectAllInput.indeterminate = selectedIds.size > 0 && selectedIds.size < backups.length;
 }
 
+/** Slovensky: Prepne výber všetkých záznamov. */
+function toggleSelectAll(checked) {
+  if (checked) {
+    backups.forEach((item) => selectedIds.add(item.id));
+  } else {
+    selectedIds.clear();
+  }
+  renderBackups();
+}
+
+/** Slovensky: Požiada background o otvorenie vybraných konverzácií. */
 async function openSelected() {
-  const ordered = backups
+  const urls = backups
     .filter((item) => selectedIds.has(item.id))
     .map((item) => item.url || `https://chatgpt.com/c/${item.convoId}`);
-  if (!ordered.length) {
-    return;
+  const opened = await openLinks(urls);
+  if (opened >= 0) {
+    await showStatus(`Opened ${opened} tab(s)`);
   }
-  const response = await chrome.runtime.sendMessage({ type: 'OPEN_BATCH', urls: ordered });
-  if (response?.ok) {
-    await showStatus(`Opened ${response.opened ?? 0} tabs`);
-  } else {
+}
+
+/** Slovensky: Pošle URLs na otvorenie do pozadia. */
+async function openLinks(urls) {
+  if (!urls.length) {
+    return 0;
+  }
+  const response = await chrome.runtime.sendMessage({ type: 'OPEN_NEXT', urls });
+  if (!response?.ok) {
     await showStatus('Unable to open tabs');
+    return -1;
   }
+  return Number(response.opened) || 0;
 }
 
-async function deleteSelected() {
-  const items = Array.from(selectedIds);
-  for (const id of items) {
-    await chrome.runtime.sendMessage({ type: 'DELETE_BACKUP', id });
-    selectedIds.delete(id);
-  }
-  await loadBackups();
-  await showStatus('Deleted selected backups');
-}
-
-async function deleteOne(id) {
-  await chrome.runtime.sendMessage({ type: 'DELETE_BACKUP', id });
-  selectedIds.delete(id);
-  await loadBackups();
-  await showStatus('Backup deleted');
-}
-
+/** Slovensky: Zavolá export konkrétnej zálohy. */
 async function exportBackup(id) {
   const response = await chrome.runtime.sendMessage({ type: 'EXPORT_BACKUP', id });
   if (!response?.ok) {
-    await showStatus('Failed to export');
+    await showStatus('Export failed');
     return;
   }
   const blob = new Blob([response.html], { type: 'text/html' });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = response.filename || 'backup.html';
-  document.body.appendChild(a);
-  a.click();
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = response.filename || 'chat.html';
+  document.body.appendChild(anchor);
+  anchor.click();
   setTimeout(() => {
     URL.revokeObjectURL(url);
-    a.remove();
+    anchor.remove();
   }, 0);
 }
 
-async function showStatus(text) {
-  const banner = document.createElement('div');
-  banner.className = 'toast inline';
-  banner.textContent = text;
-  document.body.appendChild(banner);
-  setTimeout(() => {
-    banner.classList.add('show');
-  }, 10);
-  setTimeout(() => {
-    banner.classList.remove('show');
-    banner.remove();
-  }, 2000);
+/** Slovensky: Odstráni miestnu zálohu. */
+async function deleteBackup(id) {
+  await chrome.runtime.sendMessage({ type: 'DELETE_BACKUP', id });
+  selectedIds.delete(id);
+  await loadBackups();
+  await showStatus('Backup forgotten');
 }
 
-void bootstrap();
+/** Slovensky: Vyžiada manuálny scan otvorených tabov. */
+async function requestManualScan() {
+  const response = await chrome.runtime.sendMessage({ type: 'REQUEST_SCAN' });
+  if (response?.ok) {
+    await showStatus(`Scan requested (${response.dispatched || 0} tab(s))`);
+  } else {
+    await showStatus('Unable to trigger scan');
+  }
+}
+
+/** Slovensky: Zobrazí krátke toast hlásenie. */
+async function showStatus(text) {
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+  toast.textContent = text;
+  statusRoot.appendChild(toast);
+  requestAnimationFrame(() => {
+    toast.classList.add('show');
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1800));
+  toast.classList.remove('show');
+  setTimeout(() => {
+    toast.remove();
+  }, 200);
+}
+

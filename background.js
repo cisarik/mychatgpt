@@ -1,7 +1,10 @@
 import { initDb, backups } from './db.js';
 import {
   clearLogs,
+  createDisabledAutomationStrategy,
+  createManualOpenStrategy,
   DEFAULT_SETTINGS,
+  DeletionStrategyIds,
   getLogs,
   log,
   LogLevel,
@@ -9,21 +12,26 @@ import {
   normalizeSettings,
   passesHeuristics,
   sanitizeHTML,
-  SETTINGS_KEY
+  SETTINGS_KEY,
+  sleep
 } from './utils.js';
 
 let settingsCache = { ...DEFAULT_SETTINGS };
-const ready = bootstrap();
+const bootstrapReady = bootstrap();
+const recentlyOpened = new Map();
 
+/**
+ * Slovensky: Štartuje pozadie – DB, nastavenia a log.
+ */
 async function bootstrap() {
   await initDb();
   await ensureSettingsLoaded();
   chrome.storage.onChanged.addListener(handleSettingsChange);
-  await log(LogLevel.INFO, 'background', 'Cleaner booted');
+  await log(LogLevel.INFO, 'background', 'Search Cleaner ready');
 }
 
 /**
- * Slovensky: Načíta nastavenia, ak ešte nie sú pripravené.
+ * Slovensky: Načíta nastavenia zo storage.
  */
 async function ensureSettingsLoaded() {
   const stored = await chrome.storage.local.get([SETTINGS_KEY]);
@@ -32,9 +40,8 @@ async function ensureSettingsLoaded() {
     settingsCache = { ...DEFAULT_SETTINGS };
     return;
   }
-  const normalized = normalizeSettings(stored[SETTINGS_KEY]);
-  settingsCache = normalized;
-  await chrome.storage.local.set({ [SETTINGS_KEY]: normalized });
+  settingsCache = normalizeSettings(stored[SETTINGS_KEY]);
+  await chrome.storage.local.set({ [SETTINGS_KEY]: settingsCache });
 }
 
 function handleSettingsChange(changes, area) {
@@ -53,15 +60,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
   (async () => {
-    await ready;
+    await bootstrapReady;
     switch (message.type) {
       case 'CANDIDATE_CONVERSATION':
         return handleCandidate(message.payload || {}, sender);
       case 'LIST_BACKUPS':
-        return { ok: true, items: await backups.list() };
+        return listBackups();
       case 'DELETE_BACKUP':
-        await backups.remove(message.id);
-        return { ok: true };
+        return deleteBackup(message.id);
       case 'EXPORT_BACKUP':
         return exportBackup(message.id);
       case 'GET_SETTINGS':
@@ -73,81 +79,73 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'CLEAR_LOGS':
         await clearLogs();
         return { ok: true };
-      case 'OPEN_BATCH':
-        return openBatch(message.urls || []);
+      case 'OPEN_NEXT':
+        return openNext(message.urls || []);
+      case 'REQUEST_SCAN':
+        return triggerScan();
       default:
         return { ok: false, error: 'unsupported_message' };
     }
   })()
-    .then((response) => {
-      sendResponse(response || { ok: true });
-    })
-    .catch((error) => {
-      sendResponse({ ok: false, error: error?.message || 'unexpected_error' });
-    });
+    .then((response) => sendResponse(response || { ok: true }))
+    .catch((error) => sendResponse({ ok: false, error: error?.message || 'unexpected_error' }));
   return true;
 });
 
+/**
+ * Slovensky: Spracuje zachytený kandidát z content skriptu.
+ */
 async function handleCandidate(candidate, sender) {
   const cleaned = sanitizeCandidate(candidate, sender);
   if (!cleaned) {
-    return { ok: false, rejected: 'invalid_candidate' };
+    return { ok: false, rejected: ['invalid_candidate'] };
   }
   const heuristic = passesHeuristics(cleaned, settingsCache);
   if (!heuristic.allowed) {
-    await log(LogLevel.INFO, 'capture', 'Rejected by heuristics', {
+    await log(LogLevel.INFO, 'capture', 'Candidate rejected', {
       convoId: cleaned.convoId,
       reasons: heuristic.reasons
     });
     return { ok: false, rejected: heuristic.reasons };
   }
-  const existing = await backups.byConvoId(cleaned.convoId);
-  const record = await backups.save({
-    id: existing?.id || cleaned.convoId,
-    convoId: cleaned.convoId,
-    title: cleaned.title,
-    userPrompt: cleaned.userPrompt,
-    answerHTML: sanitizeHTML(cleaned.firstAnswerHTML),
-    createdAt: cleaned.createdAt,
-    capturedAt: cleaned.capturedAt,
-    messageCount: cleaned.messageCount,
-    url: cleaned.url
-  });
+  const stored = await backups.save(cleaned);
   await log(LogLevel.INFO, 'capture', 'Backup stored', {
-    convoId: record.convoId,
-    updated: Boolean(existing)
+    convoId: stored.convoId,
+    createdAt: stored.createdAt,
+    capturedAt: stored.capturedAt
   });
-  return { ok: true, stored: record, updated: Boolean(existing) };
+  return { ok: true, stored };
 }
 
+/** Slovensky: Vyčistí surové dáta kandidáta. */
 function sanitizeCandidate(candidate, sender) {
-  const url = typeof candidate?.url === 'string' ? candidate.url : sender?.tab?.url;
-  const convoId = candidate?.convoId || (url ? extractConvoId(url) : null);
+  const baseUrl = typeof candidate?.url === 'string' ? candidate.url : sender?.tab?.url;
+  const convoId = candidate?.convoId || extractConvoId(baseUrl);
   if (!convoId) {
     return null;
   }
   const userPrompt = (candidate?.userPrompt || '').trim();
-  const firstAnswerHTML = candidate?.firstAnswerHTML || '';
-  if (!userPrompt || !firstAnswerHTML) {
+  const answerHTML = sanitizeHTML(candidate?.firstAnswerHTML || candidate?.answerHTML || '');
+  if (!userPrompt || !answerHTML) {
     return null;
   }
   const createdAt = Number.isFinite(candidate?.createdAt) ? candidate.createdAt : Date.now();
-  const capturedAt = Number.isFinite(candidate?.capturedAt) ? candidate.capturedAt : Date.now();
+  const capturedAt = Date.now();
   return {
     convoId,
-    url: normalizeChatUrl(url) || `https://chatgpt.com/c/${convoId}`,
+    url: normalizeChatUrl(baseUrl) || `https://chatgpt.com/c/${convoId}`,
     userPrompt,
-    firstAnswerHTML,
+    answerHTML,
     createdAt,
     capturedAt,
-    messageCount: Number.isFinite(candidate?.messageCount) ? candidate.messageCount : 0,
-    title: buildTitleFromPrompt(userPrompt)
+    messageCount: Number.isFinite(candidate?.messageCount) ? candidate.messageCount : 0
   };
 }
 
+/** Slovensky: Z URL vytiahne ID konverzácie. */
 function extractConvoId(url) {
   try {
-    const parsed = new URL(url, 'https://chatgpt.com');
+    const parsed = new URL(url || '', 'https://chatgpt.com');
     const parts = parsed.pathname.split('/').filter(Boolean);
     if (parts[0] === 'c' && parts[1]) {
       return parts[1];
@@ -158,23 +156,17 @@ function extractConvoId(url) {
   }
 }
 
-function buildTitleFromPrompt(prompt) {
-  if (!prompt) {
-    return 'Search backup';
-  }
-  const trimmed = prompt.trim();
-  if (trimmed.length <= 80) {
-    return trimmed;
-  }
-  return `${trimmed.slice(0, 77)}...`;
+async function listBackups() {
+  const items = await backups.list();
+  return { ok: true, items };
 }
 
-async function saveSettings(update) {
-  const next = normalizeSettings({ ...settingsCache, ...update });
-  settingsCache = next;
-  await chrome.storage.local.set({ [SETTINGS_KEY]: next });
-  await log(LogLevel.INFO, 'settings', 'Settings updated', next);
-  return { ok: true, settings: next };
+async function deleteBackup(id) {
+  if (!id) {
+    return { ok: false, error: 'missing_id' };
+  }
+  await backups.remove(id);
+  return { ok: true };
 }
 
 async function exportBackup(id) {
@@ -186,26 +178,31 @@ async function exportBackup(id) {
     return { ok: false, error: 'not_found' };
   }
   const html = buildExportHtml(record);
+  const safeTitle = sanitizeFilename(record.title || 'chat');
   return {
     ok: true,
     html,
-    filename: `${record.title || 'chat'}-${record.id}.html`
+    filename: `${safeTitle}-${record.id}.html`
   };
 }
 
+/** Slovensky: Postaví jednoduchý HTML export. */
 function buildExportHtml(record) {
   const title = escapeHtml(record.title || 'Search backup');
-  const prompt = escapeHtml(record.questionText || '');
-  const created = new Date(record.createdAt || record.timestamp || Date.now()).toISOString();
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8" />` +
+  const prompt = escapeHtml(record.userPrompt || '');
+  const created = new Date(record.createdAt || record.capturedAt || Date.now()).toISOString();
+  return (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8" />' +
     `<title>${title}</title></head><body><main>` +
     `<h1>${title}</h1>` +
     `<section><h2>User prompt</h2><pre>${prompt}</pre></section>` +
     `<section><h2>Assistant</h2>${record.answerHTML || ''}</section>` +
     `<footer><p>Captured at: ${created}</p></footer>` +
-    `</main></body></html>`;
+    '</main></body></html>'
+  );
 }
 
+/** Slovensky: Escapuje HTML znaky. */
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -213,28 +210,115 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;');
 }
 
-async function openBatch(urls) {
-  if (!Array.isArray(urls) || !urls.length) {
-    return { ok: false, error: 'empty_batch' };
-  }
-  const normalizedUrls = urls
-    .map((url) => normalizeChatUrl(url))
-    .filter((url) => Boolean(url));
-  if (!normalizedUrls.length) {
-    return { ok: false, error: 'invalid_urls' };
-  }
-  const unique = Array.from(new Set(normalizedUrls));
-  const limit = Math.max(1, settingsCache.batchSize || DEFAULT_SETTINGS.batchSize);
-  const slice = unique.slice(0, limit);
-  const openable = await filterExistingTabs(slice);
-  await Promise.all(openable.map((url) => chrome.tabs.create({ url, active: false })));
-  await log(LogLevel.INFO, 'batch', 'Tabs opened', { count: openable.length });
-  return { ok: true, opened: openable.length };
+/** Slovensky: Uprace názov súboru pre export. */
+function sanitizeFilename(value) {
+  return String(value)
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-_]/g, '')
+    .slice(0, 64) || 'chat';
 }
 
-async function filterExistingTabs(urls) {
+async function saveSettings(update) {
+  const next = normalizeSettings({ ...settingsCache, ...update });
+  settingsCache = next;
+  await chrome.storage.local.set({ [SETTINGS_KEY]: next });
+  await log(LogLevel.INFO, 'settings', 'Settings updated', next);
+  return { ok: true, settings: next };
+}
+
+/** Slovensky: Otvorí ďalšiu dávku vybraných konverzácií. */
+async function openNext(urls) {
+  const normalized = Array.isArray(urls)
+    ? urls
+        .map((url) => normalizeChatUrl(url))
+        .filter((url) => Boolean(url))
+    : [];
+  if (!normalized.length) {
+    return { ok: false, error: 'empty_batch' };
+  }
+  const unique = Array.from(new Set(normalized)).filter((url) => !recentlyOpened.has(url));
+  if (!unique.length) {
+    return { ok: true, opened: 0 };
+  }
+  const limit = Math.max(1, settingsCache.batchSize || DEFAULT_SETTINGS.batchSize);
+  const slice = unique.slice(0, limit);
+  const openable = await filterAvailableTabs(slice);
+  if (!openable.length) {
+    return { ok: true, opened: 0 };
+  }
+  const strategy = selectStrategy(settingsCache.deletionStrategyId);
+  let report;
+  try {
+    report = await strategy.deleteMany(openable);
+  } catch (error) {
+    if (strategy.id === DeletionStrategyIds.UI_AUTOMATION) {
+      const fallback = selectStrategy(DeletionStrategyIds.MANUAL_OPEN);
+      report = await fallback.deleteMany(openable);
+      await log(LogLevel.WARN, 'batch', 'Automation strategy unavailable, used manual fallback', { error: error?.message });
+    } else {
+      throw error;
+    }
+  }
+  report.notes.forEach((note) => {
+    log(LogLevel.WARN, 'batch', 'Open batch note', { note }).catch(() => {});
+  });
+  return { ok: true, opened: report.opened };
+}
+
+/** Slovensky: Odfiltruje už otvorené konverzácie. */
+async function filterAvailableTabs(urls) {
   const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
   const openSet = new Set(tabs.map((tab) => normalizeChatUrl(tab.url)).filter(Boolean));
   return urls.filter((url) => !openSet.has(url));
+}
+
+/** Slovensky: Vyberie vhodnú mazaciu strategiu (aktuálne len manuál). */
+function selectStrategy(requestedId) {
+  const opener = async (url) => {
+    const delay = 150 + Math.floor(Math.random() * 100);
+    await sleep(delay);
+    await chrome.tabs.create({ url, active: false });
+    markOpened(url);
+  };
+  const manual = createManualOpenStrategy(opener);
+  if (requestedId === DeletionStrategyIds.UI_AUTOMATION) {
+    return createDisabledAutomationStrategy();
+  }
+  return manual;
+}
+
+/** Slovensky: Označí URL ako nedávno otvorenú kvôli anti-duplikátu. */
+function markOpened(url) {
+  const normalized = normalizeChatUrl(url);
+  if (!normalized) {
+    return;
+  }
+  if (recentlyOpened.has(normalized)) {
+    clearTimeout(recentlyOpened.get(normalized));
+  }
+  const timer = setTimeout(() => recentlyOpened.delete(normalized), 60000);
+  recentlyOpened.set(normalized, timer);
+}
+
+/** Slovensky: Pošle obsahovým skriptom požiadavku na manuálny scan. */
+async function triggerScan() {
+  const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+  let dispatched = 0;
+  await Promise.all(
+    tabs.map(async (tab) => {
+      if (!tab.id) {
+        return;
+      }
+      try {
+        await chrome.tabs.sendMessage(tab.id, { type: 'RUN_CAPTURE_NOW' });
+        dispatched += 1;
+      } catch (_error) {
+        // Content skript nemusí byť injektovaný; ignorujeme.
+      }
+    })
+  );
+  await log(LogLevel.INFO, 'scan', 'Manual scan requested', { dispatched });
+  return { ok: true, dispatched };
 }
 
