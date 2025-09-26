@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MyChatGPT Debug</title>
+  <link rel="stylesheet" href="../styles.css" />
+  <style>
+    /* Slovensky komentar: Lokalna uprava pre zoznam logov. */
+    #logs {
+      display: grid;
+      gap: 8px;
+      margin-top: 16px;
+      max-height: 60vh;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+
+    .log-entry {
+      border: 1px solid rgba(0, 0, 0, 0.1);
+      border-radius: 4px;
+      padding: 8px;
+      background: rgba(0, 0, 0, 0.03);
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <h1>Debug logs</h1>
+  <label>
+    Filter text:
+    <input id="filter-input" type="text" placeholder="Filter logs" />
+  </label>
+  <div style="margin-top: 8px; display: flex; gap: 8px; align-items: center;">
+    <button id="refresh-btn">Refresh</button>
+    <button id="export-btn">Export debug</button>
+    <button id="clear-btn">Clear logs</button>
+  </div>
+  <div id="logs" aria-live="polite"></div>
+
+  <script src="../utils.js"></script>
+  <script src="debug.js"></script>
+</body>
+</html>

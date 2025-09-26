@@ -1,0 +1,15 @@
+/* Slovensky komentar: Styly specificke pre popup okno. */
+body {
+  width: 320px;
+  min-height: 220px;
+}
+
+.debug-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.debug-actions a {
+  text-decoration: none;
+}
