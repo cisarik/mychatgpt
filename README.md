@@ -33,6 +33,7 @@ Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use the **
 | `AUTO_SCAN` | `false` | Enables background scanning when supported. |
 | `MAX_MESSAGES` | `2` | Maximum total messages captured per conversation. |
 | `USER_MESSAGES_MAX` | `2` | Maximum user-authored messages retained. |
+| `SCAN_COOLDOWN_MIN` | `5` | Minimum minutes between automated heuristics scans. |
 | `SAFE_URL_PATTERNS` | `['/workspaces','/projects','/new-project']` | Allowed path patterns for scanning. |
 
 Settings persist under `chrome.storage.local` key `settings_v1`. The settings page automatically validates loaded values and heals any missing/invalid fields back to defaults, marking corrected inputs with a subtle “(opravené)” hint. Use the **Resetovať na defaulty** button to repopulate the form with the defaults before saving.
@@ -54,3 +55,9 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 2. Click **Probe metadata (read-only)** to request a deterministic snapshot of the current tab.
 3. If the active URL matches any entry under `SAFE_URL_PATTERNS`, the probe is skipped with a clear notice so you can adjust the page or pattern list.
 4. Successful probes return the resolved URL, title, conversation ID (if present), heuristic message counts, and UI markers that feed future `MAX_MESSAGES` controls.
+
+## Heuristics V1 & Cooldown
+- The background worker exposes **Evaluate heuristics (active tab)** on the debug page to score the active ChatGPT conversation without mutating the DOM or touching IndexedDB.
+- SAFE URL patterns always bypass the heuristic, while candidates require `counts.total ≤ MAX_MESSAGES` and, when available, `counts.user ≤ USER_MESSAGES_MAX`. Unknown totals defer the decision.
+- Reason codes reported to logs/debug history include: `candidate_ok`, `over_max` (including user limit breaches), `safe_url`, `counts_unknown`, and `no_probe` when the metadata probe is unavailable.
+- Every evaluation updates `cooldown_v1.lastScanAt`. Auto-scans will respect `SCAN_COOLDOWN_MIN` minutes before re-running, while the manual debug button surfaces whether the cooldown would still delay an automated pass.

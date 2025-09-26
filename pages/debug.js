@@ -11,6 +11,8 @@
   const connectivityContainer = document.getElementById('connectivity-results');
   const probeButton = document.getElementById('probe-btn');
   const metadataContainer = document.getElementById('metadata-results');
+  const heuristicsButton = document.getElementById('heuristics-btn');
+  const heuristicsContainer = document.getElementById('heuristics-results');
 
   async function loadAndRenderLogs() {
     const filterValue = filterInput.value.trim().toLowerCase();
@@ -238,6 +240,76 @@
       } finally {
         probeButton.disabled = false;
         probeButton.textContent = originalLabel;
+      }
+    });
+  }
+
+  /* Slovensky komentar: Prida zaznam o heuristike do historie. */
+  function appendHeuristicsRecord(text) {
+    if (!heuristicsContainer) {
+      return;
+    }
+    const block = document.createElement('div');
+    block.className = 'log-entry';
+    block.textContent = text;
+    heuristicsContainer.prepend(block);
+    while (heuristicsContainer.childElementCount > 5) {
+      heuristicsContainer.removeChild(heuristicsContainer.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Poziada background o vyhodnotenie heuristiky. */
+  function requestHeuristicsEvaluation() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'heuristics_eval' }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(runtimeError);
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
+  if (heuristicsButton) {
+    heuristicsButton.addEventListener('click', async () => {
+      const originalLabel = heuristicsButton.textContent;
+      heuristicsButton.disabled = true;
+      heuristicsButton.textContent = 'Evaluating…';
+      try {
+        const response = await requestHeuristicsEvaluation();
+        const timestamp = new Date().toLocaleTimeString();
+        if (response && response.decision) {
+          const decision = response.decision;
+          const reasons = decision.reasonCodes && decision.reasonCodes.length ? decision.reasonCodes.join(', ') : 'none';
+          const countsText = JSON.stringify(decision.snapshot && decision.snapshot.counts ? decision.snapshot.counts : {});
+          const candidateText = decision.decided ? `candidate=${decision.isCandidate}` : 'candidate=undecided';
+          const cooldown = response.cooldown || { wouldWait: false, remainingMs: 0 };
+          const cooldownText = `autoCooldown=${cooldown.wouldWait ? `wait ${cooldown.remainingMs}ms` : 'ready'}`;
+          appendHeuristicsRecord(`[${timestamp}] ${candidateText}; reasons=[${reasons}]; counts=${countsText}; ${cooldownText}`);
+          await Logger.log('info', 'debug', 'Heuristics evaluation invoked manually', {
+            reasonCode: response.reasonCode,
+            candidate: decision.isCandidate,
+            decided: decision.decided,
+            reasonCodes: decision.reasonCodes,
+            cooldown
+          });
+        } else {
+          const reason = response && response.reasonCode ? response.reasonCode : 'unknown';
+          appendHeuristicsRecord(`[${timestamp}] Heuristics failed: ${reason}`);
+          await Logger.log('warn', 'debug', 'Heuristics evaluation returned warning', {
+            reasonCode: reason
+          });
+        }
+      } catch (error) {
+        appendHeuristicsRecord(`Heuristics error: ${error && error.message}`);
+        await Logger.log('error', 'debug', 'Heuristics evaluation request threw error', {
+          message: error && error.message
+        });
+      } finally {
+        heuristicsButton.disabled = false;
+        heuristicsButton.textContent = originalLabel;
       }
     });
   }

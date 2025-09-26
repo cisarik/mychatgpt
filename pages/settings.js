@@ -30,6 +30,7 @@
     form.AUTO_SCAN.checked = Boolean(settings.AUTO_SCAN);
     form.MAX_MESSAGES.value = settings.MAX_MESSAGES;
     form.USER_MESSAGES_MAX.value = settings.USER_MESSAGES_MAX;
+    form.SCAN_COOLDOWN_MIN.value = settings.SCAN_COOLDOWN_MIN;
     form.SAFE_URL_PATTERNS.value = settings.SAFE_URL_PATTERNS.join('\n');
   }
 
@@ -46,6 +47,7 @@
       AUTO_SCAN: form.AUTO_SCAN.checked,
       MAX_MESSAGES: Number(form.MAX_MESSAGES.value),
       USER_MESSAGES_MAX: Number(form.USER_MESSAGES_MAX.value),
+      SCAN_COOLDOWN_MIN: Number(form.SCAN_COOLDOWN_MIN.value),
       SAFE_URL_PATTERNS: patterns
     };
   }

@@ -2,6 +2,7 @@
 const LOG_STORAGE_KEY = 'debug_logs';
 const MAX_LOG_RECORDS = 500;
 const SETTINGS_STORAGE_KEY = 'settings_v1';
+const COOLDOWN_STORAGE_KEY = 'cooldown_v1';
 
 /* Slovensky komentar: Predvolene nastavenia pre funkcionalitu extension. */
 const DEFAULT_SETTINGS = Object.freeze({
@@ -11,7 +12,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   AUTO_SCAN: false,
   MAX_MESSAGES: 2,
   USER_MESSAGES_MAX: 2,
-  SAFE_URL_PATTERNS: ['/workspaces', '/projects', '/new-project']
+  SAFE_URL_PATTERNS: ['/workspaces', '/projects', '/new-project'],
+  SCAN_COOLDOWN_MIN: 5
 });
 
 /* Slovensky komentar: Ziska referenciu na globalny objekt pre rozne prostredia. */
@@ -81,7 +83,8 @@ function sanitizeSettings(rawSettings) {
 
   const intFields = [
     { key: 'MAX_MESSAGES', min: 1 },
-    { key: 'USER_MESSAGES_MAX', min: 1 }
+    { key: 'USER_MESSAGES_MAX', min: 1 },
+    { key: 'SCAN_COOLDOWN_MIN', min: 1 }
   ];
   intFields.forEach(({ key, min }) => {
     const value = rawSettings[key];
@@ -104,6 +107,21 @@ function sanitizeSettings(rawSettings) {
 
   const healedList = Array.from(healedFields);
   return { settings: result, healedFields: healedList };
+}
+
+/* Slovensky komentar: Vypocita, ci este plati cooldown interval. */
+function shouldCooldown(lastMs, minutes) {
+  if (!Number.isFinite(lastMs) || !Number.isFinite(minutes) || minutes <= 0) {
+    return { cooldown: false, remainingMs: 0 };
+  }
+  const now = Date.now();
+  const intervalMs = minutes * 60 * 1000;
+  const elapsed = now - lastMs;
+  if (elapsed >= intervalMs) {
+    return { cooldown: false, remainingMs: 0 };
+  }
+  const remainingMs = Math.max(0, intervalMs - elapsed);
+  return { cooldown: true, remainingMs };
 }
 
 /* Slovensky komentar: Nacita nastavenia a vykona automaticke opravy. */
@@ -170,3 +188,5 @@ function urlMatchesAnyPattern(url, patterns) {
 globalTarget.Logger = Logger;
 globalTarget.SettingsStore = SettingsStore;
 globalTarget.urlMatchesAnyPattern = urlMatchesAnyPattern;
+globalTarget.shouldCooldown = shouldCooldown;
+globalTarget.COOLDOWN_STORAGE_KEY = COOLDOWN_STORAGE_KEY;
