@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Search Cleaner</title>
+    <link rel="stylesheet" href="../styles.css" />
+  </head>
+  <body>
+    <main class="cleaner-page">
+      <header class="cleaner-header">
+        <div>
+          <h1>Search Cleaner</h1>
+          <p class="subtitle">Short conversations backed up locally for manual cleanup.</p>
+        </div>
+        <div class="header-actions">
+          <button id="refresh" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <section class="list-tools">
+        <div class="selection-info">
+          <span id="selection-count">0 selected</span>
+        </div>
+        <div class="tool-buttons">
+          <button id="open-selected" type="button">Open next</button>
+          <button id="delete-selected" type="button" class="secondary">Delete</button>
+        </div>
+      </section>
+
+      <section class="backup-list" id="backup-list" aria-live="polite"></section>
+
+      <section class="settings" aria-labelledby="settings-heading">
+        <h2 id="settings-heading">Settings</h2>
+        <form id="settings-form">
+          <div class="setting-field">
+            <label for="maxMessageCount">Max message count</label>
+            <input id="maxMessageCount" name="maxMessageCount" type="number" min="1" max="6" />
+          </div>
+          <div class="setting-field">
+            <label for="maxAgeMinutes">Max age (minutes)</label>
+            <input id="maxAgeMinutes" name="maxAgeMinutes" type="number" min="1" max="60" />
+          </div>
+          <div class="setting-field">
+            <label for="maxPromptLength">Max prompt length</label>
+            <input id="maxPromptLength" name="maxPromptLength" type="number" min="40" max="1000" />
+          </div>
+          <div class="setting-field">
+            <label for="batchSize">Open batch size</label>
+            <input id="batchSize" name="batchSize" type="number" min="1" max="10" />
+          </div>
+          <div class="setting-field checkbox-field">
+            <label for="debugEnabled">Debug logging</label>
+            <input id="debugEnabled" name="debugEnabled" type="checkbox" />
+          </div>
+          <div class="setting-actions">
+            <button type="submit">Save settings</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="logs" id="logs-section" hidden aria-live="polite">
+        <div class="logs-header">
+          <h2>Debug logs</h2>
+          <div class="tool-buttons">
+            <button id="refresh-logs" type="button" class="secondary">Refresh logs</button>
+            <button id="clear-logs" type="button" class="secondary">Clear logs</button>
+          </div>
+        </div>
+        <pre class="logs-output" id="logs-output">(debug disabled)</pre>
+      </section>
+    </main>
+    <script type="module" src="cleaner.js"></script>
+  </body>
+</html>

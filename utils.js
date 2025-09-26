@@ -1,190 +1,108 @@
-const LOG_KEY = 'debug_logs';
-const LOG_LIMIT = 500;
+const LOG_KEY = 'cleaner_logs';
+const LOG_LIMIT = 120;
+
+export const SETTINGS_KEY = 'cleaner_settings';
+
+export const DEFAULT_SETTINGS = Object.freeze({
+  debugEnabled: false,
+  maxMessageCount: 2,
+  maxAgeMinutes: 10,
+  maxPromptLength: 280,
+  batchSize: 5
+});
 
 export const LogLevel = Object.freeze({
-  TRACE: 'trace',
-  DEBUG: 'debug',
   INFO: 'info',
   WARN: 'warn',
   ERROR: 'error'
 });
 
-const LEVEL_PRIORITY = {
-  [LogLevel.TRACE]: 0,
-  [LogLevel.DEBUG]: 1,
-  [LogLevel.INFO]: 2,
-  [LogLevel.WARN]: 3,
-  [LogLevel.ERROR]: 4
-};
+let debugCache = false;
+let debugReady = false;
+let debugWaiter = null;
 
-let cachedLevel = LogLevel.INFO;
-let cacheInitialized = false;
-let cachePromise = null;
-
-function normalizeLevel(value) {
-  if (typeof value === 'string') {
-    const lowered = value.toLowerCase();
-    if (lowered in LEVEL_PRIORITY) {
-      return lowered;
-    }
+/**
+ * Slovensky: Zabezpečí načítanie flagu debugEnabled zo storage.
+ */
+async function ensureDebugState() {
+  if (debugReady) {
+    return debugCache;
   }
-  if (typeof value === 'number') {
-    const matched = Object.entries(LEVEL_PRIORITY).find(([, priority]) => priority === value);
-    if (matched) {
-      return matched[0];
-    }
+  if (debugWaiter) {
+    await debugWaiter;
+    return debugCache;
   }
-  return LogLevel.INFO;
-}
-
-async function ensureLevelCache() {
-  if (cacheInitialized) {
-    return cachedLevel;
-  }
-  if (cachePromise) {
-    await cachePromise;
-    return cachedLevel;
-  }
-  cachePromise = (async () => {
+  debugWaiter = (async () => {
     try {
-      const { settings } = await chrome.storage.local.get(['settings']);
-      if (settings && settings.DEBUG_LEVEL) {
-        cachedLevel = normalizeLevel(settings.DEBUG_LEVEL);
-      }
-    } catch (error) {
-      console.warn('MyChatGPT log level read failed', error);
+      const stored = await chrome.storage.local.get([SETTINGS_KEY]);
+      const settings = normalizeSettings(stored?.[SETTINGS_KEY]);
+      debugCache = Boolean(settings.debugEnabled);
+    } catch (_error) {
+      debugCache = false;
     } finally {
-      cacheInitialized = true;
-      cachePromise = null;
+      debugReady = true;
+      debugWaiter = null;
     }
   })();
-  await cachePromise;
-  return cachedLevel;
+  await debugWaiter;
+  return debugCache;
 }
 
 if (chrome?.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local' || !changes.settings) {
+    if (area !== 'local' || !changes[SETTINGS_KEY]) {
       return;
     }
-    const nextLevel = normalizeLevel(changes.settings.newValue?.DEBUG_LEVEL);
-    cachedLevel = nextLevel;
-    cacheInitialized = true;
+    const nextValue = normalizeSettings(changes[SETTINGS_KEY]?.newValue);
+    debugCache = Boolean(nextValue.debugEnabled);
+    debugReady = true;
   });
 }
 
-async function shouldLog(level) {
-  await ensureLevelCache();
-  const activePriority = LEVEL_PRIORITY[cachedLevel] ?? LEVEL_PRIORITY[LogLevel.INFO];
-  const requestedPriority = LEVEL_PRIORITY[level] ?? LEVEL_PRIORITY[LogLevel.INFO];
-  return requestedPriority >= activePriority;
-}
-
-function serializeError(err) {
-  if (!err) {
-    return null;
-  }
-  if (typeof err === 'string') {
-    return { name: 'Error', message: err, stack: null };
-  }
-  return {
-    name: err.name || 'Error',
-    message: err.message || String(err),
-    stack: err.stack || null
-  };
-}
-
-function appendToConsole(level, scope, msg, entry) {
-  const method = level === LogLevel.ERROR ? 'error' : level === LogLevel.WARN ? 'warn' : 'log';
-  const fn = console[method] || console.log;
-  try {
-    fn.call(console, `[${scope}] ${msg}`, entry.meta || '', entry.err || '');
-  } catch (_error) {
-    // ignore console failures
-  }
-}
-
-async function persistLogEntry(entry) {
-  const stored = await chrome.storage.local.get([LOG_KEY]);
-  const current = Array.isArray(stored[LOG_KEY]) ? stored[LOG_KEY] : [];
-  const updated = [...current, entry].slice(-LOG_LIMIT);
-  await chrome.storage.local.set({ [LOG_KEY]: updated });
-}
-
 /**
- * Slovensky: Štruktúrované logovanie s FIFO limitom.
+ * Slovensky: Ukladá log iba ak je zapnutý debug režim.
  */
-export async function log(level, scope, msg, meta = {}, err) {
-  const normalizedLevel = normalizeLevel(level);
-  if (!(await shouldLog(normalizedLevel))) {
+export async function log(level, scope, message, meta = undefined) {
+  const allowed = await ensureDebugState();
+  if (!allowed) {
     return null;
   }
   const entry = {
-    ts: Date.now(),
-    level: normalizedLevel,
+    id: uuidv4(),
+    timestamp: Date.now(),
+    level: level || LogLevel.INFO,
     scope: scope || 'general',
-    msg: msg || '',
+    message: message || '',
     meta: sanitizeMeta(meta)
   };
-  const serializedError = serializeError(err);
-  if (serializedError) {
-    entry.err = serializedError;
-  }
   try {
-    await persistLogEntry(entry);
+    const stored = await chrome.storage.local.get([LOG_KEY]);
+    const existing = Array.isArray(stored?.[LOG_KEY]) ? stored[LOG_KEY] : [];
+    const next = [...existing, entry].slice(-LOG_LIMIT);
+    await chrome.storage.local.set({ [LOG_KEY]: next });
   } catch (error) {
-    console.error('MyChatGPT log failure', error);
+    console.warn('Cleaner log store failed', error);
   }
-  appendToConsole(normalizedLevel, entry.scope, entry.msg, entry);
   return entry;
 }
 
-export function logTrace(scope, msg, meta = {}) {
-  return log(LogLevel.TRACE, scope, msg, meta);
-}
-
-export function logDebug(scope, msg, meta = {}) {
-  return log(LogLevel.DEBUG, scope, msg, meta);
-}
-
-export function logInfo(scope, msg, meta = {}) {
-  return log(LogLevel.INFO, scope, msg, meta);
-}
-
-export function logWarn(scope, msg, meta = {}) {
-  return log(LogLevel.WARN, scope, msg, meta);
-}
-
-export function logError(scope, msg, err, meta = {}) {
-  return log(LogLevel.ERROR, scope, msg, meta, err);
-}
-
+/**
+ * Slovensky: Vráti uložené logy podľa debug nastavení.
+ */
 export async function getLogs() {
   try {
     const stored = await chrome.storage.local.get([LOG_KEY]);
-    const logs = Array.isArray(stored[LOG_KEY]) ? stored[LOG_KEY] : [];
-    return logs;
-  } catch (error) {
-    console.error('MyChatGPT getLogs failure', error);
+    return Array.isArray(stored?.[LOG_KEY]) ? stored[LOG_KEY] : [];
+  } catch (_error) {
     return [];
   }
 }
 
+/**
+ * Slovensky: Vyčistí uložené logy.
+ */
 export async function clearLogs() {
-  try {
-    await chrome.storage.local.set({ [LOG_KEY]: [] });
-  } catch (error) {
-    console.error('MyChatGPT clearLogs failure', error);
-  }
-}
-
-export async function tailLogs({ limit = 50, minLevel = LogLevel.TRACE } = {}) {
-  const logs = await getLogs();
-  const normalizedLevel = normalizeLevel(minLevel);
-  const threshold = LEVEL_PRIORITY[normalizedLevel] ?? LEVEL_PRIORITY[LogLevel.TRACE];
-  return logs
-    .filter((entry) => (LEVEL_PRIORITY[normalizeLevel(entry.level)] ?? LEVEL_PRIORITY[LogLevel.INFO]) >= threshold)
-    .slice(-limit);
+  await chrome.storage.local.set({ [LOG_KEY]: [] });
 }
 
 function sanitizeMeta(meta) {
@@ -197,169 +115,187 @@ function sanitizeMeta(meta) {
   if (Array.isArray(meta)) {
     return meta.length ? meta : null;
   }
-  return Object.keys(meta).length ? meta : null;
+  const keys = Object.keys(meta);
+  if (!keys.length) {
+    return null;
+  }
+  return keys.reduce((acc, key) => {
+    const value = meta[key];
+    if (value === undefined) {
+      return acc;
+    }
+    acc[key] = value;
+    return acc;
+  }, {});
 }
 
-export function csvToArray(csv) {
-  if (!csv) {
-    return [];
+/**
+ * Slovensky: Zjednotí nastavenia s predvolenými hodnotami.
+ */
+export function normalizeSettings(raw) {
+  const base = { ...DEFAULT_SETTINGS };
+  if (!raw || typeof raw !== 'object') {
+    return base;
   }
-  return csv
-    .split(',')
-    .map((token) => token.trim())
-    .filter((token) => token.length > 0);
+  const result = { ...base };
+  if (typeof raw.debugEnabled === 'boolean') {
+    result.debugEnabled = raw.debugEnabled;
+  }
+  if (Number.isFinite(raw.maxMessageCount)) {
+    result.maxMessageCount = clampInt(raw.maxMessageCount, 1, 6);
+  }
+  if (Number.isFinite(raw.maxAgeMinutes)) {
+    result.maxAgeMinutes = clampInt(raw.maxAgeMinutes, 1, 60);
+  }
+  if (Number.isFinite(raw.maxPromptLength)) {
+    result.maxPromptLength = clampInt(raw.maxPromptLength, 40, 1000);
+  }
+  if (Number.isFinite(raw.batchSize)) {
+    result.batchSize = clampInt(raw.batchSize, 1, 10);
+  }
+  return result;
 }
 
-export function arrayToCsv(values) {
-  if (!Array.isArray(values)) {
-    return '';
+function clampInt(value, min, max) {
+  const parsed = Math.round(Number(value));
+  if (!Number.isFinite(parsed)) {
+    return min;
   }
-  return values.map((value) => String(value).trim()).filter(Boolean).join(',');
+  return Math.min(max, Math.max(min, parsed));
 }
 
-export function minutesSince(input) {
-  if (!input) {
-    return Number.POSITIVE_INFINITY;
+/**
+ * Slovensky: Rozhodne, či zhrnutie spĺňa heuristiky.
+ */
+export function passesHeuristics(summary, settings) {
+  const normalized = normalizeSettings(settings);
+  if (!summary || typeof summary !== 'object') {
+    return { allowed: false, reasons: ['invalid_summary'] };
   }
-  const timestamp = typeof input === 'number' ? input : Date.parse(input);
-  if (!Number.isFinite(timestamp)) {
-    return Number.POSITIVE_INFINITY;
+  const reasons = [];
+  const messageCount = Number.isFinite(summary.messageCount) ? summary.messageCount : 0;
+  if (messageCount > normalized.maxMessageCount) {
+    reasons.push('too_many_messages');
   }
-  return (Date.now() - timestamp) / 60000;
+  const promptLength = summary.userPrompt ? summary.userPrompt.trim().length : 0;
+  if (promptLength > normalized.maxPromptLength) {
+    reasons.push('prompt_too_long');
+  }
+  const createdAt = Number.isFinite(summary.createdAt) ? summary.createdAt : Date.now();
+  const capturedAt = Number.isFinite(summary.capturedAt) ? summary.capturedAt : Date.now();
+  const ageMinutes = Math.max(0, (capturedAt - createdAt) / 60000);
+  if (ageMinutes > normalized.maxAgeMinutes) {
+    reasons.push('too_old');
+  }
+  return { allowed: reasons.length === 0, reasons, settings: normalized };
 }
 
-export async function measureAsync(fn) {
-  if (typeof fn !== 'function') {
-    throw new TypeError('measureAsync requires a function');
+/**
+ * Slovensky: Získa ID konverzácie z URL.
+ */
+export function getConversationIdFromUrl(url) {
+  if (!url) {
+    return null;
   }
-  const usePerf = typeof performance !== 'undefined' && typeof performance.now === 'function';
-  const start = usePerf ? performance.now() : Date.now();
-  const computeElapsed = () => {
-    const end = usePerf ? performance.now() : Date.now();
-    return end - start;
-  };
   try {
-    const value = await fn();
-    return { elapsedMs: computeElapsed(), value, error: null };
-  } catch (error) {
-    return { elapsedMs: computeElapsed(), value: undefined, error };
+    const parsed = new URL(url, 'https://chatgpt.com');
+    const pieces = parsed.pathname.split('/').filter(Boolean);
+    if (pieces[0] === 'c' && pieces[1]) {
+      return pieces[1];
+    }
+    return null;
+  } catch (_error) {
+    return null;
   }
 }
 
-export function uuidv4() {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  // Fallback pre staršie prehliadače.
-  const template = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx';
-  return template.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
-const ALLOWED_TAGS = new Set([
-  'a',
-  'article',
-  'blockquote',
-  'br',
-  'code',
-  'div',
-  'em',
-  'figure',
-  'figcaption',
-  'h1',
-  'h2',
-  'h3',
-  'h4',
-  'h5',
-  'h6',
-  'hr',
-  'img',
-  'li',
-  'ol',
-  'p',
-  'pre',
-  'section',
-  'span',
-  'strong',
-  'sub',
-  'sup',
-  'table',
-  'tbody',
-  'td',
-  'th',
-  'thead',
-  'tr',
-  'ul'
-]);
-
-const GLOBAL_ATTRS = new Set(['class', 'aria-label', 'aria-live', 'role', 'data-language']);
-const TAG_ATTRS = {
-  a: new Set(['href', 'title', 'rel', 'target']),
-  img: new Set(['src', 'alt', 'title', 'width', 'height']),
-  code: new Set(['class']),
-  pre: new Set(['class']),
-  div: new Set(['data-codeblock-language', 'data-language']),
-  span: new Set(['data-codeblock-language', 'data-language'])
-};
-
-const EMPTY_SET = new Set();
-
-const PATCH_ENDPOINT_PREFIX = '/backend-api/conversation/';
-const LEGACY_PATCH_ENDPOINT_PREFIX = '/conversation/';
-
-export function sanitizeHTML(html) {
-  if (!html) {
+/**
+ * Slovensky: Sanitizuje HTML odpovede.
+ */
+export function sanitizeHTML(input) {
+  if (!input) {
     return '';
   }
   if (typeof DOMParser === 'undefined') {
-    return fallbackSanitize(html);
+    return fallbackSanitize(input);
   }
-
   const parser = new DOMParser();
-  const doc = parser.parseFromString(`<div>${html}</div>`, 'text/html');
-  doc.querySelectorAll('script, style, link, meta, title').forEach((el) => el.remove());
-
-  doc.body.querySelectorAll('*').forEach((element) => {
-    const tag = element.tagName.toLowerCase();
-    if (!ALLOWED_TAGS.has(tag)) {
+  const doc = parser.parseFromString(`<div>${input}</div>`, 'text/html');
+  doc.querySelectorAll('script, style, link, meta, title').forEach((node) => node.remove());
+  const allowedTags = new Set([
+    'a',
+    'article',
+    'blockquote',
+    'br',
+    'code',
+    'div',
+    'em',
+    'figure',
+    'figcaption',
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'hr',
+    'img',
+    'li',
+    'ol',
+    'p',
+    'pre',
+    'section',
+    'span',
+    'strong',
+    'table',
+    'tbody',
+    'td',
+    'th',
+    'thead',
+    'tr',
+    'ul'
+  ]);
+  const globalAttrs = new Set(['class', 'aria-label', 'role', 'data-language']);
+  const perTagAttrs = {
+    a: new Set(['href', 'title', 'rel', 'target']),
+    img: new Set(['src', 'alt', 'title'])
+  };
+  doc.body.querySelectorAll('*').forEach((el) => {
+    const tag = el.tagName.toLowerCase();
+    if (!allowedTags.has(tag)) {
       const fragment = doc.createDocumentFragment();
-      while (element.firstChild) {
-        fragment.appendChild(element.firstChild);
+      while (el.firstChild) {
+        fragment.appendChild(el.firstChild);
       }
-      element.replaceWith(fragment);
+      el.replaceWith(fragment);
       return;
     }
-
-    [...element.attributes].forEach((attr) => {
+    [...el.attributes].forEach((attr) => {
       const name = attr.name.toLowerCase();
       if (name.startsWith('on') || name === 'style' || name === 'srcdoc') {
-        element.removeAttribute(attr.name);
+        el.removeAttribute(attr.name);
         return;
       }
-      const allowedForTag = TAG_ATTRS[tag] || EMPTY_SET;
-      if (!allowedForTag.has(name) && !GLOBAL_ATTRS.has(name)) {
-        element.removeAttribute(attr.name);
+      const allowedForTag = perTagAttrs[tag] || new Set();
+      if (!allowedForTag.has(name) && !globalAttrs.has(name)) {
+        el.removeAttribute(attr.name);
         return;
       }
       if (name === 'href' && !isSafeLink(attr.value)) {
-        element.removeAttribute(attr.name);
-        return;
+        el.removeAttribute(attr.name);
       }
-      if (name === 'src') {
-        if (tag === 'img' && !isSafeImageSrc(attr.value)) {
-          const alt = element.getAttribute('alt') || '';
-          const replacement = doc.createElement('span');
-          replacement.textContent = alt;
-          element.replaceWith(replacement);
-        }
+      if (name === 'src' && tag === 'img' && !isSafeImage(attr.value)) {
+        el.removeAttribute(attr.name);
       }
     });
   });
-
   return doc.body.innerHTML;
+}
+
+function fallbackSanitize(value) {
+  return String(value)
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/on\w+\s*=\s*"[^"]*"/gi, '');
 }
 
 function isSafeLink(value) {
@@ -370,21 +306,18 @@ function isSafeLink(value) {
   if (!trimmed) {
     return false;
   }
-  if (trimmed.startsWith('#') || trimmed.startsWith('/') || trimmed.startsWith('?') || trimmed.startsWith('./')) {
+  if (trimmed.startsWith('#') || trimmed.startsWith('/') || trimmed.startsWith('?')) {
     return true;
   }
   try {
-    const url = new URL(trimmed, 'https://example.com');
-    if (url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'mailto:' || url.protocol === 'tel:') {
-      return true;
-    }
+    const parsed = new URL(trimmed, 'https://chatgpt.com');
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' || parsed.protocol === 'mailto:';
   } catch (_error) {
     return false;
   }
-  return false;
 }
 
-function isSafeImageSrc(value) {
+function isSafeImage(value) {
   if (!value) {
     return false;
   }
@@ -393,109 +326,45 @@ function isSafeImageSrc(value) {
     return true;
   }
   try {
-    const url = new URL(trimmed, 'https://example.com');
-    return url.protocol === 'https:' || url.protocol === 'http:';
+    const parsed = new URL(trimmed, 'https://chatgpt.com');
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
   } catch (_error) {
     return false;
   }
 }
 
-function fallbackSanitize(input) {
-  return String(input)
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/on\w+=\"[^\"]*\"/gi, '');
-}
-
-export const ReasonCodes = Object.freeze({
-  PATCH_OK: 'patch_ok',
-  PATCH_BLOCKED_BY_SAFETY: 'patch_blocked_by_safety',
-  PATCH_BLOCKED_BY_WHITELIST: 'patch_blocked_by_whitelist',
-  PATCH_BLOCKED_BY_RATE_LIMIT: 'patch_blocked_by_rate_limit',
-  PATCH_BLOCKED_BY_BATCH_LIMIT: 'patch_blocked_by_batch_limit',
-  PATCH_BLOCKED_BY_DUPLICATE: 'patch_blocked_by_duplicate',
-  PATCH_BLOCKED_BY_DELETE_LIMIT: 'patch_blocked_by_delete_limit',
-  PATCH_BRIDGE_TIMEOUT: 'patch_bridge_timeout',
-  PATCH_BRIDGE_ERROR: 'patch_bridge_error',
-  ENDPOINT_NOT_SUPPORTED: 'endpoint_not_supported',
-  AUTH_MISSING: 'auth_missing',
-  PATCH_HTTP_ERROR_PREFIX: 'patch_http_error_',
-  UNDO_OK: 'undo_ok',
-  UNDO_BLOCKED_BY_SAFETY: 'undo_blocked_by_safety',
-  UNDO_BLOCKED_BY_WHITELIST: 'undo_blocked_by_whitelist',
-  UNDO_BLOCKED_BY_RATE_LIMIT: 'undo_blocked_by_rate_limit',
-  UNDO_BLOCKED_BY_BATCH_LIMIT: 'undo_blocked_by_batch_limit',
-  UNDO_BLOCKED_BY_DUPLICATE: 'undo_blocked_by_duplicate',
-  UNDO_BLOCKED_BY_DELETE_LIMIT: 'undo_blocked_by_delete_limit',
-  UNDO_BRIDGE_TIMEOUT: 'undo_bridge_timeout',
-  UNDO_BRIDGE_ERROR: 'undo_bridge_error',
-  UNDO_HTTP_ERROR_PREFIX: 'undo_http_error_',
-  UNDO_BATCH_COMPLETED: 'undo_batch_completed',
-  BRIDGE_CONNECTIVITY_OK: 'bridge_connectivity_ok',
-  BRIDGE_CONNECTIVITY_FAILED: 'bridge_connectivity_failed',
-  LIVE_BATCH_COMPLETED: 'live_batch_completed'
-});
-
 /**
- * Slovensky: Zostaví reason kód pre HTTP odpoveď PATCH požiadavky.
+ * Slovensky: Normalizuje URL pre porovnania.
  */
-export function buildPatchHttpReason(status) {
-  const code = Number.parseInt(status, 10);
-  if (!Number.isFinite(code)) {
-    return `${ReasonCodes.PATCH_HTTP_ERROR_PREFIX}unknown`;
-  }
-  return `${ReasonCodes.PATCH_HTTP_ERROR_PREFIX}${code}`;
-}
-
-/**
- * Slovensky: Zostaví reason kód pre HTTP odpoveď UNDO PATCH požiadavky.
- */
-export function buildUndoHttpReason(status) {
-  const code = Number.parseInt(status, 10);
-  if (!Number.isFinite(code)) {
-    return `${ReasonCodes.UNDO_HTTP_ERROR_PREFIX}unknown`;
-  }
-  return `${ReasonCodes.UNDO_HTTP_ERROR_PREFIX}${code}`;
-}
-
-/**
- * Slovensky: Vráti preferovanú PATCH cestu pre konverzáciu.
- */
-export function getPatchEndpoint(convoId) {
-  const raw = typeof convoId === 'string' ? convoId.trim() : '';
-  if (!raw) {
+export function normalizeChatUrl(url) {
+  if (!url) {
     return null;
   }
-  const encoded = encodeURIComponent(raw);
-  return `${PATCH_ENDPOINT_PREFIX}${encoded}`;
-}
-
-/**
- * Slovensky: Poskytne zoznam náhradných PATCH ciest (primárna + legacy).
- */
-export function getPatchEndpointCandidates(convoId) {
-  const preferred = getPatchEndpoint(convoId);
-  if (!preferred) {
-    return [];
-  }
-  const legacy = `${LEGACY_PATCH_ENDPOINT_PREFIX}${encodeURIComponent(convoId.trim())}`;
-  if (legacy === preferred) {
-    return [preferred];
-  }
-  return [preferred, legacy];
-}
-
-/**
- * Slovensky: Jednoduché stopky pre meranie latencie v milisekundách.
- */
-export function createStopwatch() {
-  const baseNow = typeof performance !== 'undefined' && typeof performance.now === 'function'
-    ? () => performance.now()
-    : () => Date.now();
-  const startedAt = baseNow();
-  return {
-    startedAt,
-    elapsedMs() {
-      return baseNow() - startedAt;
+  try {
+    const parsed = new URL(url, 'https://chatgpt.com');
+    parsed.hash = '';
+    parsed.search = '';
+    if (!parsed.pathname.endsWith('/')) {
+      parsed.pathname += '/';
     }
-  };
+    return parsed.toString();
+  } catch (_error) {
+    return null;
+  }
 }
+
+/**
+ * Slovensky: Jednoduché UUID v4.
+ */
+export function uuidv4() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  const template = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx';
+  return template.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
