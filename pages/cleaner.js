@@ -365,7 +365,20 @@ function setStatus(message) {
 }
 
 function shortError(response) {
-  return response?.error ? `Error: ${response.error}` : 'Action failed';
+  const code = response?.error;
+  if (!code) {
+    return 'Action failed';
+  }
+  if (code === 'not_conversation_tab') {
+    return 'Open a conversation tab (/c/<id>) first.';
+  }
+  if (code === 'capture_api_missing') {
+    return 'Capture module injection failed.';
+  }
+  if (code === 'capture_failed') {
+    return 'Capture failed — see background console.';
+  }
+  return `Error: ${code}`;
 }
 
 function updateButtons() {

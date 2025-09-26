@@ -23,6 +23,9 @@ OpenAI does not expose a supported deletion API. The risky path stays in the vis
 > 💡 Non-eligible chats prompt a one-time “Delete anyway?” inline confirm in the popup before the risky action proceeds.
 
 ## Troubleshooting
-- Nothing captured? Force capture first, then **Re-evaluate eligibility**.
+- Force capture tips:
+  - Keep the active tab on `https://chatgpt.com/c/<id>` before pressing the button.
+  - Seeing `capture_api_missing`? Reload the extension (MV3 worker) and try again.
+  - Confirm the extension still has host permissions for `https://chatgpt.com/*`.
 - Probe fails? Increase `risky_wait_after_open_ms` or `risky_step_timeout_ms` in `chrome.storage.local` (both default to 260 ms / 10 s) and rerun **Test selectors**.
 - Unsure what happened? Open the tab console; every automation message carries the `[RiskyMode][tab]` prefix, while background notes use `[Cleaner]`.

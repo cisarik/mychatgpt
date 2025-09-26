@@ -94,8 +94,12 @@ export function log(...args) {
   console.log('[Cleaner]', ...args);
 }
 
-export function delay(ms) {
+export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function delay(ms) {
+  return sleep(ms);
 }
 
 export function coerceWait(value, min = WAIT_MIN, max = WAIT_MAX, fallback = DEFAULT_SETTINGS.risky.risky_wait_after_click_ms) {
@@ -136,4 +140,24 @@ function clampWait(raw, min, max) {
   const clampedMax = Number.isFinite(max) ? Math.max(clampedMin, max) : clampedMin;
   const next = Math.max(clampedMin, Math.min(clampedMax, Number(raw) || 0));
   return Math.round(next);
+}
+
+export async function getActiveChatgptTab() {
+  const [tab] = await chrome.tabs.query({
+    active: true,
+    currentWindow: true,
+    url: 'https://chatgpt.com/*'
+  });
+  if (!tab) {
+    throw new Error('no_active_chatgpt_tab');
+  }
+  return tab;
+}
+
+export async function focusTab(tabId, windowId) {
+  if (typeof windowId === 'number') {
+    await chrome.windows.update(windowId, { focused: true });
+  }
+  await chrome.tabs.update(tabId, { active: true });
+  await sleep(150);
 }

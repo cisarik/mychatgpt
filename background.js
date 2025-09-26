@@ -1,4 +1,15 @@
-import { computeEligibility, DEFAULT_SETTINGS, delay, getConvoIdFromUrl, getConvoUrl, normalizeSettings, randomBetween, SETTINGS_KEY } from './utils.js';
+import {
+  computeEligibility,
+  DEFAULT_SETTINGS,
+  delay,
+  focusTab,
+  getActiveChatgptTab,
+  getConvoIdFromUrl,
+  getConvoUrl,
+  normalizeSettings,
+  randomBetween,
+  SETTINGS_KEY
+} from './utils.js';
 import * as db from './db.js';
 
 let settingsCache = { ...DEFAULT_SETTINGS };
@@ -59,13 +70,22 @@ async function ensureSettings() {
 }
 
 async function captureActiveTabNow() {
-  const tab = await getActiveChatgptTab();
-  await focusTab(tab.id, tab.windowId);
-  const result = await sendCapture(tab.id);
-  if (!result?.ok) {
-    return result;
+  let tab;
+  try {
+    tab = await getActiveChatgptTab();
+  } catch (error) {
+    return { ok: false, error: error?.message || 'no_active_chatgpt_tab' };
   }
-  const stored = await persistCapture(result.payload);
+  if (!tab || !/^https:\/\/chatgpt\.com\/c\//.test(tab.url || '')) {
+    return { ok: false, error: 'not_conversation_tab' };
+  }
+  await focusTab(tab.id, tab.windowId);
+  await injectCaptureModule(tab.id);
+  const res = await callCapture(tab.id).catch((error) => ({ ok: false, error: error?.message || String(error) }));
+  if (!res?.ok) {
+    return { ok: false, error: res?.error || 'capture_failed' };
+  }
+  const stored = await persistCapture(res.payload);
   await notifyListUpdated();
   return { ok: true, item: stored };
 }
@@ -74,12 +94,20 @@ async function scanAllChatgptTabs() {
   const tabs = await getAllChatgptTabs();
   const storedItems = [];
   for (const tab of tabs) {
-    await focusTab(tab.id, tab.windowId);
-    const result = await sendCapture(tab.id);
-    if (result?.ok) {
-      const stored = await persistCapture(result.payload);
-      storedItems.push(stored);
-      await notifyListUpdated();
+    if (!/^https:\/\/chatgpt\.com\/c\//.test(tab.url || '')) {
+      continue;
+    }
+    try {
+      await focusTab(tab.id, tab.windowId);
+      await injectCaptureModule(tab.id);
+      const res = await callCapture(tab.id);
+      if (res?.ok) {
+        const stored = await persistCapture(res.payload);
+        storedItems.push(stored);
+        await notifyListUpdated();
+      }
+    } catch (error) {
+      console.warn('[Cleaner][bg] capture_tab_fail', tab.id, error?.message || error);
     }
     await delay(randomBetween(100, 200));
   }
@@ -310,13 +338,26 @@ async function reEvaluateSelected(convoIds) {
   return { ok: true };
 }
 
-async function sendCapture(tabId) {
-  try {
-    const response = await chrome.tabs.sendMessage(tabId, { type: 'RUN_CAPTURE_NOW' });
-    return response;
-  } catch (error) {
-    return { ok: false, error: error?.message || 'capture_failed' };
-  }
+async function injectCaptureModule(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    files: ['automation/capture.js']
+  });
+}
+
+async function callCapture(tabId) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    func: async () => {
+      if (!window.__MYCHAT_CAPTURE__) {
+        throw new Error('capture_api_missing');
+      }
+      return await window.__MYCHAT_CAPTURE__.captureNow();
+    }
+  });
+  return result;
 }
 
 async function persistCapture(payload) {
@@ -333,28 +374,8 @@ async function notifyListUpdated() {
   chrome.runtime.sendMessage({ type: 'listUpdated' });
 }
 
-async function getActiveChatgptTab() {
-  const [tab] = await chrome.tabs.query({
-    active: true,
-    currentWindow: true,
-    url: 'https://chatgpt.com/*'
-  });
-  if (!tab) {
-    throw new Error('no_active_chatgpt_tab');
-  }
-  return tab;
-}
-
 async function getAllChatgptTabs() {
   return chrome.tabs.query({ url: 'https://chatgpt.com/*' });
-}
-
-async function focusTab(tabId, windowId) {
-  if (typeof windowId === 'number') {
-    await chrome.windows.update(windowId, { focused: true });
-  }
-  await chrome.tabs.update(tabId, { active: true });
-  await delay(150);
 }
 
 async function ensureConversationTab(convoId) {
