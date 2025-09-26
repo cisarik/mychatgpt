@@ -1,15 +1,76 @@
 /* Slovensky komentar: Styly specificke pre popup okno. */
 body {
   width: 320px;
-  min-height: 220px;
+  min-height: 260px;
+  padding: 16px;
+}
+
+.popup-shell {
+  display: grid;
+  gap: 12px;
+}
+
+.popup-section {
+  display: grid;
+  gap: 10px;
+}
+
+.popup-section h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  color: var(--text);
+}
+
+.popup-link {
+  align-self: flex-start;
+  font-weight: 600;
+}
+
+.popup-link:hover,
+.popup-link:focus {
+  text-decoration: none;
 }
 
 .debug-actions {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
 }
 
-.debug-actions a {
-  text-decoration: none;
+.debug-actions .popup-link {
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.debug-actions .popup-link:hover,
+.debug-actions .popup-link:focus {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(4, 14, 24, 0.35);
+}
+
+.debug-actions .popup-link:active {
+  transform: translateY(0);
+  box-shadow: 0 4px 12px rgba(4, 14, 24, 0.25);
+}
+
+@media (max-width: 360px) {
+  body {
+    width: auto;
+  }
+
+  .debug-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .debug-actions .popup-link {
+    width: 100%;
+    text-align: center;
+  }
 }

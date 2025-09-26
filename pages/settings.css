@@ -1,0 +1,109 @@
+/* Slovensky komentar: Nastylovanie formulara nastaveni v tmavej teme. */
+.settings-page {
+  gap: 24px;
+}
+
+.settings-form {
+  display: grid;
+  gap: 20px;
+}
+
+.settings-card {
+  display: grid;
+  gap: 14px;
+}
+
+.setting-row,
+.setting-column {
+  gap: 10px;
+}
+
+.setting-row {
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.setting-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.setting-control input[type='checkbox'] {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+}
+
+.setting-column textarea {
+  min-height: 160px;
+}
+
+.label-text {
+  font-weight: 600;
+}
+
+.heal-hint {
+  font-size: 0.85rem;
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.form-actions #save-btn {
+  min-width: 140px;
+}
+
+.form-actions #reset-btn {
+  min-width: 180px;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid currentColor;
+  box-shadow: none;
+}
+
+.form-actions #reset-btn:hover,
+.form-actions #reset-btn:focus {
+  background: rgba(16, 163, 127, 0.18);
+}
+
+.form-actions #reset-btn:active {
+  background: rgba(16, 163, 127, 0.24);
+}
+
+.status-text {
+  flex: 1 1 auto;
+  color: var(--muted);
+}
+
+@media (max-width: 720px) {
+  .setting-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .setting-control {
+    justify-content: flex-start;
+  }
+
+  .form-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .form-actions #save-btn,
+  .form-actions #reset-btn {
+    width: 100%;
+  }
+
+  .status-text {
+    text-align: center;
+  }
+}

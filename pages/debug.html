@@ -5,52 +5,47 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MyChatGPT Debug</title>
   <link rel="stylesheet" href="../styles.css" />
-  <style>
-    /* Slovensky komentar: Lokalna uprava pre zoznam logov. */
-    #logs {
-      display: grid;
-      gap: 8px;
-      margin-top: 16px;
-      max-height: 60vh;
-      overflow-y: auto;
-      padding-right: 4px;
-    }
-
-    .log-entry {
-      border: 1px solid rgba(0, 0, 0, 0.1);
-      border-radius: 4px;
-      padding: 8px;
-      background: rgba(0, 0, 0, 0.03);
-      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
-      white-space: pre-wrap;
-    }
-
-    #connectivity-results,
-    #metadata-results {
-      display: grid;
-      gap: 8px;
-      margin-top: 12px;
-    }
-  </style>
+  <link rel="stylesheet" href="debug.css" />
 </head>
 <body>
-  <h1>Debug logs</h1>
-  <label>
-    Filter text:
-    <input id="filter-input" type="text" placeholder="Filter logs" />
-  </label>
-  <div style="margin-top: 8px; display: flex; gap: 8px; align-items: center;">
-    <button id="refresh-btn">Refresh</button>
-    <button id="export-btn">Export debug</button>
-    <button id="clear-btn">Clear logs</button>
-    <button id="scan-btn">Scan now (stub)</button>
-    <button id="connectivity-btn">Connectivity test (chatgpt.com)</button>
-    <button id="probe-btn">Probe metadata (read-only)</button>
-  </div>
-  <div id="scan-result" role="status" aria-live="polite"></div>
-  <div id="connectivity-results" role="status" aria-live="polite"></div>
-  <div id="metadata-results" role="status" aria-live="polite"></div>
-  <div id="logs" aria-live="polite"></div>
+  <main class="page debug-page">
+    <header class="page-intro">
+      <h1>Debug logs</h1>
+      <p class="text-muted">Review diagnostics, export JSON dumps and trigger safe probes.</p>
+    </header>
+
+    <section class="page-section panel">
+      <label class="field">
+        <span class="field-label">Filter text</span>
+        <input id="filter-input" type="text" placeholder="Filter logs" />
+      </label>
+      <div class="toolbar">
+        <button id="refresh-btn">Refresh</button>
+        <button id="export-btn">Export debug</button>
+        <button id="clear-btn">Clear logs</button>
+        <button id="scan-btn">Scan now (stub)</button>
+        <button id="connectivity-btn">Connectivity test (chatgpt.com)</button>
+        <button id="probe-btn">Probe metadata (read-only)</button>
+      </div>
+    </section>
+
+    <section class="page-section panel panel-bleed">
+      <h2 class="section-title">Live toasts</h2>
+      <div id="scan-result" class="toast-stack" role="status" aria-live="polite"></div>
+      <h2 class="section-title">Connectivity history</h2>
+      <div id="connectivity-results" class="toast-stack" role="status" aria-live="polite"></div>
+      <h2 class="section-title">Metadata probe history</h2>
+      <div id="metadata-results" class="toast-stack" role="status" aria-live="polite"></div>
+    </section>
+
+    <section class="page-section panel">
+      <div class="logs-header inline-stack">
+        <h2 class="section-title">Log stream</h2>
+        <span class="badge">Newest first</span>
+      </div>
+      <div id="logs" class="logs" aria-live="polite"></div>
+    </section>
+  </main>
 
   <script src="../utils.js"></script>
   <script src="debug.js"></script>

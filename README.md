@@ -14,6 +14,11 @@ This repository contains a minimal Manifest V3 Chrome/Brave extension scaffold f
 
 Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use the **Export debug** button on the debug page to download the latest records.
 
+## Theme & Accessibility
+- Default experience ships with a modern dark theme tuned for ChatGPT-like contrast, while a light fallback automatically applies for users preferring light mode via `prefers-color-scheme`.
+- Shared CSS tokens drive page, popup and log surfaces to maintain ≥AA contrast for text, buttons and links across both palettes.
+- Interactive controls expose visible focus rings, hover states and disabled styling for assistive clarity.
+
 ## Settings & Categories
 | Key | Default | Description |
 | --- | --- | --- |

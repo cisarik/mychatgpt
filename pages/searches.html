@@ -5,12 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MyChatGPT Searches</title>
   <link rel="stylesheet" href="../styles.css" />
+  <link rel="stylesheet" href="searches.css" />
 </head>
 <body>
-  <main class="page">
-    <h1>Zálohy konverzácií</h1>
-    <p id="empty-message">Zatiaľ nemáte žiadne zálohy. Spustite ‘Scan now (stub)’ alebo počkajte na ďalší krok.</p>
-    <p id="backups-count"></p>
+  <main class="page searches-page">
+    <header class="page-intro">
+      <h1>Zálohy konverzácií</h1>
+      <p class="text-muted">Spravujte bezpečné exporty rozhovorov zo služby ChatGPT.</p>
+    </header>
+
+    <section class="page-section panel empty-state" aria-live="polite">
+      <h2>Žiadne zálohy zatiaľ neexistujú</h2>
+      <p id="empty-message">Spustite „Scan now (stub)“ na debug stránke alebo počkajte na najbližší automatický beh.</p>
+      <a class="empty-link" href="../pages/debug.html" target="_blank" rel="noopener">Open detailed view</a>
+    </section>
+
+    <section class="page-section panel stats">
+      <h2>Stav úložiska</h2>
+      <p id="backups-count" class="stat-value">Načítavam počet záloh…</p>
+    </section>
   </main>
   <script src="../utils.js"></script>
   <script src="searches.js"></script>
