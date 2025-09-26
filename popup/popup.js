@@ -13,6 +13,12 @@
     }
   });
 
+  panels.forEach((panel) => {
+    const isActive = panel.classList.contains('active');
+    panel.hidden = !isActive;
+    panel.setAttribute('aria-hidden', String(!isActive));
+  });
+
   /* Slovensky komentar: Aktivuje pozadovanu kartu, aktualizuje hash a fokus. */
   function activateTab(tabName, options = {}) {
     const { focus = true, updateHash = true } = options;
@@ -77,19 +83,6 @@
         activateTab(nextButton.dataset.tab);
       }
     });
-  });
-
-  document.addEventListener('click', (event) => {
-    const link = event.target.closest('.nav-internal');
-    if (!link) {
-      return;
-    }
-    const targetTab = link.dataset.target;
-    if (!targetTab || !panels.has(targetTab)) {
-      return;
-    }
-    event.preventDefault();
-    activateTab(targetTab);
   });
 
   window.addEventListener('hashchange', () => {

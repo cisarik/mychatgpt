@@ -45,43 +45,209 @@
 
       <section
         id="page-searches"
-        class="section page active panel popup-section"
+        class="section page page-searches active"
         role="tabpanel"
         aria-labelledby="tab-searches"
+        aria-hidden="false"
       >
-        <h2>Search backups</h2>
-        <p class="text-muted">Latest exports from your sessions will show up automatically.</p>
-        <a class="popup-link nav-internal" href="#searches" data-target="searches">Open detailed view</a>
+        <header class="page-header">
+          <h2>Search backups</h2>
+          <p class="text-muted">
+            Latest exports from your sessions will show up automatically inside this popup.
+          </p>
+        </header>
+
+        <div class="panel stack empty-state" aria-live="polite">
+          <h3>Žiadne zálohy zatiaľ neexistujú</h3>
+          <p id="empty-message">
+            Spustite „Scan now (stub)“ na debug stránke alebo počkajte na najbližší automatický beh.
+          </p>
+        </div>
+
+        <div class="panel stack stats-card">
+          <h3>Stav úložiska</h3>
+          <p id="backups-count" class="stat-value">Načítavam počet záloh…</p>
+        </div>
+
+        <div class="panel stack backups-panel" aria-live="polite">
+          <div class="panel-heading">
+            <h3>Prehľad posledných záloh</h3>
+            <span class="badge">Max 5 položiek</span>
+          </div>
+          <div id="backups-list" class="backups-list" role="list"></div>
+        </div>
       </section>
 
       <section
         id="page-settings"
-        class="section page panel popup-section"
+        class="section page page-settings"
         role="tabpanel"
         aria-labelledby="tab-settings"
+        aria-hidden="true"
+        hidden
       >
-        <h2>Settings</h2>
-        <p class="text-muted">Control behaviours, limits and safety defaults.</p>
-        <a class="popup-link nav-internal" href="#settings" data-target="settings">Open detailed view</a>
+        <header class="page-header">
+          <h2>Settings</h2>
+          <p class="text-muted">Control behaviours, limits and safety defaults without leaving the popup.</p>
+        </header>
+
+        <form id="settings-form" class="settings-form">
+          <section class="panel settings-card">
+            <h3>Režimy</h3>
+            <label class="setting-row">
+              <span class="label-text">List only</span>
+              <span class="setting-control">
+                <input type="checkbox" id="LIST_ONLY" name="LIST_ONLY" />
+                <span class="heal-hint" data-field="LIST_ONLY" hidden>(opravené)</span>
+              </span>
+            </label>
+            <label class="setting-row">
+              <span class="label-text">Dry run</span>
+              <span class="setting-control">
+                <input type="checkbox" id="DRY_RUN" name="DRY_RUN" />
+                <span class="heal-hint" data-field="DRY_RUN" hidden>(opravené)</span>
+              </span>
+            </label>
+            <label class="setting-row">
+              <span class="label-text">Potvrdenie pred zmazaním</span>
+              <span class="setting-control">
+                <input type="checkbox" id="CONFIRM_BEFORE_DELETE" name="CONFIRM_BEFORE_DELETE" />
+                <span class="heal-hint" data-field="CONFIRM_BEFORE_DELETE" hidden>(opravené)</span>
+              </span>
+            </label>
+            <label class="setting-row">
+              <span class="label-text">Automatický scan</span>
+              <span class="setting-control">
+                <input type="checkbox" id="AUTO_SCAN" name="AUTO_SCAN" />
+                <span class="heal-hint" data-field="AUTO_SCAN" hidden>(opravené)</span>
+              </span>
+            </label>
+          </section>
+
+          <section class="panel settings-card">
+            <h3>Limity</h3>
+            <label class="setting-row">
+              <span class="label-text">Max správy</span>
+              <span class="setting-control">
+                <input type="number" id="MAX_MESSAGES" name="MAX_MESSAGES" min="1" />
+                <span class="heal-hint" data-field="MAX_MESSAGES" hidden>(opravené)</span>
+              </span>
+            </label>
+            <label class="setting-row">
+              <span class="label-text">Max používateľské správy</span>
+              <span class="setting-control">
+                <input type="number" id="USER_MESSAGES_MAX" name="USER_MESSAGES_MAX" min="1" />
+                <span class="heal-hint" data-field="USER_MESSAGES_MAX" hidden>(opravené)</span>
+              </span>
+            </label>
+            <label class="setting-row">
+              <span class="label-text">Cooldown auto-skenu (min)</span>
+              <span class="setting-control">
+                <input type="number" id="SCAN_COOLDOWN_MIN" name="SCAN_COOLDOWN_MIN" min="1" />
+                <span class="heal-hint" data-field="SCAN_COOLDOWN_MIN" hidden>(opravené)</span>
+              </span>
+            </label>
+          </section>
+
+          <section class="panel settings-card">
+            <h3>Bezpečné URL</h3>
+            <label class="setting-column">
+              <span class="label-text">Vzory URL (jeden na riadok)</span>
+              <textarea id="SAFE_URL_PATTERNS" name="SAFE_URL_PATTERNS" rows="4"></textarea>
+              <span class="heal-hint" data-field="SAFE_URL_PATTERNS" hidden>(opravené)</span>
+            </label>
+          </section>
+
+          <div class="form-actions">
+            <button type="submit" id="save-btn">Uložiť</button>
+            <button type="button" id="reset-btn">Resetovať na defaulty</button>
+            <span id="status-text" class="status-text" aria-live="polite"></span>
+          </div>
+        </form>
       </section>
 
       <section
         id="page-debug"
-        class="section page panel popup-section"
+        class="section page page-debug"
         role="tabpanel"
         aria-labelledby="tab-debug"
+        aria-hidden="true"
+        hidden
       >
-        <h2>Debug tools</h2>
-        <p class="text-muted">Inspect the extension logs, network probes and diagnostics.</p>
-        <div class="debug-actions">
-          <button id="test-log-btn">Test log</button>
-          <a class="popup-link nav-internal" href="#debug" data-target="debug">Open detailed view</a>
+        <header class="page-header">
+          <h2>Debug tools</h2>
+          <p class="text-muted">Inspect logs, run probes and review feeds without leaving the popup.</p>
+        </header>
+
+        <div class="panel debug-tools" role="group" aria-label="Debug utilities">
+          <section class="debug-section">
+            <div class="section-heading">
+              <h3>Log controls</h3>
+              <button id="test-log-btn">Test log</button>
+            </div>
+            <label class="field">
+              <span class="field-label">Filter text</span>
+              <input id="filter-input" type="text" placeholder="Filter logs" />
+            </label>
+            <div class="debug-actions">
+              <button id="refresh-btn">Refresh</button>
+              <button id="export-btn">Export debug</button>
+              <button id="clear-btn">Clear logs</button>
+            </div>
+          </section>
+
+          <section class="debug-section">
+            <h3>Scan now stub</h3>
+            <p class="section-note">Manual trigger for the scan pipeline during development.</p>
+            <button id="scan-btn">Scan now (stub)</button>
+          </section>
+
+          <section class="debug-section">
+            <h3>Auto-scan feed</h3>
+            <div id="scan-result" class="toast-stack" role="status" aria-live="polite"></div>
+          </section>
+
+          <section class="debug-section">
+            <h3>Connectivity test</h3>
+            <button id="connectivity-btn">Connectivity test (chatgpt.com)</button>
+            <div id="connectivity-results" class="toast-stack" role="status" aria-live="polite"></div>
+          </section>
+
+          <section class="debug-section">
+            <h3>Metadata probe</h3>
+            <button id="probe-btn">Probe metadata (read-only)</button>
+            <div id="metadata-results" class="toast-stack" role="status" aria-live="polite"></div>
+          </section>
+
+          <section class="debug-section">
+            <h3>Evaluate heuristics</h3>
+            <button id="heuristics-btn">Evaluate heuristics (active tab)</button>
+            <div id="heuristics-results" class="toast-stack" role="status" aria-live="polite"></div>
+          </section>
+
+          <section class="debug-section">
+            <h3>Capture preview</h3>
+            <p class="section-note">Captured previews will appear here when the feature is available.</p>
+            <div id="capture-preview" class="capture-preview" aria-live="polite"></div>
+          </section>
+
+          <section class="debug-section">
+            <div class="section-heading">
+              <h3>Log stream</h3>
+              <span class="badge">Newest first</span>
+            </div>
+            <div id="logs" class="logs" aria-live="polite"></div>
+          </section>
         </div>
       </section>
     </main>
 
     <script src="../utils.js"></script>
+    <script src="../db.js"></script>
     <script src="popup.js"></script>
+    <script src="../pages/searches.js"></script>
+    <script src="../pages/settings.js"></script>
+    <script src="../pages/debug.js"></script>
   </div>
 </body>
 </html>

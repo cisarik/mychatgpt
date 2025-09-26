@@ -17,12 +17,19 @@
     <section class="page-section panel empty-state" aria-live="polite">
       <h2>Žiadne zálohy zatiaľ neexistujú</h2>
       <p id="empty-message">Spustite „Scan now (stub)“ na debug stránke alebo počkajte na najbližší automatický beh.</p>
-      <a class="empty-link" href="../pages/debug.html">Open detailed view</a>
     </section>
 
     <section class="page-section panel stats">
       <h2>Stav úložiska</h2>
       <p id="backups-count" class="stat-value">Načítavam počet záloh…</p>
+    </section>
+
+    <section class="page-section panel">
+      <div class="panel-heading">
+        <h2>Prehľad posledných záloh</h2>
+        <span class="badge">Max 5 položiek</span>
+      </div>
+      <div id="backups-list" class="backups-list" role="list"></div>
     </section>
   </main>
   <script src="../utils.js"></script>

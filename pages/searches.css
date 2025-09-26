@@ -1,4 +1,5 @@
 /* Slovensky komentar: Vizualne prvky pre stranku zaloh. */
+
 .searches-page {
   gap: 24px;
 }
@@ -16,32 +17,6 @@
   color: var(--text);
 }
 
-.empty-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--accent);
-  font-weight: 600;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-}
-
-.empty-link::after {
-  content: '↗';
-  font-size: 0.9rem;
-}
-
-.empty-link:hover,
-.empty-link:focus {
-  background: rgba(16, 163, 127, 0.18);
-  color: var(--text);
-  border-color: var(--accent);
-  text-decoration: none;
-}
-
 .stats {
   display: grid;
   gap: 8px;
@@ -50,6 +25,59 @@
 .stat-value {
   font-size: 1.05rem;
   font-weight: 500;
+}
+
+.backups-list {
+  display: grid;
+  gap: 12px;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.panel-heading h2 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.backup-row {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  box-shadow: var(--shadow);
+}
+
+.backup-row-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 600;
+  font-size: 1.05rem;
+}
+
+.backup-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.backups-empty {
+  padding: 14px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  text-align: center;
 }
 
 @media (max-width: 640px) {

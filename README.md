@@ -16,7 +16,7 @@ Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use the **
 
 ## Popup navigation
 - The popup now keeps Searches, Settings, and Debug content on a single surface with in-place tab switching.
-- "Open detailed view" links route to their respective panels inside the popup instead of spawning new browser tabs.
+- All "Open detailed view" links were removed—each tab renders its full controls, including settings inputs and debug tools, directly inside the popup.
 - Hash deep-links (`#searches`, `#settings`, `#debug`) activate the matching panel so you can bookmark or share precise popup states.
 - Invalid or missing hashes automatically fall back to the Searches panel while updating the popup hash to stay in sync.
 
