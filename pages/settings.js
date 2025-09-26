@@ -26,6 +26,7 @@
   function populateForm(settings) {
     form.LIST_ONLY.checked = Boolean(settings.LIST_ONLY);
     form.DRY_RUN.checked = Boolean(settings.DRY_RUN);
+    form.CAPTURE_ONLY_CANDIDATES.checked = Boolean(settings.CAPTURE_ONLY_CANDIDATES);
     form.CONFIRM_BEFORE_DELETE.checked = Boolean(settings.CONFIRM_BEFORE_DELETE);
     form.AUTO_SCAN.checked = Boolean(settings.AUTO_SCAN);
     form.MAX_MESSAGES.value = settings.MAX_MESSAGES;
@@ -43,6 +44,7 @@
     return {
       LIST_ONLY: form.LIST_ONLY.checked,
       DRY_RUN: form.DRY_RUN.checked,
+      CAPTURE_ONLY_CANDIDATES: form.CAPTURE_ONLY_CANDIDATES.checked,
       CONFIRM_BEFORE_DELETE: form.CONFIRM_BEFORE_DELETE.checked,
       AUTO_SCAN: form.AUTO_SCAN.checked,
       MAX_MESSAGES: Number(form.MAX_MESSAGES.value),

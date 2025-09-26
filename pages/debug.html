@@ -27,6 +27,10 @@
         <button id="connectivity-btn">Connectivity test (chatgpt.com)</button>
         <button id="probe-btn">Probe metadata (read-only)</button>
         <button id="heuristics-btn">Evaluate heuristics (active tab)</button>
+        <button id="backup-btn" class="button-sub">
+          <span>Backup now (manual)</span>
+          <small id="backup-mode-label">Candidates only</small>
+        </button>
       </div>
     </section>
 
@@ -39,6 +43,10 @@
       <div id="metadata-results" class="toast-stack" role="status" aria-live="polite"></div>
       <h2 class="section-title">Heuristics history</h2>
       <div id="heuristics-results" class="toast-stack" role="status" aria-live="polite"></div>
+      <h2 class="section-title">Manual backup status</h2>
+      <div id="backup-toast" class="toast-stack" role="status" aria-live="polite"></div>
+      <h2 class="section-title">Manual backup history</h2>
+      <div id="backup-history" class="toast-stack" role="status" aria-live="polite"></div>
     </section>
 
     <section class="page-section panel">

@@ -13,7 +13,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   MAX_MESSAGES: 2,
   USER_MESSAGES_MAX: 2,
   SAFE_URL_PATTERNS: ['/workspaces', '/projects', '/new-project'],
-  SCAN_COOLDOWN_MIN: 5
+  SCAN_COOLDOWN_MIN: 5,
+  CAPTURE_ONLY_CANDIDATES: true
 });
 
 /* Slovensky komentar: Ziska referenciu na globalny objekt pre rozne prostredia. */
@@ -72,7 +73,7 @@ function sanitizeSettings(rawSettings) {
     return { settings: result, healedFields: Array.from(healedFields) };
   }
 
-  const boolFields = ['LIST_ONLY', 'DRY_RUN', 'CONFIRM_BEFORE_DELETE', 'AUTO_SCAN'];
+  const boolFields = ['LIST_ONLY', 'DRY_RUN', 'CONFIRM_BEFORE_DELETE', 'AUTO_SCAN', 'CAPTURE_ONLY_CANDIDATES'];
   boolFields.forEach((key) => {
     if (typeof rawSettings[key] === 'boolean') {
       result[key] = rawSettings[key];

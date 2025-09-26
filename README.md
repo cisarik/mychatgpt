@@ -35,6 +35,7 @@ Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use the **
 | --- | --- | --- |
 | `LIST_ONLY` | `true` | Limits the extension to listing actions without edits. |
 | `DRY_RUN` | `true` | Produces simulated results without writes. |
+| `CAPTURE_ONLY_CANDIDATES` | `true` | Restricts manual backups to short candidate chats. |
 | `CONFIRM_BEFORE_DELETE` | `true` | Prompts before any destructive action. |
 | `AUTO_SCAN` | `false` | Enables background scanning when supported. |
 | `MAX_MESSAGES` | `2` | Maximum total messages captured per conversation. |
@@ -67,3 +68,10 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 - SAFE URL patterns always bypass the heuristic, while candidates require `counts.total ≤ MAX_MESSAGES` and, when available, `counts.user ≤ USER_MESSAGES_MAX`. Unknown totals defer the decision.
 - Reason codes reported to logs/debug history include: `candidate_ok`, `over_max` (including user limit breaches), `safe_url`, `counts_unknown`, and `no_probe` when the metadata probe is unavailable.
 - Every evaluation updates `cooldown_v1.lastScanAt`. Auto-scans will respect `SCAN_COOLDOWN_MIN` minutes before re-running, while the manual debug button surfaces whether the cooldown would still delay an automated pass.
+
+## Backup write V1
+- The debug page now includes **Backup now (manual)**, which captures the active ChatGPT tab via the existing read-only content script and queues a single write into the `backups` IndexedDB store.
+- When `CAPTURE_ONLY_CANDIDATES` is enabled (default), manual backups reuse Heuristics V1 to require short conversations; disable the toggle in Settings to allow any chat.
+- `DRY_RUN=true` still performs the capture but skips persistence, surfaces a “Dry run: not persisted” toast, and keeps Searches unchanged.
+- Captured answers are truncated to 250 KB (UTF-8) when necessary and flagged with `answerTruncated=true` so UI cards and logs can call out the reduction.
+- The Searches panel refreshes automatically after writes, rendering question text inline and exposing a sandboxed “Render answer (safe)” iframe to preview HTML without executing scripts.

@@ -13,6 +13,10 @@
   const metadataContainer = document.getElementById('metadata-results');
   const heuristicsButton = document.getElementById('heuristics-btn');
   const heuristicsContainer = document.getElementById('heuristics-results');
+  const backupButton = document.getElementById('backup-btn');
+  const backupModeLabel = document.getElementById('backup-mode-label');
+  const backupToastContainer = document.getElementById('backup-toast');
+  const backupHistoryContainer = document.getElementById('backup-history');
 
   async function loadAndRenderLogs() {
     const filterValue = filterInput.value.trim().toLowerCase();
@@ -313,6 +317,119 @@
       }
     });
   }
+
+
+  /* Slovensky komentar: Vykresli toast pre manualne zalozenie. */
+  function appendBackupToast(text) {
+    if (!backupToastContainer) {
+      return;
+    }
+    const block = document.createElement('div');
+    block.className = 'log-entry';
+    block.textContent = text;
+    backupToastContainer.prepend(block);
+    while (backupToastContainer.childElementCount > 4) {
+      backupToastContainer.removeChild(backupToastContainer.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Prida kartu s vysledkom manualnej zalohy. */
+  function appendBackupHistoryCard(record) {
+    if (!backupHistoryContainer || !record) {
+      return;
+    }
+    const card = document.createElement('div');
+    card.className = 'log-entry';
+    const qLen = record.questionText ? record.questionText.length : 0;
+    const aLen = record.answerHTML ? record.answerHTML.length : 0;
+    const titlePreview = record.title ? record.title : '(bez názvu)';
+    const convoPreview = record.convoId ? record.convoId : '∅';
+    const truncatedText = record.answerTruncated ? 'truncated=yes' : 'truncated=no';
+    card.textContent = `id=${record.id} | title=${titlePreview} | qLen=${qLen} | aLen=${aLen} | convo=${convoPreview} | ${truncatedText}`;
+    backupHistoryContainer.prepend(card);
+    while (backupHistoryContainer.childElementCount > 5) {
+      backupHistoryContainer.removeChild(backupHistoryContainer.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Aktualizuje popis rezimu zalohy. */
+  async function refreshBackupModeLabel() {
+    if (!backupModeLabel) {
+      return;
+    }
+    try {
+      const { settings } = await SettingsStore.load();
+      backupModeLabel.textContent = settings.CAPTURE_ONLY_CANDIDATES
+        ? 'Candidates only'
+        : 'All chats allowed';
+    } catch (error) {
+      backupModeLabel.textContent = 'Mode unknown';
+      await Logger.log('warn', 'debug', 'Failed to read settings for backup label', {
+        message: error && error.message
+      });
+    }
+  }
+
+  /* Slovensky komentar: Vyziada manualne zalozenie. */
+  function requestManualBackup() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'backup_now' }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(runtimeError);
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
+  if (backupButton) {
+    backupButton.addEventListener('click', async () => {
+      const labelSpan = backupButton.querySelector('span');
+      const originalLabel = labelSpan ? labelSpan.textContent : backupButton.textContent;
+      backupButton.disabled = true;
+      if (labelSpan) {
+        labelSpan.textContent = 'Working…';
+      } else {
+        backupButton.textContent = 'Working…';
+      }
+      try {
+        const response = await requestManualBackup();
+        if (response && response.ok) {
+          appendBackupToast(response.message || 'Backup completed.');
+          appendBackupHistoryCard(response.record);
+          await Logger.log('info', 'debug', 'Manual backup executed', {
+            reasonCode: response.reasonCode,
+            dryRun: Boolean(response.dryRun),
+            id: response.record ? response.record.id : null
+          });
+        } else {
+          const reason = response && response.reasonCode ? response.reasonCode : 'unknown';
+          appendBackupToast(response && response.message ? response.message : 'Manual backup failed.');
+          await Logger.log('warn', 'debug', 'Manual backup blocked', {
+            reasonCode: reason,
+            message: response && response.message ? response.message : null
+          });
+        }
+      } catch (error) {
+        appendBackupToast(error && error.message ? error.message : 'Manual backup error.');
+        await Logger.log('error', 'debug', 'Manual backup threw error', {
+          message: error && error.message
+        });
+      } finally {
+        backupButton.disabled = false;
+        if (labelSpan) {
+          labelSpan.textContent = originalLabel;
+        } else {
+          backupButton.textContent = originalLabel;
+        }
+        await refreshBackupModeLabel();
+      }
+    });
+  }
+
+  await refreshBackupModeLabel();
 
   await Logger.log('info', 'db', 'Debug page opened');
   await loadAndRenderLogs();

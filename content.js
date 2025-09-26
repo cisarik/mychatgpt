@@ -76,6 +76,95 @@ function computeMessageCounts(messageNodes) {
   };
 }
 
+/* Slovensky komentar: Z dedikovaneho nodu urci rolu spravy. */
+function detectMessageRole(node) {
+  if (!node || typeof node !== 'object') {
+    return null;
+  }
+  const datasetRole = node.dataset ? node.dataset.messageAuthorRole : undefined;
+  const explicitRole = (node.getAttribute && node.getAttribute('data-message-author-role')) || datasetRole || '';
+  const directRole = explicitRole.toString().toLowerCase();
+  if (directRole) {
+    if (directRole === 'user' || directRole === 'assistant') {
+      return directRole;
+    }
+    if (directRole === 'system' || directRole === 'tool') {
+      return null;
+    }
+  }
+  const className = typeof node.className === 'string' ? node.className.toLowerCase() : '';
+  if (className.includes('user')) {
+    return 'user';
+  }
+  if (className.includes('assistant')) {
+    return 'assistant';
+  }
+  return null;
+}
+
+/* Slovensky komentar: Vyhlada posledny uzol pre zadanu rolu. */
+function findLatestNodeByRole(role) {
+  if (!role) {
+    return null;
+  }
+  const selectors = [
+    `[data-message-author-role="${role}"]`,
+    `[data-author-role="${role}"]`,
+    `[data-role="${role}"]`
+  ];
+  for (const selector of selectors) {
+    const nodes = Array.from(document.querySelectorAll(selector)).filter((node) => node && node.nodeType === 1);
+    if (nodes.length) {
+      return nodes[nodes.length - 1];
+    }
+  }
+  const collected = collectMessageElements();
+  for (let index = collected.length - 1; index >= 0; index -= 1) {
+    const node = collected[index];
+    if (detectMessageRole(node) === role) {
+      return node;
+    }
+  }
+  return null;
+}
+
+/* Slovensky komentar: Pripravi textovu podobu spravy. */
+function normalizeMessageText(node) {
+  if (!node || typeof node.textContent !== 'string') {
+    return '';
+  }
+  return node.textContent.trim();
+}
+
+/* Slovensky komentar: Vyberie HTML odpovede bez modifikacie. */
+function pickAnswerHtml(node) {
+  if (!node) {
+    return '';
+  }
+  if (node.getAttribute && node.getAttribute('data-message-author-role') === 'assistant') {
+    return typeof node.innerHTML === 'string' ? node.innerHTML : '';
+  }
+  const assistantChild = node.querySelector && node.querySelector('[data-message-author-role="assistant"]');
+  if (assistantChild && typeof assistantChild.innerHTML === 'string') {
+    return assistantChild.innerHTML;
+  }
+  return typeof node.innerHTML === 'string' ? node.innerHTML : '';
+}
+
+/* Slovensky komentar: Zlozi snapshot najnovsej otazky a odpovede. */
+function captureLatestConversationPair() {
+  const userNode = findLatestNodeByRole('user');
+  const assistantNode = findLatestNodeByRole('assistant');
+  const questionText = normalizeMessageText(userNode);
+  const answerHtml = pickAnswerHtml(assistantNode);
+  return {
+    questionText,
+    answerHTML: answerHtml,
+    userNode,
+    assistantNode
+  };
+}
+
 /* Slovensky komentar: Obsahovy skript reaguje na ping a metadata bez zmeny DOM. */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message) {
@@ -135,6 +224,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           guessChatView: false
         },
         error: error && error.message
+      });
+    }
+    return undefined;
+  }
+
+  if (message.type === 'capture_preview') {
+    const traceId = message.traceId;
+    try {
+      const snapshot = captureLatestConversationPair();
+      const currentUrl = window.location.href;
+      sendResponse({
+        ok: true,
+        traceId,
+        url: currentUrl,
+        title: document.title,
+        convoId: extractConvoId(currentUrl),
+        questionText: snapshot.questionText || null,
+        answerHTML: snapshot.answerHTML || null
+      });
+    } catch (error) {
+      sendResponse({
+        ok: false,
+        traceId,
+        url: window.location.href,
+        title: document.title,
+        convoId: extractConvoId(window.location.href),
+        error: error && error.message ? error.message : String(error)
       });
     }
     return undefined;

@@ -102,6 +102,67 @@ const Database = {
       throw error;
     }
   },
+  /* Slovensky komentar: Ulozi zaznam o zalohe do IndexedDB. */
+  saveBackup: async (record) => {
+    try {
+      const db = await Database.initDB();
+      const transaction = db.transaction([STORE_BACKUPS], 'readwrite');
+      const store = transaction.objectStore(STORE_BACKUPS);
+      store.put(record);
+      await new Promise((resolve, reject) => {
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+      await Logger.log('info', 'db', 'Backup persisted', {
+        id: record && record.id ? record.id : null,
+        timestamp: record && record.timestamp ? record.timestamp : null
+      });
+      return record;
+    } catch (error) {
+      await Logger.log('error', 'db', 'Backup persist failed', { message: error && error.message });
+      throw error;
+    }
+  },
+  /* Slovensky komentar: Ziska najnovsie zalohy obmedzene limitom. */
+  getRecentBackups: async (limit = 10) => {
+    const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 100) : 10;
+    try {
+      const db = await Database.initDB();
+      return await new Promise((resolve, reject) => {
+        try {
+          const transaction = db.transaction([STORE_BACKUPS], 'readonly');
+          const store = transaction.objectStore(STORE_BACKUPS);
+          const index = store.index('byTimestamp');
+          const request = index.openCursor(null, 'prev');
+          const collected = [];
+
+          request.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (cursor && collected.length < safeLimit) {
+              collected.push(cursor.value);
+              cursor.continue();
+              return;
+            }
+            resolve(collected);
+          };
+
+          request.onerror = () => {
+            reject(request.error);
+          };
+
+          transaction.onerror = () => {
+            reject(transaction.error);
+          };
+        } catch (error) {
+          reject(error);
+        }
+      });
+    } catch (error) {
+      await Logger.log('error', 'db', 'Load recent backups failed', { message: error && error.message });
+      throw error;
+    }
+  },
   constants: {
     name: DB_NAME,
     version: DB_VERSION,

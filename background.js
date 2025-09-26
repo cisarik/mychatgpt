@@ -3,6 +3,8 @@ importScripts('utils.js', 'db.js');
 
 /* Slovensky komentar: Nazov storage kluca pre cooldown je zdieľaný cez utils. */
 const COOLDOWN_KEY = typeof COOLDOWN_STORAGE_KEY !== 'undefined' ? COOLDOWN_STORAGE_KEY : 'cooldown_v1';
+/* Slovensky komentar: Limit na velkost HTML odpovede pre zalohu. */
+const MAX_ANSWER_BYTES = 250 * 1024;
 
 /* Slovensky komentar: Spusti zasadenie kategorii a zaznamena trvanie. */
 async function runCategorySeeding(trigger) {
@@ -112,6 +114,92 @@ function sendProbeRequest(tabId, traceId) {
       }
     );
   });
+}
+
+/* Slovensky komentar: Odošle poziadavku na zachytenie obsahu bez modifikacie. */
+function sendCaptureRequest(tabId, traceId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(
+      tabId,
+      {
+        type: 'capture_preview',
+        traceId
+      },
+      (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(new Error(runtimeError.message || 'sendMessage failed'));
+          return;
+        }
+        resolve(response || null);
+      }
+    );
+  });
+}
+
+/* Slovensky komentar: Vyhodnoti kandidat status z metadata probe. */
+function evaluateCandidateFromProbe(probePayload, settings) {
+  const result = {
+    ok: false,
+    reasonCode: 'counts_unknown',
+    counts: { total: null, user: null, assistant: null },
+    convoId: null
+  };
+  if (!probePayload || !probePayload.ok) {
+    result.reasonCode = 'no_probe';
+    return result;
+  }
+  const counts = probePayload.counts && typeof probePayload.counts === 'object' ? probePayload.counts : {};
+  const total = Number.isFinite(counts.total) ? counts.total : null;
+  const user = Number.isFinite(counts.user) ? counts.user : null;
+  const assistant = Number.isFinite(counts.assistant) ? counts.assistant : null;
+  result.counts = { total, user, assistant };
+  result.convoId = probePayload.convoId || null;
+
+  if (total === null) {
+    result.reasonCode = 'counts_unknown';
+    return result;
+  }
+  if (total > settings.MAX_MESSAGES) {
+    result.reasonCode = 'over_max';
+    return result;
+  }
+  if (user !== null && user > settings.USER_MESSAGES_MAX) {
+    result.reasonCode = 'user_over_limit';
+    return result;
+  }
+
+  result.ok = true;
+  result.reasonCode = 'candidate_ok';
+  return result;
+}
+
+/* Slovensky komentar: Orezanie HTML odpovede na stanovenu velkost. */
+function truncateAnswerHtml(htmlValue) {
+  if (typeof htmlValue !== 'string') {
+    return { value: null, truncated: false, bytes: 0 };
+  }
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(htmlValue);
+  if (encoded.length <= MAX_ANSWER_BYTES) {
+    return { value: htmlValue, truncated: false, bytes: encoded.length };
+  }
+  let low = 0;
+  let high = htmlValue.length;
+  let bestSlice = '';
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const slice = htmlValue.slice(0, mid);
+    const sliceBytes = encoder.encode(slice).length;
+    if (sliceBytes <= MAX_ANSWER_BYTES) {
+      bestSlice = slice;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  const finalBytes = encoder.encode(bestSlice).length;
+  return { value: bestSlice, truncated: true, bytes: finalBytes };
 }
 
 /* Slovensky komentar: Bezpecne precita cas poslednej heuristiky z local storage. */
@@ -485,6 +573,213 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           error: error && error.message
         });
         sendResponse({ ok: false, reasonCode, error: error && error.message });
+      }
+    })();
+    return true;
+  }
+  if (message && message.type === 'backup_now') {
+    (async () => {
+      const traceId = `backup:${Date.now()}`;
+      let reasonCode = 'backup_capture_error';
+      let responsePayload = {
+        ok: false,
+        reasonCode,
+        message: 'Unexpected error',
+        record: null
+      };
+      let logMeta = { convoId: null, qLen: 0, aLen: 0, truncated: false, id: null };
+      let settings = null;
+
+      try {
+        ({ settings } = await SettingsStore.load());
+        const activeTab = await getActiveTab();
+        if (!activeTab || !activeTab.url || !activeTab.url.startsWith('https://chatgpt.com/')) {
+          reasonCode = 'backup_no_match';
+          responsePayload = {
+            ok: false,
+            reasonCode,
+            message: 'Active tab is not chatgpt.com.',
+            record: null
+          };
+          return;
+        }
+
+        if (urlMatchesAnyPattern(activeTab.url, settings.SAFE_URL_PATTERNS)) {
+          reasonCode = 'backup_safe_url';
+          responsePayload = {
+            ok: false,
+            reasonCode,
+            message: 'SAFE_URL pattern prevents capture.',
+            record: null
+          };
+          return;
+        }
+
+        let convoId = null;
+        if (settings.CAPTURE_ONLY_CANDIDATES) {
+          let probeResponse = null;
+          try {
+            probeResponse = await sendProbeRequest(activeTab.id, `manual:${Date.now()}`);
+          } catch (probeError) {
+            reasonCode = 'backup_capture_error';
+            responsePayload = {
+              ok: false,
+              reasonCode,
+              message: (probeError && probeError.message) || 'Metadata probe failed.',
+              record: null
+            };
+            return;
+          }
+          const evaluation = evaluateCandidateFromProbe(probeResponse, settings);
+          convoId = evaluation.convoId || null;
+          if (!evaluation.ok) {
+            reasonCode = 'backup_not_candidate';
+            responsePayload = {
+              ok: false,
+              reasonCode,
+              message: 'Not a short chat (over limits).',
+              record: null
+            };
+            logMeta = {
+              ...logMeta,
+              convoId,
+              counts: evaluation.counts
+            };
+            return;
+          }
+        }
+
+        let capturePayload = null;
+        try {
+          capturePayload = await sendCaptureRequest(activeTab.id, traceId);
+        } catch (captureError) {
+          reasonCode = 'backup_capture_error';
+          responsePayload = {
+            ok: false,
+            reasonCode,
+            message: (captureError && captureError.message) || 'Capture failed.',
+            record: null
+          };
+          return;
+        }
+
+        if (!capturePayload || !capturePayload.ok) {
+          reasonCode = 'backup_capture_error';
+          const captureMessage = capturePayload && capturePayload.error ? capturePayload.error : 'Capture unavailable.';
+          responsePayload = {
+            ok: false,
+            reasonCode,
+            message: captureMessage,
+            record: null
+          };
+          return;
+        }
+
+        const now = Date.now();
+        const questionText = capturePayload.questionText && typeof capturePayload.questionText === 'string'
+          ? capturePayload.questionText.trim()
+          : null;
+        const answerHtmlRaw = capturePayload.answerHTML && typeof capturePayload.answerHTML === 'string'
+          ? capturePayload.answerHTML
+          : null;
+        const titleCandidate = capturePayload.title && typeof capturePayload.title === 'string'
+          ? capturePayload.title.trim()
+          : '';
+        const safeTitle = titleCandidate || (questionText ? questionText.slice(0, 80) : '');
+        const truncateResult = truncateAnswerHtml(answerHtmlRaw || '');
+        const questionLength = questionText ? questionText.length : 0;
+        const answerLength = truncateResult.value ? truncateResult.value.length : 0;
+        const backupRecord = {
+          id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `backup-${now}`,
+          title: safeTitle ? safeTitle : null,
+          questionText: questionText || null,
+          answerHTML: truncateResult.value || null,
+          timestamp: now,
+          category: null,
+          convoId: capturePayload.convoId || convoId || null,
+          answerTruncated: truncateResult.truncated
+        };
+        logMeta = {
+          convoId: backupRecord.convoId,
+          qLen: questionLength,
+          aLen: answerLength,
+          truncated: truncateResult.truncated,
+          id: backupRecord.id
+        };
+
+        if (settings.DRY_RUN) {
+          reasonCode = 'backup_dry_run';
+          responsePayload = {
+            ok: true,
+            reasonCode,
+            message: 'Dry run: not persisted.',
+            record: backupRecord,
+            dryRun: true
+          };
+          return;
+        }
+
+        try {
+          await Database.saveBackup(backupRecord);
+          reasonCode = 'backup_ok';
+          responsePayload = {
+            ok: true,
+            reasonCode,
+            message: 'Backup stored successfully.',
+            record: backupRecord,
+            dryRun: false
+          };
+          try {
+            chrome.runtime.sendMessage(
+              {
+                type: 'backups_updated',
+                reason: 'manual_backup',
+                id: backupRecord.id,
+                timestamp: backupRecord.timestamp
+              },
+              () => {
+                const runtimeError = chrome.runtime.lastError;
+                if (runtimeError) {
+                  // Slovensky komentar: Ignorujeme chybu pri broadcastovani.
+                }
+              }
+            );
+          } catch (_broadcastError) {
+            // Slovensky komentar: Broadcast chyba je tichá.
+          }
+        } catch (writeError) {
+          reasonCode = 'backup_write_error';
+          responsePayload = {
+            ok: false,
+            reasonCode,
+            message: 'Failed to persist backup.',
+            record: null
+          };
+          logMeta = {
+            ...logMeta,
+            error: writeError && writeError.message ? writeError.message : String(writeError)
+          };
+        }
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        reasonCode = reasonCode === 'backup_capture_error' ? reasonCode : 'backup_capture_error';
+        responsePayload = {
+          ok: false,
+          reasonCode,
+          message,
+          record: null
+        };
+        logMeta = {
+          ...logMeta,
+          error: message
+        };
+      } finally {
+        await Logger.log('info', 'scan', 'Manual backup attempt', {
+          reasonCode,
+          ...logMeta,
+          dryRun: Boolean(settings && settings.DRY_RUN)
+        });
+        sendResponse(responsePayload);
       }
     })();
     return true;
