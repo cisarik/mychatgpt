@@ -14,6 +14,11 @@ This repository contains a minimal Manifest V3 Chrome/Brave extension scaffold f
 
 Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use the **Export debug** button on the debug page to download the latest records.
 
+## Popup navigation
+- The popup now keeps Searches, Settings, and Debug content on a single surface with in-place tab switching.
+- "Open detailed view" links route to their respective panels inside the popup instead of spawning new browser tabs.
+- Hash deep-links (`#searches`, `#settings`, `#debug`) activate the matching panel so you can bookmark or share precise popup states.
+
 ## Theme & Accessibility
 - Default experience ships with a modern dark theme tuned for ChatGPT-like contrast, while a light fallback automatically applies for users preferring light mode via `prefers-color-scheme`.
 - Shared CSS tokens drive page, popup and log surfaces to maintain ≥AA contrast for text, buttons and links across both palettes.
