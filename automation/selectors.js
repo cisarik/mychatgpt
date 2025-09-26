@@ -33,9 +33,42 @@
   ];
   const SHARE_LABEL_REGEX = /share/i;
   const HEADER_ACTION_LABEL_REGEX = /(more|options|menu|actions)/i;
+  const TIMING_DEFAULTS = Object.freeze({ waitAfterOpen: 220, waitAfterClick: 160 });
 
   function now() {
     return Date.now();
+  }
+
+  function clampTiming(value, min, max, fallback) {
+    if (Number.isFinite(value)) {
+      const rounded = Math.round(value);
+      if (rounded >= min && rounded <= max) {
+        return rounded;
+      }
+      if (rounded < min) {
+        return min;
+      }
+      if (rounded > max) {
+        return max;
+      }
+    }
+    return fallback;
+  }
+
+  function resolveTimingSettings(options = {}) {
+    const settings = options && typeof options.settings === 'object' ? options.settings : null;
+    const waitAfterOpen = clampTiming(settings?.risky_wait_after_open_ms, 80, 2000, TIMING_DEFAULTS.waitAfterOpen);
+    const waitAfterClick = clampTiming(settings?.risky_wait_after_click_ms, 60, 2000, TIMING_DEFAULTS.waitAfterClick);
+    return { waitAfterOpen, waitAfterClick };
+  }
+
+  function randomBetween(min, max) {
+    const lower = Math.ceil(min);
+    const upper = Math.floor(max);
+    if (upper <= lower) {
+      return lower;
+    }
+    return Math.floor(Math.random() * (upper - lower + 1)) + lower;
   }
 
   function sleep(ms) {
@@ -515,6 +548,10 @@
 
   async function findDeleteInOpenMenu(profile, options = {}) {
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
+    const timings = resolveTimingSettings(options);
+    if (!options.skipInitialWait) {
+      await delay(timings.waitAfterOpen);
+    }
     const deletePatterns = patternsFromProfile(profile || {}, 'delete_menu_items', MENUITEM_PATTERNS);
     const deleteTestIdRegex = profileRegex(profile || {}, 'delete_menu_testid_regex', MENUITEM_TESTID_REGEX);
     const rules = [
@@ -548,12 +585,26 @@
         }
       }
     ];
-    const match = await pollRules('menu', rules, timeoutMs);
+    const match = await pollRules('menu', rules, timeoutMs, { pollDelayMs: Math.min(180, Math.max(80, timings.waitAfterClick)) });
     return { element: match.element, evidence: match.evidence };
   }
 
   async function findConfirmDelete(profile, options = {}) {
     const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(0, options.timeoutMs) : DEFAULT_TIMEOUTS.finder;
+    const timings = resolveTimingSettings(options);
+    const pollDelay = Number.isFinite(options.pollDelayMs)
+      ? Math.max(80, Math.min(200, Math.round(options.pollDelayMs)))
+      : Math.max(100, Math.min(180, Math.round(timings.waitAfterClick)));
+    const deadline = now() + timeoutMs;
+    while (now() <= deadline) {
+      const dialogs = queryAllDeep(document, '[role="dialog"], [role="alertdialog"]').filter((node) =>
+        node instanceof Element && isVisible(node)
+      );
+      if (dialogs.length) {
+        break;
+      }
+      await delay(pollDelay);
+    }
     const confirmPatterns = patternsFromProfile(profile || {}, 'confirm_buttons', CONFIRM_PATTERNS);
     const confirmTestIdRegex = profileRegex(profile || {}, 'confirm_testid_regex', CONFIRM_TESTID_REGEX);
     const rules = [
@@ -588,7 +639,8 @@
         }
       }
     ];
-    const match = await pollRules('confirm', rules, timeoutMs);
+    const remaining = Math.max(0, deadline - now());
+    const match = await pollRules('confirm', rules, remaining || pollDelay * 4, { pollDelayMs: pollDelay });
     return { element: match.element, evidence: match.evidence };
   }
 
@@ -724,10 +776,13 @@
     });
   }
 
-  async function pollRules(step, rules, timeoutMs) {
+  async function pollRules(step, rules, timeoutMs, options = {}) {
     const limit = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : DEFAULT_TIMEOUTS.finder;
     const deadline = now() + limit;
     const attempted = new Set();
+    const pollDelay = Number.isFinite(options.pollDelayMs)
+      ? Math.max(40, Math.min(400, Math.round(options.pollDelayMs)))
+      : POLL_STEP_MS;
     while (now() <= deadline) {
       for (let index = 0; index < rules.length; index += 1) {
         const rule = rules[index];
@@ -752,7 +807,7 @@
           return { element: interactive, evidence };
         }
       }
-      await sleep(POLL_STEP_MS);
+      await delay(pollDelay);
     }
     const codeMap = { kebab: 'findHeaderKebab', menu: 'findDelete', confirm: 'findConfirmDelete' };
     throw {
@@ -880,34 +935,21 @@
     };
   }
 
-  async function reveal(node) {
-    if (!(node instanceof Element)) {
-      return;
-    }
-    node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-    const pointerCtor = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
-    const pointerOptions = { bubbles: true, composed: true, pointerId: 1, pointerType: 'mouse' };
-    node.dispatchEvent(new pointerCtor('pointerover', pointerOptions));
-    node.dispatchEvent(new pointerCtor('pointerenter', pointerOptions));
-    node.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, composed: true }));
-    node.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, composed: true }));
-    if (typeof node.focus === 'function') {
-      try {
-        node.focus({ preventScroll: true });
-      } catch (_error) {}
-    }
-    await sleep(60);
+  async function reveal(node, options = {}) {
+    await ensureFocusHover(node, options);
   }
 
-  async function clickHard(node) {
+  async function clickHard(node, options = {}) {
     if (!(node instanceof Element)) {
       return;
     }
+    const timings = resolveTimingSettings(options);
     const pointerCtor = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
     const pointerOptions = { bubbles: true, composed: true, pointerId: 1, pointerType: 'mouse' };
     const sequence = [
       { ctor: pointerCtor, type: 'pointerover', options: pointerOptions },
       { ctor: pointerCtor, type: 'pointerenter', options: pointerOptions },
+      { ctor: pointerCtor, type: 'pointermove', options: pointerOptions },
       { ctor: pointerCtor, type: 'pointerdown', options: { ...pointerOptions, buttons: 1 } },
       { ctor: MouseEvent, type: 'mousedown', options: { bubbles: true, composed: true, button: 0 } },
       { ctor: pointerCtor, type: 'pointerup', options: { ...pointerOptions, buttons: 0 } },
@@ -920,6 +962,7 @@
       const event = new EventCtor(step.type, { bubbles: true, cancelable: true, composed: true, ...init });
       node.dispatchEvent(event);
     }
+    await delay(timings.waitAfterClick);
   }
 
   function describeElement(node) {
@@ -936,34 +979,68 @@
     return { tag: `${tag}${id}${className}`, label, text };
   }
 
-  async function dismissOpenMenusAndDialogs() {
-    const keyInit = { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true };
+  async function dismissOpenMenusAndDialogs(options = {}) {
     const doc = typeof document !== 'undefined' ? document : null;
     if (!doc) {
       return;
     }
-    for (let index = 0; index < 2; index += 1) {
-      doc.dispatchEvent(new KeyboardEvent('keydown', keyInit));
-      doc.dispatchEvent(new KeyboardEvent('keyup', keyInit));
-      await sleep(90);
+    const openTargets = listVisibleLayers();
+    if (!openTargets.length) {
+      return;
     }
+    console.log(`${LOG_PREFIX} dismiss menus/dialogs`, openTargets.map((node) => describeElement(node)).filter(Boolean));
+    const keyInit = { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true };
+    doc.dispatchEvent(new KeyboardEvent('keydown', keyInit));
+    doc.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+    await delay(randomBetween(120, 180));
+    const stillOpen = listVisibleLayers();
+    if (stillOpen.length && doc.body instanceof Element) {
+      const pointerCtor = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+      const pointerOptions = { bubbles: true, composed: true, pointerId: 1, pointerType: 'mouse' };
+      doc.body.dispatchEvent(new pointerCtor('pointerdown', { ...pointerOptions, buttons: 1 }));
+      doc.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true, button: 0 }));
+      doc.body.dispatchEvent(new pointerCtor('pointerup', { ...pointerOptions, buttons: 0 }));
+      doc.body.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true, button: 0 }));
+      doc.body.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true, button: 0 }));
+      await delay(randomBetween(140, 200));
+    }
+  }
+
+  function listVisibleLayers() {
+    const doc = typeof document !== 'undefined' ? document : null;
+    if (!doc) {
+      return [];
+    }
+    const menus = roleQueryDeep(doc, 'menu');
+    const dialogs = queryAllDeep(doc, '[role="dialog"], [role="alertdialog"]').filter((node) =>
+      node instanceof Element && isVisible(node)
+    );
+    return [...menus, ...dialogs];
   }
 
   async function ensureFocusHover(node) {
     if (!(node instanceof Element)) {
       return;
     }
-    await reveal(node);
+    node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
     if (typeof node.focus === 'function') {
       try {
         node.focus({ preventScroll: true });
       } catch (_error) {}
     }
-    await sleep(60);
+    const pointerCtor = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+    const pointerOptions = { bubbles: true, composed: true, pointerId: 1, pointerType: 'mouse' };
+    node.dispatchEvent(new pointerCtor('pointerover', pointerOptions));
+    node.dispatchEvent(new pointerCtor('pointerenter', pointerOptions));
+    node.dispatchEvent(new pointerCtor('pointermove', pointerOptions));
+    node.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, composed: true }));
+    node.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, composed: true }));
+    node.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, composed: true }));
+    await delay(60);
   }
 
   async function delay(ms) {
-    await sleep(ms);
+    await sleep(Math.max(0, Number.isFinite(ms) ? ms : 0));
   }
 
   const api = {

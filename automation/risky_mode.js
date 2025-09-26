@@ -37,8 +37,8 @@
 
     const settings = params.settings || {};
     const dryRun = Boolean(settings.dry_run);
+    const timings = resolveTimings(settings);
     const stepTimeout = normalizeTimeout(settings.risky_step_timeout_ms);
-    const maxRetries = normalizeRetries(settings.risky_max_retries);
     const profile = compileProfile(params.profile);
 
     const context = {
@@ -49,49 +49,31 @@
 
     console.log(`${LOG_PREFIX} header delete start`, context);
 
-    const runStep = async (name, executor, options = {}) => {
-      const retryable = options.retryable !== false;
-      const skip = Boolean(options.skip);
-      const attempts = retryable ? maxRetries + 1 : 1;
-      for (let index = 0; index < attempts; index += 1) {
-        const attempt = index + 1;
-        try {
-          const result = await executor({ attempt, skip: skip && attempt === 1 });
-          const evidence = result?.evidence || result?.meta;
-          if (evidence !== undefined) {
-            console.log(`${LOG_PREFIX} ${name}✓`, evidence);
-          } else {
-            console.log(`${LOG_PREFIX} ${name}✓`);
-          }
-          return result || {};
-        } catch (error) {
-          const meta = formatErrorMeta(error);
-          if (attempt >= attempts) {
-            meta.attempt = attempt;
-            throw { ...error, step: name, meta };
-          }
-          console.warn(`${LOG_PREFIX} retry step=${name}`, { ...meta, attempt });
-          await delay(120);
-        }
+    const selectorOptions = { settings };
+    const logStep = (name, evidence) => {
+      if (evidence !== undefined) {
+        console.log(`${LOG_PREFIX} ${name}✓`, evidence);
+      } else {
+        console.log(`${LOG_PREFIX} ${name}✓`);
       }
-      throw { code: 'step_failed', reason: name };
     };
 
     const failure = (step, error) => {
       const meta = formatErrorMeta(error);
-      const outcome = {
+      const code = meta.code || meta.reason || 'automation_failed';
+      console.error(`${LOG_PREFIX} FAIL code=${code} step=${step}`, meta);
+      return {
         ok: false,
-        reason: meta.code || meta.reason || meta.message || 'automation_failed',
+        reason: code,
+        code,
         step,
         details: meta
       };
-      console.error(`${LOG_PREFIX} FAIL step=${step}`, outcome);
-      return outcome;
     };
 
     try {
       if (typeof dismissOpenMenusAndDialogs === 'function') {
-        await dismissOpenMenusAndDialogs();
+        await dismissOpenMenusAndDialogs(selectorOptions);
       }
       await delay(80);
 
@@ -106,144 +88,111 @@
       }, delay);
 
       await waitForAppShell({ timeoutMs: stepTimeout });
-      await delay(60);
 
-      const header = await runStep('share', () => waitForHeaderToolbar({ timeoutMs: stepTimeout }), { retryable: true });
+      const header = await waitForHeaderToolbar({ timeoutMs: stepTimeout });
       const toolbarEl = header?.toolbarEl;
       const shareEl = header?.shareEl;
       if (!(toolbarEl instanceof Element) || !(shareEl instanceof Element)) {
         return failure('share', { code: 'header_missing', message: 'Conversation header missing' });
       }
 
-      const kebab = await runStep(
-        'kebab',
-        () => findHeaderKebabNearShare(toolbarEl, shareEl, { timeoutMs: stepTimeout }),
-        { retryable: true }
-      );
-      const kebabEl = kebab?.kebabEl || kebab?.element;
+      await ensureFocusHover(shareEl);
+      logStep('share', header?.evidence || describeElement(shareEl));
+
+      const kebabMatch = await findHeaderKebabNearShare(toolbarEl, shareEl, { timeoutMs: stepTimeout });
+      const kebabEl = kebabMatch?.kebabEl || kebabMatch?.element;
       if (!(kebabEl instanceof Element)) {
         return failure('kebab', { code: 'kebab_missing', message: 'Header kebab missing' });
       }
 
-      const menu = await runStep(
-        'menu',
-        async ({ skip }) => {
-          if (typeof dismissOpenMenusAndDialogs === 'function') {
-            await dismissOpenMenusAndDialogs();
-          }
-          await ensureFocusHover(shareEl);
-          await ensureFocusHover(kebabEl);
-          if (skip) {
-            console.log(`${LOG_PREFIX} menu dry-run`, kebab?.evidence || describeElement(kebabEl));
-          } else {
-            await clickHard(kebabEl);
-            await delay(150);
-          }
-          try {
-            const lookupTimeout = skip ? Math.min(400, stepTimeout) : stepTimeout;
-            const found = await findDeleteInOpenMenu(profile, { timeoutMs: lookupTimeout });
-            return found;
-          } catch (error) {
-            if (skip) {
-              return { element: null, evidence: { skip: true, ...formatErrorMeta(error) } };
-            }
-            throw error;
-          }
-        },
-        { retryable: true, skip: dryRun }
-      );
-
-      const deleteStep = await runStep(
-        'delete',
-        async ({ skip }) => {
-          let target = menu?.element;
-          let evidence = menu?.evidence;
-          if (!target) {
-            const refreshed = await findDeleteInOpenMenu(profile, { timeoutMs: stepTimeout });
-            target = refreshed?.element;
-            evidence = refreshed?.evidence;
-          }
-          if (!(target instanceof Element)) {
-            throw { code: 'delete_missing', message: 'Delete menu item missing' };
-          }
-          if (skip) {
-            return { element: target, evidence: { ...(evidence || describeElement(target)), skip: true } };
-          }
-          await ensureFocusHover(target);
-          await clickHard(target);
-          await delay(160);
-          return { element: target, evidence: evidence || describeElement(target) };
-        },
-        { retryable: true, skip: dryRun }
-      );
-
-      const confirm = await runStep(
-        'confirm',
-        async ({ skip }) => {
-          const match = await findConfirmDelete(profile, { timeoutMs: stepTimeout });
-          const element = match?.element;
-          if (!(element instanceof Element)) {
-            throw { code: 'confirm_missing', message: 'Confirm button missing' };
-          }
-          if (skip) {
-            return { element, evidence: { ...(match?.evidence || describeElement(element)), skip: true } };
-          }
-          await ensureFocusHover(element);
-          await clickHard(element);
-          await delay(160);
-          return { element, evidence: match?.evidence || describeElement(element) };
-        },
-        { retryable: true, skip: dryRun }
-      );
+      await ensureFocusHover(kebabEl);
+      logStep('kebab', kebabMatch?.evidence || describeElement(kebabEl));
 
       if (dryRun) {
-        const outcome = {
+        console.log(`${LOG_PREFIX} DRY RUN would click kebab`, kebabMatch?.evidence || describeElement(kebabEl));
+        logStep('menu', { skip: true });
+        logStep('delete', { skip: true });
+        logStep('confirm', { skip: true });
+        logStep('verify', { skip: true });
+        return {
           ok: true,
           reason: 'dry_run',
           step: 'dry_run',
           evidence: {
-            kebab: kebab?.evidence || describeElement(kebabEl),
-            delete: deleteStep?.evidence,
-            confirm: confirm?.evidence
+            kebab: kebabMatch?.evidence || describeElement(kebabEl)
           }
         };
-        console.log(`${LOG_PREFIX} dry run complete`, outcome.evidence);
-        return outcome;
       }
 
-      const verify = await runStep(
-        'verify',
-        async () => {
-          const outcome = await verifyDeletion({
-            selectors: {
-              delay,
-              findShare,
-              byTextDeep,
-              describeElement,
-              TOAST_REGEX
-            },
-            profile,
-            convoId: params.convoId,
-            timeoutMs: stepTimeout
-          });
-          if (!outcome.ok) {
-            throw outcome;
-          }
-          return outcome;
-        },
-        { retryable: false }
-      );
+      let deleteMatch = null;
+      let confirmMatch = null;
+      let lastError = null;
 
-      const success = {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await dismissOpenMenusAndDialogs(selectorOptions);
+          await ensureFocusHover(kebabEl);
+          await clickHard(kebabEl, selectorOptions);
+          await delay(timings.waitAfterOpen);
+
+          deleteMatch = await findDeleteInOpenMenu(profile, {
+            timeoutMs: stepTimeout,
+            settings,
+            skipInitialWait: true
+          });
+          const deleteEl = deleteMatch?.element;
+          if (!(deleteEl instanceof Element)) {
+            throw { code: 'delete_missing', reason: 'delete_missing' };
+          }
+          logStep('menu', deleteMatch?.evidence || describeElement(deleteEl));
+
+          await ensureFocusHover(deleteEl);
+          await clickHard(deleteEl, selectorOptions);
+          logStep('delete', deleteMatch?.evidence || describeElement(deleteEl));
+
+          confirmMatch = await findConfirmDelete(profile, { timeoutMs: stepTimeout, settings });
+          const confirmEl = confirmMatch?.element;
+          if (!(confirmEl instanceof Element)) {
+            throw { code: 'confirm_missing', reason: 'confirm_missing' };
+          }
+          await ensureFocusHover(confirmEl);
+          await clickHard(confirmEl, selectorOptions);
+          logStep('confirm', confirmMatch?.evidence || describeElement(confirmEl));
+          break;
+        } catch (error) {
+          lastError = error;
+          if (attempt >= 1) {
+            throw error;
+          }
+          console.warn(`${LOG_PREFIX} retry delete-flow`, formatErrorMeta(error));
+        }
+      }
+
+      if (!(confirmMatch?.element instanceof Element)) {
+        throw lastError || { code: 'confirm_missing', reason: 'confirm_missing' };
+      }
+
+      const verify = await verifyDeletion({
+        selectors: { delay, findShare, byTextDeep, describeElement, TOAST_REGEX },
+        profile,
+        convoId: params.convoId,
+        timeoutMs: stepTimeout
+      });
+      if (!verify.ok) {
+        throw { ...verify, step: 'verify' };
+      }
+      logStep('verify', verify.evidence || { reason: verify.reason });
+
+      const outcome = {
         ok: true,
         reason: verify.reason || 'deleted',
         step: 'verify',
         evidence: verify.evidence || null
       };
-      console.log(`${LOG_PREFIX} success`, success);
-      return success;
+      console.log(`${LOG_PREFIX} success`, outcome);
+      return outcome;
     } catch (error) {
-      return failure(error?.step || 'automation', error);
+      return failure(error?.step || error?.code || 'automation', error);
     }
   }
 
@@ -255,7 +204,7 @@
 
     return (async () => {
       while (Date.now() <= deadline) {
-        if (convoPattern && !convoPattern.test(window.location.pathname)) {
+        if (convoPattern && !convoPattern.test(window.location.href)) {
           return { ok: true, reason: 'url_changed', evidence: { url: window.location.href } };
         }
         const header = typeof selectors.findShare === 'function' ? selectors.findShare() : null;
@@ -269,11 +218,12 @@
             return { ok: true, reason: 'toast', evidence: selectors.describeElement(host) };
           }
         }
-        await selectors.delay(160);
+        await selectors.delay(150);
       }
       return {
         ok: false,
         reason: 'verify_timeout',
+        code: 'verify_timeout',
         timeoutMs: limit,
         evidence: { url: window.location.href }
       };
@@ -366,11 +316,25 @@
     return Math.max(500, raw);
   }
 
-  function normalizeRetries(raw) {
-    if (!Number.isFinite(raw)) {
-      return 0;
+  function resolveTimings(settings) {
+    return {
+      waitAfterOpen: clampTimingSetting(settings?.risky_wait_after_open_ms, 80, 2000, 220),
+      waitAfterClick: clampTimingSetting(settings?.risky_wait_after_click_ms, 60, 2000, 160)
+    };
+  }
+
+  function clampTimingSetting(value, min, max, fallback) {
+    if (Number.isFinite(value)) {
+      const rounded = Math.round(value);
+      if (rounded < min) {
+        return min;
+      }
+      if (rounded > max) {
+        return max;
+      }
+      return rounded;
     }
-    return Math.max(0, Math.floor(raw));
+    return fallback;
   }
 
   function escapeRegex(value) {

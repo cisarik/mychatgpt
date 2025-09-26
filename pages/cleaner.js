@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, DeletionStrategyIds, getConvoUrl, isRiskySessionActive, normalizeSettings } from '../utils.js';
+import { DEFAULT_SETTINGS, getConvoUrl, isRiskySessionActive, normalizeSettings } from '../utils.js';
 
 const tableBody = document.getElementById('backup-body');
 const selectAllInput = document.getElementById('select-all');
@@ -212,6 +212,9 @@ function setBusy(state) {
   tableBody.querySelectorAll('input[type="checkbox"]').forEach((node) => {
     node.disabled = state;
   });
+  tableBody.querySelectorAll('.col-actions button').forEach((node) => {
+    node.disabled = state;
+  });
   updateSelectionState();
 }
 
@@ -364,48 +367,22 @@ function formatTimestamp(ms) {
 /** Slovensky: Formátuje výsledok posledného mazania. */
 function formatDeletionStatus(item) {
   const outcome = item.lastDeletionOutcome;
-  if (!outcome) {
-    return { pillText: '—', pillClass: 'status-pill', title: 'No attempts yet', since: '' };
-  }
-  const strategy = outcome.strategyId === DeletionStrategyIds.UI_AUTOMATION ? 'automation' : 'manual';
-  const reasonLabel = formatOutcomeReason(outcome);
   const since = item.lastDeletionAttemptAt ? formatRelativeTime(item.lastDeletionAttemptAt) : '';
-  const detailParts = [reasonLabel, `via ${strategy}`];
-  if (outcome.dryRun) {
-    detailParts.push('dry-run');
+  if (!outcome) {
+    return { pillText: '—', pillClass: 'status-pill', title: 'No attempts yet', since };
   }
-  if (outcome.step) {
-    detailParts.push(`step: ${outcome.step}`);
-  }
-  const title = detailParts.join(' · ');
-  if (outcome.ok && outcome.reason === 'dry_run') {
+  const rawReason = typeof item.lastDeletionReason === 'string' ? item.lastDeletionReason.trim() : '';
+  const normalizedReason = rawReason ? rawReason.replace(/_/g, ' ') : '';
+  const evidence = typeof item.lastDeletionEvidence === 'string' ? item.lastDeletionEvidence.trim() : '';
+  const titleParts = [normalizedReason, evidence].filter(Boolean);
+  const title = titleParts.join(' · ') || (outcome === 'ok' ? 'Deleted' : 'Failed');
+  if (outcome === 'ok' && normalizedReason.toLowerCase() === 'dry run') {
     return { pillText: 'DRY', pillClass: 'status-pill status-pill--warn', title, since };
   }
-  if (outcome.ok) {
+  if (outcome === 'ok') {
     return { pillText: 'OK', pillClass: 'status-pill status-pill--ok', title, since };
   }
   return { pillText: 'FAIL', pillClass: 'status-pill status-pill--fail', title, since };
-}
-
-function formatOutcomeReason(outcome) {
-  const mapping = {
-    deleted: 'Deleted',
-    dry_run: 'Dry run',
-    manual_open: 'Opened manually',
-    manual_fallback: 'Manual fallback',
-    already_open: 'Already open',
-    verify_timeout: 'Verify timeout',
-    not_logged_in: 'Not logged in',
-    automation_failed: 'Automation failed',
-    risky_inactive: 'Risky mode inactive'
-  };
-  if (outcome.ok) {
-    return 'Deleted';
-  }
-  if (outcome.reason && mapping[outcome.reason]) {
-    return mapping[outcome.reason];
-  }
-  return outcome.reason ? outcome.reason.replace(/_/g, ' ') : 'Unknown';
 }
 
 /** Slovensky: Zobrazí počet turnov ako "u+a". */
@@ -573,7 +550,7 @@ async function runDeletion() {
     const tabError = results.some((entry) => entry && entry.err);
 
     if (response?.ok || results.length) {
-      await showStatus(`Deleted ${deletedCount} • Failed ${failedCount}`);
+      await showStatus(`${deletedCount} deleted • ${failedCount} failed`);
     } else {
       await showStatus('Deletion failed');
     }
@@ -610,11 +587,14 @@ function handleRiskyProgress(payload) {
   const failed = Number.isFinite(payload.failed) ? payload.failed : 0;
   const cancelled = Boolean(payload.cancelled);
   const done = Boolean(payload.done);
+  const summary = typeof payload.summary === 'string' && payload.summary.trim()
+    ? payload.summary.trim()
+    : `${deleted} deleted • ${failed} failed`;
 
   lastProgressState = { processed, total, deleted, failed, cancelled, done };
 
-  const runningText = `Running… ${processed}/${total} • ${deleted} deleted • ${failed} failed`;
-  const doneText = `Done – ${deleted} deleted • ${failed} failed${cancelled ? ' • cancelled' : ''}`;
+  const runningText = `Running… ${processed}/${total} • ${summary}`;
+  const doneText = `Done – ${summary}${cancelled ? ' • cancelled' : ''}`;
 
   if (progressClearTimer) {
     clearTimeout(progressClearTimer);

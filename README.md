@@ -42,6 +42,7 @@ Search Cleaner keeps short, search-like ChatGPT conversations in a local backup 
 - Troubleshooting:
   - Run **Test selectors** on the active tab; it logs a `[RiskyMode]` probe summary (header/menu/confirm) in the tab console and returns a ✓/× readout in the popup.
   - If the probe times out, increase `risky_step_timeout_ms`, ensure the Share button and three-dot menu are visible (no overlays, 100% zoom), and keep the header toolbar scrolled into view.
+  - When menu or confirm never appear, raise `risky_wait_after_open_ms` toward 300–400 ms and stretch `risky_step_timeout_ms` to 12–15 s before retrying.
   - Screenshot note: grab a quick capture of the header toolbar (Share → kebab) when updating docs so teammates know which controls to target.
   - If the kebab button only shows on hover, the automation reveals it automatically—ensure the element can scroll into view.
   - Still failing? Capture the `[RiskyMode]` console logs (including evidence payloads) and tune selectors or timeouts.

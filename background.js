@@ -879,7 +879,14 @@ function compileBackgroundProfile(base) {
 /** Slovensky: Posiela priebežný update pre popup. */
 function broadcastRiskyProgress(payload) {
   try {
-    chrome.runtime.sendMessage({ type: 'RISKY_PROGRESS', payload }).catch(() => {});
+    const deleted = Number.isFinite(payload?.deleted) ? payload.deleted : 0;
+    const failed = Number.isFinite(payload?.failed) ? payload.failed : 0;
+    const processed = Number.isFinite(payload?.processed) ? payload.processed : 0;
+    const total = Number.isFinite(payload?.total) ? payload.total : 0;
+    const summary = `${deleted} deleted • ${failed} failed`;
+    chrome.runtime
+      .sendMessage({ type: 'RISKY_PROGRESS', payload: { ...payload, deleted, failed, processed, total, summary } })
+      .catch(() => {});
   } catch (_error) {}
 }
 
@@ -909,19 +916,85 @@ async function recordDeletionResults(results, settings) {
       if (!item?.convoId) {
         return;
       }
+      const outcome = item.ok ? 'ok' : 'fail';
+      const reason = summarizeDeletionReason(item, settings);
+      const evidence = summarizeDeletionEvidence(item?.evidence);
       await backups.updateDeletionMeta(item.convoId, {
         lastDeletionAttemptAt: timestamp,
-        lastDeletionOutcome: {
-          ok: Boolean(item.ok),
-          reason: item.reason || null,
-          step: item.step || null,
-          strategyId: item.strategyId,
-          attempt: item.attempt || 0,
-          dryRun: item.strategyId === DeletionStrategyIds.UI_AUTOMATION ? Boolean(settings.dry_run) : false
-        }
+        lastDeletionOutcome: outcome,
+        lastDeletionReason: reason,
+        lastDeletionEvidence: evidence
       });
     })
   );
+}
+
+function summarizeDeletionReason(item, settings) {
+  if (!item) {
+    return null;
+  }
+  const dryRun = item.strategyId === DeletionStrategyIds.UI_AUTOMATION ? Boolean(settings?.dry_run) : false;
+  if (dryRun && item.ok) {
+    return 'dry run';
+  }
+  const sources = [item.reason, item.step];
+  for (const value of sources) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return item.ok ? 'deleted' : 'failed';
+}
+
+function summarizeDeletionEvidence(raw) {
+  if (!raw) {
+    return null;
+  }
+  if (typeof raw === 'string') {
+    return truncateEvidence(raw);
+  }
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      const summarized = summarizeDeletionEvidence(entry);
+      if (summarized) {
+        return summarized;
+      }
+    }
+    return null;
+  }
+  if (typeof raw === 'object') {
+    if (raw.node && typeof raw.node === 'object') {
+      const parts = [raw.node.tag, raw.node.label, raw.node.text].map((value) =>
+        typeof value === 'string' ? value.trim() : ''
+      );
+      const joined = parts.filter(Boolean).join(' · ');
+      if (joined) {
+        return truncateEvidence(joined);
+      }
+    }
+    const textLike = ['label', 'text', 'message', 'reason'].map((key) => raw[key]).find((value) =>
+      typeof value === 'string' && value.trim()
+    );
+    if (textLike) {
+      return truncateEvidence(String(textLike));
+    }
+    if (raw.url && typeof raw.url === 'string') {
+      return truncateEvidence(raw.url);
+    }
+  }
+  try {
+    return truncateEvidence(JSON.stringify(raw));
+  } catch (_error) {
+    return null;
+  }
+}
+
+function truncateEvidence(text) {
+  const normalized = String(text || '').trim();
+  if (!normalized) {
+    return null;
+  }
+  return normalized.length > 140 ? `${normalized.slice(0, 139)}…` : normalized;
 }
 
 /** Slovensky: Nastaví príznak zrušenia mazania. */
@@ -1038,7 +1111,6 @@ async function testSelectorsOnActiveTab() {
         if (kebabEl instanceof Element) {
           await selectors.reveal(kebabEl);
           await selectors.clickHard(kebabEl);
-          await selectors.sleep(160);
           menuOpened = true;
           try {
             menuResult = await selectors.findDeleteInOpenMenu(profile, { timeoutMs });
@@ -1053,7 +1125,6 @@ async function testSelectorsOnActiveTab() {
           if (menuResult?.element instanceof Element && !menuResult?.evidence?.hidden) {
             await selectors.reveal(menuResult.element);
             await selectors.clickHard(menuResult.element);
-            await selectors.sleep(180);
             try {
               confirmResult = await selectors.findConfirmDelete(profile, { timeoutMs });
               if (confirmResult?.element instanceof Element) {

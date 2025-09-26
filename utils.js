@@ -23,6 +23,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   risky_session_until: null,
   risky_jitter_ms: [120, 380],
   risky_step_timeout_ms: 10000,
+  risky_wait_after_open_ms: 220,
+  risky_wait_after_click_ms: 160,
   risky_between_tabs_ms: 800,
   risky_max_retries: 1,
   dry_run: false
@@ -75,20 +77,12 @@ let debugWaiter = null;
  * @property {string} url
  * @property {{user:number,assistant:number}} counts
  * @property {number|null} lastDeletionAttemptAt
- * @property {DeletionOutcome|null} lastDeletionOutcome
+ * @property {'ok'|'fail'|null} lastDeletionOutcome
+ * @property {string|null} lastDeletionReason
+ * @property {string|null} lastDeletionEvidence
  * @property {boolean|null} eligible
  * @property {string|null} eligibilityReason
 */
-
-/**
- * @typedef {Object} DeletionOutcome
- * @property {boolean} ok
- * @property {string|null} reason
- * @property {string|null} step
- * @property {'manual-open'|'ui-automation'} strategyId
- * @property {number} attempt
- * @property {boolean} dryRun
- */
 
 /**
  * @typedef {Object} DeletionReport
@@ -193,6 +187,12 @@ export function normalizeSettings(raw) {
   }
   if (Number.isFinite(raw.risky_step_timeout_ms)) {
     result.risky_step_timeout_ms = clampInt(raw.risky_step_timeout_ms, 1000, 30000);
+  }
+  if (Number.isFinite(raw.risky_wait_after_open_ms)) {
+    result.risky_wait_after_open_ms = clampInt(raw.risky_wait_after_open_ms, 80, 2000);
+  }
+  if (Number.isFinite(raw.risky_wait_after_click_ms)) {
+    result.risky_wait_after_click_ms = clampInt(raw.risky_wait_after_click_ms, 60, 2000);
   }
   if (Number.isFinite(raw.risky_between_tabs_ms)) {
     result.risky_between_tabs_ms = clampInt(raw.risky_between_tabs_ms, 100, 60000);
@@ -483,6 +483,11 @@ export async function clearLogs() {
  */
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms || 0)));
+}
+
+/** Slovensky: Krátke čakanie pre konzistentné gestá. */
+export async function delay(ms) {
+  await sleep(Math.max(0, ms || 0));
 }
 
 /** Slovensky: Vracia aktuálny čas pre konzistentné merania. */

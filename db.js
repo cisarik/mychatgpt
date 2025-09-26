@@ -129,7 +129,9 @@ function mapRecord(input = {}, existing = null) {
       : Number.isFinite(existing?.lastDeletionAttemptAt)
       ? existing.lastDeletionAttemptAt
       : null,
-    lastDeletionOutcome: input.lastDeletionOutcome ?? existing?.lastDeletionOutcome ?? null,
+    lastDeletionOutcome: normalizeDeletionOutcome(input.lastDeletionOutcome, existing?.lastDeletionOutcome),
+    lastDeletionReason: normalizeDeletionText(input.lastDeletionReason, existing?.lastDeletionReason),
+    lastDeletionEvidence: normalizeDeletionText(input.lastDeletionEvidence, existing?.lastDeletionEvidence, 120),
     eligible: normalizeEligibility(input.eligible, existing?.eligible),
     eligibilityReason: normalizeEligibilityReason(input.eligibilityReason, existing?.eligibilityReason)
   };
@@ -236,13 +238,37 @@ export const backups = {
   /**
    * Slovensky: Aktualizuje meta údaje o poslednom mazacom pokuse.
    * @param {string} convoId
-   * @param {{lastDeletionAttemptAt?: number|null,lastDeletionOutcome?: any}} meta
-   * @returns {Promise<import('./utils.js').BackupItem|null>}
-   */
+ * @param {{lastDeletionAttemptAt?: number|null,lastDeletionOutcome?: any,lastDeletionReason?: any,lastDeletionEvidence?: any}} meta
+ * @returns {Promise<import('./utils.js').BackupItem|null>}
+ */
   async updateDeletionMeta(convoId, meta) {
     if (!convoId || !meta) {
       return null;
+}
+
+function normalizeDeletionOutcome(nextValue, existingValue) {
+  const candidates = [nextValue, existingValue];
+  for (const value of candidates) {
+    if (value === 'ok' || value === 'fail') {
+      return value;
     }
+  }
+  return null;
+}
+
+function normalizeDeletionText(nextValue, existingValue, limit = 160) {
+  const normalize = (value) => {
+    if (typeof value !== 'string') {
+      return null;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    return trimmed.length > limit ? `${trimmed.slice(0, limit - 1)}…` : trimmed;
+  };
+  return normalize(nextValue) ?? normalize(existingValue);
+}
     const db = await initDb();
     const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
