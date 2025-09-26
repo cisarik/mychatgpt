@@ -8,36 +8,38 @@
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <main class="popup-shell">
-    <div class="tab-container" role="tablist" aria-label="MyChatGPT sections">
-      <button class="tab-button active" data-target="searches" role="tab" aria-selected="true">Searches</button>
-      <button class="tab-button" data-target="settings" role="tab" aria-selected="false">Settings</button>
-      <button class="tab-button" data-target="debug" role="tab" aria-selected="false">Debug</button>
-    </div>
-
-    <section id="section-searches" class="section active panel popup-section" role="tabpanel">
-      <h2>Search backups</h2>
-      <p class="text-muted">Latest exports from your sessions will show up automatically.</p>
-      <a class="popup-link" href="../pages/searches.html" target="_blank">Open detailed view</a>
-    </section>
-
-    <section id="section-settings" class="section panel popup-section" role="tabpanel">
-      <h2>Settings</h2>
-      <p class="text-muted">Control behaviours, limits and safety defaults.</p>
-      <a class="popup-link" href="../pages/settings.html" target="_blank">Open detailed view</a>
-    </section>
-
-    <section id="section-debug" class="section panel popup-section" role="tabpanel">
-      <h2>Debug tools</h2>
-      <p class="text-muted">Inspect the extension logs, network probes and diagnostics.</p>
-      <div class="debug-actions">
-        <button id="test-log-btn">Test log</button>
-        <a class="popup-link" href="../pages/debug.html" target="_blank">Open debug page</a>
+  <div class="popup-root">
+    <main class="popup-shell">
+      <div class="tab-container" role="tablist" aria-label="MyChatGPT sections">
+        <button class="tab-button active" data-target="searches" role="tab" aria-selected="true">Searches</button>
+        <button class="tab-button" data-target="settings" role="tab" aria-selected="false">Settings</button>
+        <button class="tab-button" data-target="debug" role="tab" aria-selected="false">Debug</button>
       </div>
-    </section>
-  </main>
 
-  <script src="../utils.js"></script>
-  <script src="popup.js"></script>
+      <section id="section-searches" class="section active panel popup-section" role="tabpanel">
+        <h2>Search backups</h2>
+        <p class="text-muted">Latest exports from your sessions will show up automatically.</p>
+        <a class="popup-link" href="../pages/searches.html" target="_blank">Open detailed view</a>
+      </section>
+
+      <section id="section-settings" class="section panel popup-section" role="tabpanel">
+        <h2>Settings</h2>
+        <p class="text-muted">Control behaviours, limits and safety defaults.</p>
+        <a class="popup-link" href="../pages/settings.html" target="_blank">Open detailed view</a>
+      </section>
+
+      <section id="section-debug" class="section panel popup-section" role="tabpanel">
+        <h2>Debug tools</h2>
+        <p class="text-muted">Inspect the extension logs, network probes and diagnostics.</p>
+        <div class="debug-actions">
+          <button id="test-log-btn">Test log</button>
+          <a class="popup-link" href="../pages/debug.html" target="_blank">Open debug page</a>
+        </div>
+      </section>
+    </main>
+
+    <script src="../utils.js"></script>
+    <script src="popup.js"></script>
+  </div>
 </body>
 </html>

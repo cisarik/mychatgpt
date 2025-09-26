@@ -19,6 +19,11 @@ Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use the **
 - Shared CSS tokens drive page, popup and log surfaces to maintain ≥AA contrast for text, buttons and links across both palettes.
 - Interactive controls expose visible focus rings, hover states and disabled styling for assistive clarity.
 
+## Popup sizing & troubleshooting
+- The popup enforces a minimum footprint of 360×480 while remaining responsive up to a 720×720 ceiling.
+- If the popup opens unusually narrow, reload the extension, ensure no custom CSS overrides are injected, and verify operating system scaling settings.
+- Use the popup’s DevTools to inspect the computed sizes on `html`, `body`, and `.popup-root` if issues persist.
+
 ## Settings & Categories
 | Key | Default | Description |
 | --- | --- | --- |

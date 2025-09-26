@@ -1,13 +1,49 @@
-/* Slovensky komentar: Styly specificke pre popup okno. */
+/* Slovensky komentar: Styly specificke pre popup okno s odolnym rozmerovym modelom. */
+html,
 body {
-  width: 320px;
-  min-height: 260px;
-  padding: 16px;
+  width: auto;
+  height: auto;
+  min-width: var(--popup-min-w);
+  min-height: var(--popup-min-h);
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+.popup-root {
+  box-sizing: border-box;
+  width: clamp(var(--popup-min-w), 92vw, var(--popup-max-w));
+  height: clamp(var(--popup-min-h), 92vh, var(--popup-max-h));
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .popup-shell {
   display: grid;
   gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.tabbar,
+.tabbar * {
+  flex-shrink: 0;
+}
+
+.tab-container,
+.tab-container * {
+  flex-shrink: 0;
+}
+
+.page {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 .popup-section {
@@ -29,6 +65,11 @@ body {
 .popup-link:hover,
 .popup-link:focus {
   text-decoration: none;
+}
+
+.popup-shell button,
+.popup-shell .popup-link {
+  max-width: 100%;
 }
 
 .debug-actions {
@@ -60,10 +101,6 @@ body {
 }
 
 @media (max-width: 360px) {
-  body {
-    width: auto;
-  }
-
   .debug-actions {
     flex-direction: column;
     align-items: stretch;
@@ -73,4 +110,8 @@ body {
     width: 100%;
     text-align: center;
   }
+}
+
+* {
+  min-width: 0;
 }
