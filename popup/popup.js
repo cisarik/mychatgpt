@@ -33,6 +33,7 @@
       const isActive = key === tabName;
       candidate.classList.toggle('active', isActive);
       candidate.setAttribute('aria-hidden', String(!isActive));
+      candidate.hidden = !isActive;
     });
 
     if (focus) {
@@ -49,10 +50,13 @@
   }
 
   /* Slovensky komentar: Obsluha zmeny hash pre podporu deep linkov. */
-  function syncFromHash({ focus } = { focus: true }) {
+  function syncFromHash({ focus = true, ensureHash = false } = {}) {
     const hashValue = window.location.hash.replace('#', '');
-    const targetTab = panels.has(hashValue) ? hashValue : defaultTab;
-    activateTab(targetTab, { focus, updateHash: false });
+    if (panels.has(hashValue)) {
+      activateTab(hashValue, { focus, updateHash: false });
+      return;
+    }
+    activateTab(defaultTab, { focus, updateHash: ensureHash });
   }
 
   tabButtons.forEach((button, index) => {
@@ -93,16 +97,11 @@
       suppressHashChange = false;
       return;
     }
-    syncFromHash({ focus: true });
+    syncFromHash({ focus: true, ensureHash: true });
   });
 
   if (tabButtons.length) {
-    const initialHash = window.location.hash.replace('#', '');
-    if (panels.has(initialHash)) {
-      activateTab(initialHash, { focus: false, updateHash: false });
-    } else {
-      activateTab(defaultTab, { focus: false, updateHash: true });
-    }
+    syncFromHash({ focus: false, ensureHash: true });
   }
 
   const testButton = document.getElementById('test-log-btn');
