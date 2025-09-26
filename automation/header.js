@@ -47,36 +47,39 @@
         attempted.push('kebab');
         await ensureFocusHover(kebab);
         await clickHard(kebab);
-        attempted.push('menu_open');
+        attempted.push('openMenu');
         await delay(config.wait_after_open);
-        const deleteButton = await findDeleteGlobal();
+        const deleteButton = await waitFor(() => findDeleteGlobal(), config.timeout);
         if (!deleteButton) {
-          throw new Error('delete_missing');
+          throw stepError('findDelete', 'not_found');
         }
         attempted.push('delete');
         await ensureFocusHover(deleteButton);
         await clickHard(deleteButton);
         await delay(config.wait_after_click);
-        const confirmButton = await findConfirmGlobal();
+        const confirmButton = await waitFor(() => findConfirmGlobal(), config.timeout);
         if (!confirmButton) {
-          throw new Error('confirm_missing');
+          throw stepError('findConfirm', 'not_found');
         }
         attempted.push('confirm');
         await ensureFocusHover(confirmButton);
         await clickHard(confirmButton);
         attempted.push('confirm_click');
+        await delay(config.wait_after_click);
         const verified = await verifyDeletion(convoId, config.timeout);
         if (!verified) {
-          throw new Error('verify_failed');
+          throw stepError('verify', 'not_verified');
         }
         logRisky('share✓ kebab✓ menu✓ delete✓ confirm✓ verify✓');
         return { ok: true };
       } catch (error) {
-        logRisky('FAIL', `code=${error?.message || 'unknown'}`, `attempted=${attempted.join(',')}`);
+        const code = error?.code || mapErrorToCode(error?.message);
+        const reason = error?.message || 'delete_failed';
+        logRisky(`FAIL code=${code} attempted=[${attempted.join('>')}]`);
         return {
           ok: false,
-          code: error?.message || 'delete_failed',
-          reason: error?.message || 'delete_failed',
+          code,
+          reason,
           evidence: attempted
         };
       }
@@ -126,14 +129,17 @@
     return kebab;
   }
 
-  async function findDeleteGlobal() {
-    const matches = queryDeep(document.body, (el) => matchDelete(el));
+  function findDeleteGlobal() {
+    const matches = queryDeep(document.body, (el) => matchDelete(el)).filter((el) => isVisible(el));
     return matches[0] || null;
   }
 
-  async function findConfirmGlobal() {
-    const matches = queryDeep(document.body, (el) => matchConfirm(el));
-    return matches[0] || null;
+  function findConfirmGlobal() {
+    const matches = queryDeep(document.body, (el) => matchConfirm(el)).filter((el) => isVisible(el));
+    if (!matches.length) {
+      return null;
+    }
+    return pickTopMost(matches);
   }
 
   async function verifyDeletion(convoId, timeout) {
@@ -155,6 +161,7 @@
       return;
     }
     element.focus?.({ preventScroll: true });
+    element.dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
     element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
   }
 
@@ -162,11 +169,11 @@
     if (!element) {
       throw new Error('element_missing');
     }
-    element.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-    element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-    element.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
-    element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const eventOptions = { bubbles: true, cancelable: true, button: 0 };
+    element.dispatchEvent(new MouseEvent('pointerdown', eventOptions));
+    element.dispatchEvent(new MouseEvent('mousedown', eventOptions));
+    element.dispatchEvent(new MouseEvent('mouseup', eventOptions));
+    element.dispatchEvent(new MouseEvent('click', eventOptions));
   }
 
   async function dismissOpen() {
@@ -296,7 +303,67 @@
     return rect.width > 0 && rect.height > 0;
   }
 
+  function pickTopMost(elements) {
+    let winner = elements[0];
+    let winnerScore = scoreElement(winner);
+    for (let i = 1; i < elements.length; i += 1) {
+      const candidate = elements[i];
+      const candidateScore = scoreElement(candidate);
+      if (candidateScore > winnerScore) {
+        winner = candidate;
+        winnerScore = candidateScore;
+      } else if (candidateScore === winnerScore) {
+        const pos = winner.compareDocumentPosition(candidate);
+        if (pos & Node.DOCUMENT_POSITION_PRECEDING) {
+          winner = candidate;
+          winnerScore = candidateScore;
+        }
+      }
+    }
+    return winner;
+  }
+
+  function scoreElement(element) {
+    const root = findDialogRoot(element) || element;
+    const style = window.getComputedStyle(root);
+    const zIndex = Number.parseFloat(style.zIndex);
+    const safeZ = Number.isFinite(zIndex) ? zIndex : 0;
+    return safeZ * 10000 + (element.dataset?.testid ? 1 : 0);
+  }
+
+  function findDialogRoot(element) {
+    return element.closest('dialog,[role="dialog"],[aria-modal="true"],[data-state="open"]');
+  }
+
+  function stepError(code, reason) {
+    const error = new Error(reason || code);
+    error.code = code;
+    return error;
+  }
+
+  function mapErrorToCode(message) {
+    switch (message) {
+      case 'header_missing':
+      case 'toolbar_missing':
+      case 'share_missing':
+      case 'kebab_missing':
+      case 'kebab_fail':
+        return 'findKebab';
+      case 'delete_missing':
+        return 'findDelete';
+      case 'confirm_missing':
+      case 'not_found':
+        return 'findConfirm';
+      case 'verify_failed':
+      case 'not_verified':
+        return 'verify';
+      case 'element_missing':
+      default:
+        return 'openMenu';
+    }
+  }
+
   function logRisky(...args) {
-    console.log('[RiskyMode]', ...args);
+    console.log('[RiskyMode][tab]', ...args);
   }
 })();

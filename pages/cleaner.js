@@ -1,4 +1,4 @@
-import { getConvoUrl, normalizeSettings, SETTINGS_KEY } from '../utils.js';
+import { getConvoIdFromUrl, getConvoUrl, normalizeSettings, SETTINGS_KEY } from '../utils.js';
 
 const state = {
   items: [],
@@ -14,6 +14,7 @@ const elements = {
   refresh: document.getElementById('refresh-button'),
   forceCapture: document.getElementById('force-capture-button'),
   probe: document.getElementById('probe-button'),
+  deleteCurrentTab: document.getElementById('delete-current-tab-button'),
   deleteButton: document.getElementById('delete-button'),
   cancelButton: document.getElementById('cancel-deletion-button'),
   reEvaluate: document.getElementById('re-evaluate-button'),
@@ -29,9 +30,19 @@ const settingsElements = {
   dryRun: document.getElementById('dry-run-toggle')
 };
 
+const confirmElements = {
+  container: document.getElementById('inline-confirm'),
+  accept: document.getElementById('inline-confirm-accept'),
+  cancel: document.getElementById('inline-confirm-cancel')
+};
+
+const confirmState = {
+  resolver: null
+};
+
 elements.scan.addEventListener('click', async () => {
   setStatus('Scanning…');
-  const response = await chrome.runtime.sendMessage({ type: 'scanAllChatgptTabs' });
+  const response = await sendMessageSafe({ type: 'scanAllChatgptTabs' });
   setStatus(response?.ok ? 'Scan done' : shortError(response));
 });
 
@@ -39,24 +50,58 @@ elements.refresh.addEventListener('click', () => reload());
 
 elements.forceCapture.addEventListener('click', async () => {
   setStatus('Capturing…');
-  const response = await chrome.runtime.sendMessage({ type: 'captureActiveTabNow' });
+  const response = await sendMessageSafe({ type: 'captureActiveTabNow' });
   setStatus(response?.ok ? 'Capture saved' : shortError(response));
 });
 
 elements.probe.addEventListener('click', async () => {
   setStatus('Probing…');
-  const response = await chrome.runtime.sendMessage({ type: 'probeActiveTab' });
+  const response = await sendMessageSafe({ type: 'probeActiveTab' });
   setStatus(response?.ok ? 'Probe sent' : shortError(response));
+});
+
+elements.deleteCurrentTab.addEventListener('click', async () => {
+  if (state.deletionRunning) {
+    return;
+  }
+  const convoId = await getActiveConvoId();
+  if (!convoId) {
+    setStatus('Error: not a ChatGPT tab');
+    return;
+  }
+  const item = findItem(convoId);
+  if (item && !item.eligible) {
+    const confirmed = await requestInlineConfirm();
+    if (!confirmed) {
+      setStatus('Cancelled');
+      return;
+    }
+  }
+  state.deletionRunning = true;
+  updateButtons();
+  setStatus('Deleting current…');
+  const response = await sendMessageSafe({ type: 'deleteCurrentTab' });
+  state.deletionRunning = false;
+  updateButtons();
+  await reload();
+  setStatus(response?.ok ? 'Deleted ✓' : 'Failed — see tab console');
 });
 
 elements.deleteButton.addEventListener('click', async () => {
   if (!state.selected.size || state.deletionRunning) {
     return;
   }
+  if (selectionNeedsConfirm()) {
+    const confirmed = await requestInlineConfirm();
+    if (!confirmed) {
+      setStatus('Cancelled');
+      return;
+    }
+  }
   state.deletionRunning = true;
   updateButtons();
   setStatus('Deleting…');
-  const response = await chrome.runtime.sendMessage({
+  const response = await sendMessageSafe({
     type: 'deleteSelected',
     convoIds: Array.from(state.selected)
   });
@@ -71,14 +116,14 @@ elements.cancelButton.addEventListener('click', async () => {
   if (!state.deletionRunning) {
     return;
   }
-  const response = await chrome.runtime.sendMessage({ type: 'deleteSelected', cancel: true });
+  const response = await sendMessageSafe({ type: 'deleteSelected', cancel: true });
   setStatus(response?.ok ? 'Cancel sent' : shortError(response));
 });
 
 elements.reEvaluate.addEventListener('click', async () => {
   setStatus('Re-checking…');
   const ids = state.selected.size ? Array.from(state.selected) : undefined;
-  const response = await chrome.runtime.sendMessage({ type: 'reEvaluateSelected', convoIds: ids });
+  const response = await sendMessageSafe({ type: 'reEvaluateSelected', convoIds: ids });
   setStatus(response?.ok ? 'Eligibility updated' : shortError(response));
 });
 
@@ -118,6 +163,9 @@ settingsElements.dryRun.addEventListener('change', () => {
   setStatus(settingsElements.dryRun.checked ? 'Dry run on' : 'Dry run off');
 });
 
+confirmElements.accept.addEventListener('click', () => resolveConfirm(true));
+confirmElements.cancel.addEventListener('click', () => resolveConfirm(false));
+
 chrome.runtime.onMessage.addListener((message) => {
   if (!message || typeof message !== 'object') {
     return;
@@ -154,7 +202,8 @@ async function loadSettings() {
 }
 
 async function reload() {
-  const response = await chrome.runtime.sendMessage({ type: 'getList', showAll: state.showAll });
+  resolveConfirm(false);
+  const response = await sendMessageSafe({ type: 'getList', showAll: state.showAll });
   if (!response?.ok) {
     setStatus(shortError(response));
     return;
@@ -167,7 +216,9 @@ async function reload() {
     }
   });
   render();
-  setStatus(`Loaded ${state.items.length}`);
+  if (!state.deletionRunning) {
+    setStatus(`Loaded ${state.items.length}`);
+  }
 }
 
 function render() {
@@ -259,13 +310,31 @@ function formatDeletion(item) {
   if (!item.lastDeletionAttemptAt) {
     return '—';
   }
+  const outcomeOk = item.lastDeletionOutcome === 'ok';
   const badge = document.createElement('span');
-  badge.className = 'status-pill ' + (item.lastDeletionOutcome === 'ok' ? 'status-pill--ok' : 'status-pill--fail');
-  badge.textContent = item.lastDeletionOutcome === 'ok' ? 'OK' : 'FAIL';
+  badge.className = 'status-pill ' + (outcomeOk ? 'status-pill--ok' : 'status-pill--fail');
+  badge.textContent = outcomeOk ? 'OK' : 'FAIL';
   if (item.lastDeletionReason) {
     badge.title = item.lastDeletionReason;
   }
-  return badge;
+  if (!outcomeOk) {
+    return badge;
+  }
+  if (!item.deletedAt) {
+    return badge;
+  }
+  const wrapper = document.createElement('span');
+  const when = document.createElement('span');
+  when.className = 'status-muted';
+  when.textContent = formatTime(item.deletedAt);
+  const deletedAtDate = new Date(item.deletedAt);
+  if (!Number.isNaN(deletedAtDate.getTime())) {
+    badge.title = deletedAtDate.toLocaleString();
+  }
+  wrapper.appendChild(badge);
+  wrapper.appendChild(document.createTextNode(' '));
+  wrapper.appendChild(when);
+  return wrapper;
 }
 
 function exportItem(item) {
@@ -288,6 +357,7 @@ function exportItem(item) {
 function applySettingsToUi() {
   settingsElements.riskyEnabled.checked = Boolean(settingsState.risky?.enabled);
   settingsElements.dryRun.checked = Boolean(settingsState.risky?.dry_run);
+  updateButtons();
 }
 
 function setStatus(message) {
@@ -299,6 +369,79 @@ function shortError(response) {
 }
 
 function updateButtons() {
-  elements.deleteButton.disabled = !state.selected.size || state.deletionRunning;
-  elements.cancelButton.disabled = !state.deletionRunning;
+  const busy = state.deletionRunning;
+  const riskyEnabled = Boolean(settingsState.risky?.enabled);
+  elements.deleteButton.disabled = !state.selected.size || busy || !riskyEnabled;
+  elements.cancelButton.disabled = !busy;
+  elements.deleteCurrentTab.disabled = busy || !riskyEnabled;
+  elements.forceCapture.disabled = busy;
+  elements.probe.disabled = busy;
+  elements.scan.disabled = busy;
+  elements.refresh.disabled = busy;
+  elements.reEvaluate.disabled = busy;
+  elements.selectAll.disabled = busy;
+}
+
+function selectionNeedsConfirm() {
+  if (!state.selected.size) {
+    return false;
+  }
+  for (const id of state.selected) {
+    const item = findItem(id);
+    if (item && !item.eligible) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function findItem(convoId) {
+  return state.items.find((item) => item.convoId === convoId);
+}
+
+function requestInlineConfirm() {
+  resolveConfirm(false);
+  confirmElements.container.hidden = false;
+  queueMicrotask(() => confirmElements.accept.focus());
+  return new Promise((resolve) => {
+    confirmState.resolver = (value) => {
+      confirmState.resolver = null;
+      hideInlineConfirm();
+      resolve(value);
+    };
+  });
+}
+
+function resolveConfirm(value) {
+  if (typeof value !== 'boolean') {
+    value = false;
+  }
+  if (confirmState.resolver) {
+    const resolver = confirmState.resolver;
+    confirmState.resolver = null;
+    hideInlineConfirm();
+    resolver(value);
+  } else {
+    hideInlineConfirm();
+  }
+}
+
+function hideInlineConfirm() {
+  confirmElements.container.hidden = true;
+}
+
+async function getActiveConvoId() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) {
+    return null;
+  }
+  return getConvoIdFromUrl(tab.url);
+}
+
+async function sendMessageSafe(payload) {
+  try {
+    return await chrome.runtime.sendMessage(payload);
+  } catch (error) {
+    return { ok: false, error: error?.message || 'message_failed' };
+  }
 }

@@ -18,8 +18,17 @@
           <button id="refresh-button" type="button" class="secondary">Refresh</button>
           <button id="force-capture-button" type="button">Force capture (active tab)</button>
           <button id="probe-button" type="button" class="secondary">Test selectors (active tab)</button>
+          <button id="delete-current-tab-button" type="button" class="danger">Delete current tab (risky)</button>
         </div>
       </header>
+
+      <div id="inline-confirm" class="inline-confirm" hidden role="alertdialog" aria-live="assertive">
+        <span>This chat is not marked as search-like. Delete anyway?</span>
+        <div class="inline-confirm__actions">
+          <button id="inline-confirm-accept" type="button">Delete anyway</button>
+          <button id="inline-confirm-cancel" type="button" class="secondary">Cancel</button>
+        </div>
+      </div>
 
       <section class="toolbar">
         <div class="toolbar__left">

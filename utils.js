@@ -1,4 +1,6 @@
 const SETTINGS_KEY = 'cleaner_settings_v2';
+const WAIT_MIN = 40;
+const WAIT_MAX = 5000;
 
 export const DEFAULT_SETTINGS = Object.freeze({
   heuristics: Object.freeze({
@@ -20,7 +22,14 @@ export { SETTINGS_KEY };
 
 export function normalizeSettings(candidate) {
   const heuristics = { ...DEFAULT_SETTINGS.heuristics, ...(candidate?.heuristics || {}) };
-  const risky = { ...DEFAULT_SETTINGS.risky, ...(candidate?.risky || {}) };
+  const riskyRaw = { ...DEFAULT_SETTINGS.risky, ...(candidate?.risky || {}) };
+  const risky = {
+    ...riskyRaw,
+    risky_wait_after_open_ms: coerceWait(riskyRaw.risky_wait_after_open_ms, 40, 5000, DEFAULT_SETTINGS.risky.risky_wait_after_open_ms),
+    risky_wait_after_click_ms: coerceWait(riskyRaw.risky_wait_after_click_ms, 40, 5000, DEFAULT_SETTINGS.risky.risky_wait_after_click_ms),
+    risky_step_timeout_ms: coerceWait(riskyRaw.risky_step_timeout_ms, 500, 60000, DEFAULT_SETTINGS.risky.risky_step_timeout_ms),
+    risky_between_tabs_ms: coerceWait(riskyRaw.risky_between_tabs_ms, 40, 60000, DEFAULT_SETTINGS.risky.risky_between_tabs_ms)
+  };
   return { heuristics, risky };
 }
 
@@ -64,12 +73,35 @@ export function getConvoUrl(convoId) {
   return `https://chatgpt.com/c/${convoId}`;
 }
 
+export function getConvoIdFromUrl(href) {
+  if (!href) {
+    return null;
+  }
+  try {
+    const parsed = new URL(href);
+    const parts = parsed.pathname.split('/');
+    const idx = parts.indexOf('c');
+    if (idx >= 0 && parts[idx + 1]) {
+      return parts[idx + 1];
+    }
+  } catch (_error) {
+    // ignore
+  }
+  return null;
+}
+
 export function log(...args) {
   console.log('[Cleaner]', ...args);
 }
 
 export function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function coerceWait(value, min = WAIT_MIN, max = WAIT_MAX, fallback = DEFAULT_SETTINGS.risky.risky_wait_after_click_ms) {
+  const numeric = Number.isFinite(value) ? Number(value) : Number.parseFloat(value);
+  const candidate = Number.isFinite(numeric) ? numeric : fallback;
+  return clampWait(candidate, min, max);
 }
 
 export function randomBetween(min, max) {
@@ -97,4 +129,11 @@ function normalizeDate(value) {
     }
   }
   return null;
+}
+
+function clampWait(raw, min, max) {
+  const clampedMin = Number.isFinite(min) ? Math.max(0, min) : 0;
+  const clampedMax = Number.isFinite(max) ? Math.max(clampedMin, max) : clampedMin;
+  const next = Math.max(clampedMin, Math.min(clampedMax, Number(raw) || 0));
+  return Math.round(next);
 }

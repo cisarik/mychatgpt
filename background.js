@@ -1,4 +1,4 @@
-import { computeEligibility, DEFAULT_SETTINGS, delay, getConvoUrl, normalizeSettings, randomBetween, SETTINGS_KEY } from './utils.js';
+import { computeEligibility, DEFAULT_SETTINGS, delay, getConvoIdFromUrl, getConvoUrl, normalizeSettings, randomBetween, SETTINGS_KEY } from './utils.js';
 import * as db from './db.js';
 
 let settingsCache = { ...DEFAULT_SETTINGS };
@@ -26,6 +26,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return getList(Boolean(message.showAll));
       case 'deleteSelected':
         return deleteSelected(message.convoIds || [], message.cancel);
+      case 'deleteCurrentTab':
+        return deleteCurrentTab();
       case 'probeActiveTab':
         return probeActiveTab();
       case 'reEvaluateSelected':
@@ -89,7 +91,7 @@ async function getList(showAll) {
   if (showAll) {
     return { ok: true, items };
   }
-  return { ok: true, items: items.filter((item) => item.eligible) };
+  return { ok: true, items: items.filter((item) => item.eligible && !item.deletedAt) };
 }
 
 async function deleteSelected(convoIds, cancel) {
@@ -147,8 +149,10 @@ async function deleteSelected(convoIds, cancel) {
           await db.update(convoId, {
             lastDeletionAttemptAt: new Date().toISOString(),
             lastDeletionOutcome: 'ok',
-            lastDeletionReason: null
+            lastDeletionReason: 'verify_ok',
+            deletedAt: Date.now()
           });
+          await notifyListUpdated();
         } else {
           failCount += 1;
           await db.update(convoId, {
@@ -157,7 +161,6 @@ async function deleteSelected(convoIds, cancel) {
             lastDeletionReason: deleteOutcome?.reason || deleteOutcome?.code || 'delete_failed'
           });
         }
-        await notifyListUpdated();
       }
     } catch (error) {
       failCount += 1;
@@ -193,11 +196,101 @@ async function deleteSelected(convoIds, cancel) {
   return { ok: true, done, total, cancelled: deletionRun.cancelled };
 }
 
+async function deleteCurrentTab() {
+  if (!settingsCache.risky?.enabled) {
+    return { ok: false, error: 'risky_disabled' };
+  }
+  let tab;
+  try {
+    tab = await getActiveChatgptTab();
+  } catch (error) {
+    console.log('[RiskyMode][bg]', 'active_tab_fail', error?.message || 'no_active_tab');
+    return { ok: false, error: error?.message || 'no_active_chatgpt_tab' };
+  }
+  const convoId = getConvoIdFromUrl(tab.url);
+  if (!convoId) {
+    return { ok: false, error: 'no_convo_id' };
+  }
+  await focusTab(tab.id, tab.windowId);
+  let probeOutcome;
+  try {
+    probeOutcome = await runAutomation(tab.id, 'probe', {
+      convoId,
+      profile: {},
+      settings: settingsCache.risky
+    });
+  } catch (error) {
+    console.log('[RiskyMode][bg]', 'probe_error', convoId, error?.message || 'probe_exception');
+    await db.update(convoId, {
+      lastDeletionAttemptAt: new Date().toISOString(),
+      lastDeletionOutcome: 'fail',
+      lastDeletionReason: error?.message || 'probe_failed'
+    });
+    await notifyListUpdated();
+    return { ok: false, error: 'probe_failed', reason: error?.message || 'probe_failed' };
+  }
+  if (!probeOutcome?.header || !probeOutcome?.menu || !probeOutcome?.confirm) {
+    console.log('[RiskyMode][bg]', 'probe_fail', convoId, probeOutcome?.error || 'probe_failed');
+    await db.update(convoId, {
+      lastDeletionAttemptAt: new Date().toISOString(),
+      lastDeletionOutcome: 'fail',
+      lastDeletionReason: probeOutcome?.error || 'probe_failed'
+    });
+    await notifyListUpdated();
+    return {
+      ok: false,
+      error: 'probe_failed',
+      reason: probeOutcome?.error || 'probe_failed'
+    };
+  }
+  let deleteOutcome;
+  try {
+    deleteOutcome = await runAutomation(tab.id, 'runDelete', {
+      convoId,
+      profile: {},
+      settings: settingsCache.risky
+    });
+  } catch (error) {
+    console.log('[RiskyMode][bg]', 'delete_exec_fail', convoId, error?.message || 'delete_exception');
+    await db.update(convoId, {
+      lastDeletionAttemptAt: new Date().toISOString(),
+      lastDeletionOutcome: 'fail',
+      lastDeletionReason: error?.message || 'delete_failed'
+    });
+    await notifyListUpdated();
+    return { ok: false, error: 'delete_failed', reason: error?.message || 'delete_failed' };
+  }
+  if (deleteOutcome?.ok) {
+    await db.update(convoId, {
+      lastDeletionAttemptAt: new Date().toISOString(),
+      lastDeletionOutcome: 'ok',
+      lastDeletionReason: 'verify_ok',
+      deletedAt: Date.now()
+    });
+    await notifyListUpdated();
+    console.log('[RiskyMode][bg]', 'delete_ok', convoId);
+    return { ok: true };
+  }
+  await db.update(convoId, {
+    lastDeletionAttemptAt: new Date().toISOString(),
+    lastDeletionOutcome: 'fail',
+    lastDeletionReason: deleteOutcome?.reason || deleteOutcome?.code || 'delete_failed'
+  });
+  await notifyListUpdated();
+  console.log('[RiskyMode][bg]', 'delete_fail', convoId, deleteOutcome?.code || deleteOutcome?.reason || 'unknown');
+  return {
+    ok: false,
+    error: 'delete_failed',
+    code: deleteOutcome?.code || 'delete_failed',
+    reason: deleteOutcome?.reason || 'delete_failed'
+  };
+}
+
 async function probeActiveTab() {
   const tab = await getActiveChatgptTab();
   await focusTab(tab.id, tab.windowId);
   const result = await runAutomation(tab.id, 'probe', {
-    convoId: extractConvoId(tab.url),
+    convoId: getConvoIdFromUrl(tab.url),
     profile: {},
     settings: settingsCache.risky
   });
@@ -313,20 +406,6 @@ async function execInTab(tabId, method, args) {
   } catch (error) {
     return { ok: false, err: error?.message || 'exec_failed' };
   }
-}
-
-function extractConvoId(url) {
-  try {
-    const parsed = new URL(url);
-    const parts = parsed.pathname.split('/');
-    const idx = parts.indexOf('c');
-    if (idx >= 0 && parts[idx + 1]) {
-      return parts[idx + 1];
-    }
-  } catch (_error) {
-    // ignore
-  }
-  return null;
 }
 
 async function waitForTabReady(tabId) {
