@@ -5,7 +5,7 @@
   const observerConfig = { childList: true, subtree: true };
   let pending = false;
   let lastSignature = '';
-  let readySignalSent = false;
+  let initialReadySent = false;
 
   if (!isConversationPage()) {
     return;
@@ -20,9 +20,26 @@
     observer.observe(root, observerConfig);
   }
 
+  if (typeof history.pushState === 'function') {
+    const originalPushState = history.pushState.bind(history);
+    history.pushState = function pushState(...args) {
+      const result = originalPushState(...args);
+      handleRouteChange('pushState');
+      return result;
+    };
+  }
+
+  if (typeof history.replaceState === 'function') {
+    const originalReplaceState = history.replaceState.bind(history);
+    history.replaceState = function replaceState(...args) {
+      const result = originalReplaceState(...args);
+      handleRouteChange('replaceState');
+      return result;
+    };
+  }
+
   window.addEventListener('popstate', () => {
-    lastSignature = '';
-    scheduleSend('history-change');
+    handleRouteChange('popstate');
   });
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -43,15 +60,25 @@
 
   /** Slovensky: Odošle signál o pripravenosti aktívneho tabu. */
   async function markActiveTabReady(reason) {
-    if (readySignalSent) {
-      return;
+    if (reason === 'initial-load') {
+      if (initialReadySent) {
+        return;
+      }
+      initialReadySent = true;
     }
-    readySignalSent = true;
+    console.log('[Cleaner][content] Active tab ready', { href: window.location.href, reason });
     try {
       await chrome.runtime.sendMessage({ type: 'ACTIVE_TAB_READY', reason });
     } catch (_error) {
       // Background service worker môže spať; ignorujeme.
     }
+  }
+
+  /** Slovensky: Spracuje zmenu trasy SPA aplikácie. */
+  function handleRouteChange(reason) {
+    lastSignature = '';
+    scheduleSend(reason);
+    void markActiveTabReady(reason);
   }
 
   /** Slovensky: Nájde koreňový uzol konverzácie. */

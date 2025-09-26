@@ -31,17 +31,17 @@ export function createUiAutomationDeletionStrategy(deps = {}) {
     async isAvailable() {
       try {
         const tab = await findLikelyChatTab();
-        if (!tab?.id) {
+        if (!tab?.id || !isChatHost(tab.url)) {
           return false;
         }
-        const injected = await chrome.scripting.executeScript({
+        await preloadSelectors(tab.id);
+        const [injected] = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
-          injectImmediately: true,
-          world: 'MAIN',
-          func: detectChatAvailability
+          world: 'ISOLATED',
+          func: detectChatAvailability,
+          args: [{ prefix: PREFIX }]
         });
-        const outcome = injected?.[0]?.result;
-        return Boolean(outcome?.ok);
+        return Boolean(injected?.result?.ok);
       } catch (_error) {
         return false;
       }
@@ -101,11 +101,24 @@ async function attemptAutomation({ convoId, url, settings, maxRetries, debug }) 
   for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
     try {
       const tab = await ensureTabReady(url, settings.risky_step_timeout_ms, debug);
+      await preloadSelectors(tab.id);
+      const guardOk = await guardConversationReady(tab.id, settings.risky_step_timeout_ms);
+      if (!guardOk) {
+        lastError = {
+          reason: 'conversation_not_ready',
+          step: 'guard',
+          attempt: attempt + 1
+        };
+        if (attempt < totalAttempts - 1) {
+          await reloadTab(tab.id);
+          continue;
+        }
+        break;
+      }
       const jitter = randomJitter(settings.risky_jitter_ms);
       const injected = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        world: 'MAIN',
-        injectImmediately: true,
+        world: 'ISOLATED',
         func: runDeletionAutomation,
         args: [
           {
@@ -164,19 +177,40 @@ async function findLikelyChatTab() {
   return tabs.find((tab) => Boolean(tab?.id));
 }
 
+/** Slovensky: Overí, či URL patrí hostu chatgpt.com. */
+function isChatHost(url) {
+  if (typeof url !== 'string') {
+    return false;
+  }
+  try {
+    const parsed = new URL(url, 'https://chatgpt.com');
+    return parsed.hostname.endsWith('chatgpt.com');
+  } catch (_error) {
+    return false;
+  }
+}
+
 /** Slovensky: Zaistí, že tab je načítaný a pripravený. */
 async function ensureTabReady(url, timeoutMs, debug) {
   const normalized = normalizeChatUrl(url) || url;
   const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
   let target = tabs.find((tab) => normalizeChatUrl(tab.url) === normalized);
   if (!target) {
-    target = await chrome.tabs.create({ url: normalized, active: false });
+    target = await chrome.tabs.create({ url: normalized, active: true });
   } else if (target.discarded && target.id) {
     await chrome.tabs.reload(target.id);
   }
   if (!target?.id) {
     throw new Error('tab_not_found');
   }
+  try {
+    if (target.windowId !== undefined) {
+      await chrome.windows.update(target.windowId, { focused: true });
+    }
+  } catch (_error) {}
+  try {
+    await chrome.tabs.update(target.id, { active: true });
+  } catch (_error) {}
   await waitForTabLoad(target.id, timeoutMs, debug);
   return await chrome.tabs.get(target.id);
 }
@@ -215,6 +249,46 @@ async function reloadTab(tabId) {
   } catch (_error) {}
 }
 
+/** Slovensky: Prednačíta selektory do tabu. */
+async function preloadSelectors(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return;
+  }
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    files: ['automation/selectors.js']
+  });
+}
+
+/** Slovensky: Overí, či je konverzačná stránka pripravená. */
+async function guardConversationReady(tabId, timeoutMs) {
+  const [response] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: 'ISOLATED',
+    func: ({ timeoutMs, prefix }) => {
+      const selectors = globalThis.RiskySelectors;
+      if (!selectors?.waitForAppShell) {
+        console.warn(`${prefix} Guard: selectors missing`);
+        return { ok: false, reason: 'selectors_missing' };
+      }
+      return selectors
+        .waitForAppShell({ timeoutMs })
+        .then(() => selectors.waitForConversationView({ timeoutMs }))
+        .then(() => ({ ok: true }))
+        .catch((error) => {
+          console.warn(`${prefix} Guard failed`, {
+            message: error?.message || String(error),
+            code: error?.code
+          });
+          return { ok: false, reason: error?.message || 'guard_failed', code: error?.code };
+        });
+    },
+    args: [{ timeoutMs, prefix: PREFIX }]
+  });
+  return Boolean(response?.result?.ok);
+}
+
 /** Slovensky: Prenos logiky na stránku. */
 async function runDeletionAutomation(payload) {
   const {
@@ -223,14 +297,10 @@ async function runDeletionAutomation(payload) {
     jitter,
     attempt,
     settings,
-    debug,
     prefix
   } = payload;
   const start = Date.now();
   const pageLog = (message, meta = undefined) => {
-    if (!debug) {
-      return;
-    }
     if (meta !== undefined) {
       console.log(`${prefix} ${message}`, meta);
     } else {
@@ -238,41 +308,56 @@ async function runDeletionAutomation(payload) {
     }
   };
   const sleepFrame = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
-  const selectors = await import(chrome.runtime.getURL('automation/selectors.js'));
+  const selectors = globalThis.RiskySelectors;
+  if (!selectors) {
+    pageLog('Selectors unavailable');
+    return { ok: false, reason: 'selectors_missing', step: 'init' };
+  }
+  const triggerClick = (node) => {
+    if (node instanceof HTMLElement) {
+      node.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true, composed: true })
+      );
+    }
+  };
 
   try {
-    pageLog(`Attempt ${attempt}: started`, { convoId });
+    pageLog('Probe start', { attempt });
+    pageLog(`Attempt ${attempt}: started`, { convoId, url });
     if (jitter > 0) {
       pageLog(`Applying jitter ${jitter}ms`);
       await sleepFrame(jitter);
     }
     if (!isLoggedIn()) {
+      pageLog('Login guard failed');
       return { ok: false, reason: 'not_logged_in', step: 'guard-login' };
     }
     await dismissDraftBanner(pageLog);
-    const kebab = await selectors.findKebabButton(document, settings.risky_step_timeout_ms);
-    pageLog('Menu button located', summarizeElement(kebab));
-    if (!settings.dry_run) {
-      kebab.click();
-    } else {
-      pageLog('DRY RUN: would click kebab menu', summarizeElement(kebab));
-      kebab.focus();
+    const kebab = await selectors.findKebabButton(document, {
+      timeoutMs: settings.risky_step_timeout_ms
+    });
+    pageLog('FOUND kebab button', summarizeElement(kebab));
+    if (settings.dry_run) {
+      pageLog('DRY RUN: opening kebab menu for validation', summarizeElement(kebab));
     }
-    await sleepFrame(80);
+    triggerClick(kebab);
+    await sleepFrame(120);
 
-    const menuItem = await selectors.findDeleteMenuItem(document, settings.risky_step_timeout_ms);
-    pageLog('Delete menu item located', summarizeElement(menuItem));
-    if (!settings.dry_run) {
+    const menuItem = await selectors.findDeleteMenuItem(document, {
+      timeoutMs: settings.risky_step_timeout_ms
+    });
+    pageLog('FOUND delete menu item', summarizeElement(menuItem));
+    if (settings.dry_run) {
+      pageLog('DRY RUN: opening delete confirmation for validation', summarizeElement(menuItem));
+      triggerClick(menuItem);
+    } else {
       menuItem.click();
-    } else {
-      pageLog('DRY RUN: would click delete menu item', summarizeElement(menuItem));
-      menuItem.focus();
-      menuItem.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      return { ok: true, reason: 'dry_run', step: 'menu' };
     }
 
-    const confirmButton = await selectors.findConfirmDeleteButton(document, settings.risky_step_timeout_ms);
-    pageLog('Confirm button located', summarizeElement(confirmButton));
+    const confirmButton = await selectors.findConfirmDeleteButton(document, {
+      timeoutMs: settings.risky_step_timeout_ms
+    });
+    pageLog('FOUND confirm button', summarizeElement(confirmButton));
 
     if (settings.dry_run) {
       pageLog('DRY RUN: would confirm deletion', summarizeElement(confirmButton));
@@ -292,6 +377,12 @@ async function runDeletionAutomation(payload) {
   } catch (error) {
     const code = error?.code || 'error';
     const reason = typeof error?.reason === 'string' ? error.reason : code;
+    pageLog('Automation error', {
+      code,
+      reason,
+      message: error?.message || String(error),
+      attempted: Array.isArray(error?.attempted) ? error.attempted : undefined
+    });
     return {
       ok: false,
       reason,
@@ -317,7 +408,7 @@ async function verifyDeletion({ selectors, convoId, url, timeout, sleepFrame, pa
       pageLog('URL changed, assuming success', { from: targetPath, to: location.pathname });
       return true;
     }
-    const toast = selectors.queryByText(document.body, /(deleted|removed)/i);
+    const toast = selectors.byText(document.body, selectors.TOAST_REGEX || /(deleted|removed|odstránen|zmazan)/i);
     if (toast && toast.closest('[role="status"],[role="alert"]')) {
       pageLog('Toast detected', summarizeElement(toast));
       return true;
@@ -399,8 +490,23 @@ async function maybeDelayBetweenTabs(settings) {
 }
 
 /** Slovensky: Deteguje dostupnosť aplikácie na aktívnom tabe. */
-function detectChatAvailability() {
-  const login = document.querySelector('a[href*="/login"], button[data-testid*="login" i]');
-  const app = document.querySelector('#__next [data-testid="conversation-main"], main [data-testid="conversation-main"]');
-  return { ok: !login && Boolean(app) };
+function detectChatAvailability({ prefix }) {
+  const hostOk = window.location.hostname.endsWith('chatgpt.com');
+  if (!hostOk) {
+    console.warn(`${prefix} Availability guard: unexpected host`, window.location.hostname);
+    return { ok: false, reason: 'host_mismatch' };
+  }
+  const selectors = globalThis.RiskySelectors;
+  if (!selectors?.waitForAppShell) {
+    console.warn(`${prefix} Availability guard: selectors missing`);
+    return { ok: false, reason: 'selectors_missing' };
+  }
+  return selectors
+    .waitForAppShell({ timeoutMs: 3000 })
+    .then(() => selectors.waitForConversationView({ timeoutMs: 3000 }))
+    .then(() => ({ ok: true }))
+    .catch((error) => {
+      console.warn(`${prefix} Availability guard failed`, error?.message || error);
+      return { ok: false, reason: error?.message || 'guard_failed' };
+    });
 }

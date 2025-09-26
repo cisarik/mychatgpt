@@ -27,4 +27,11 @@ Search Cleaner keeps short, search-like ChatGPT conversations in a local backup 
 - Troubleshooting: use **Test selectors** on the active tab to probe kebab/delete/confirm buttons, or adjust jitter/timeout/retry settings under the Risky mode fieldset. The automation respects **Cancel deletion**, stopping after the current tab.
 - Everything runs locally—no hidden APIs, only `chrome.scripting.executeScript` driving the public UI.
 
+### Selector diagnostics
+1. Open DevTools directly inside the chatgpt.com tab that shows the conversation.
+2. Enable *Debug* in the extension popup so `[Cleaner]` logs stay verbose.
+3. Click **Test selectors (active tab)** in the popup and check the tab console for `[RiskyMode]` entries.
+4. If you see `NOT FOUND` for kebab/delete/confirm, wait a moment—sidebar fallbacks kick in automatically.
+5. When the probe still fails, bump `risky_step_timeout_ms`, toggle *Dry run*, re-run the probe, and share the tab console output.
+
 > Tip: All debug output now lives in the console. Open DevTools on the extension popup or the target chat tab to inspect `[Cleaner]` and `[RiskyMode]` logs.

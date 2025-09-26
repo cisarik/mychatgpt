@@ -443,10 +443,12 @@ async function testSelectors() {
     const response = await chrome.runtime.sendMessage({ type: 'TEST_SELECTORS_ON_ACTIVE_TAB' });
     if (response?.ok) {
       const result = response.result || {};
-      const summary = ['kebab', 'deleteMenu', 'confirm']
-        .map((key) => `${key}:${result[key] ? '✓' : '×'}`)
-        .join(' ');
-      await showStatus(`Selector probe: ${summary}`);
+      const summary = [
+        result.kebab ? 'kebab ✓' : 'kebab ×',
+        result.deleteMenu ? 'delete ✓' : 'delete ×',
+        result.confirm ? 'confirm ✓' : 'confirm ×'
+      ].join(', ');
+      await showStatus(`Probe done – check page console (${summary})`);
     } else {
       await showStatus('Selector probe failed');
     }

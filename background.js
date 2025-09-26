@@ -3,9 +3,11 @@ import {
   createManualOpenStrategy,
   DEFAULT_SETTINGS,
   DeletionStrategyIds,
+  ensureRiskyNotExpired,
   getConvoUrl,
   getDeletionStrategy,
   getConversationIdFromUrl,
+  getActiveTabId,
   log,
   LogLevel,
   normalizeChatUrl,
@@ -337,7 +339,15 @@ async function deleteSelected(selection) {
   }
   deletionInProgress = true;
   await resetCancelFlag();
-  const settings = normalizeSettings(settingsCache);
+  const settings = ensureRiskyNotExpired(settingsCache);
+  settingsCache = settings;
+  try {
+    await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
+  } catch (error) {
+    await log(LogLevel.WARN, 'settings', 'Persist fallback failed', {
+      message: error?.message || String(error)
+    });
+  }
   const desiredStrategy = getDeletionStrategy(settings);
   let report;
   try {
@@ -497,102 +507,70 @@ async function resetCancelFlag() {
   await chrome.storage.local.set({ [CANCEL_FLAG_KEY]: false });
 }
 
-/** Slovensky: Otestuje selektory na aktívnom tabe – loguje len do konzoly. */
+/** Slovensky: Otestuje selektory na aktívnom tabe – výsledky loguje do konzoly karty. */
 async function testSelectorsOnActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true, url: 'https://chatgpt.com/*' });
-  if (!tab?.id) {
+  const tabId = await getActiveTabId();
+  if (!tabId) {
+    return { ok: false, error: 'no_active_chat' };
+  }
+  const urlOk = await isChatUrl(tabId);
+  if (!urlOk) {
     return { ok: false, error: 'no_active_chat' };
   }
   const settings = normalizeSettings(settingsCache);
   try {
-    const injected = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      world: 'MAIN',
-      injectImmediately: true,
-      func: selectorProbe,
-      args: [
-        {
-          timeoutMs: settings.risky_step_timeout_ms,
-          prefix: '[RiskyMode]',
-          debug: Boolean(settings.debugLogs)
-        }
-      ]
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      files: ['automation/selectors.js']
     });
-    return { ok: true, result: injected?.[0]?.result || null };
+    const [response] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'ISOLATED',
+      func: async ({ timeoutMs, prefix }) => {
+        const selectors = globalThis.RiskySelectors;
+        if (!selectors?.probeSelectorsOnce) {
+          console.warn(`${prefix} Probe helpers missing`);
+          return { ok: false, error: 'selectors_missing' };
+        }
+        console.log(`${prefix} Probe start`);
+        try {
+          await selectors.waitForAppShell({ timeoutMs });
+          const outcome = await selectors.probeSelectorsOnce({ timeoutMs, prefix });
+          console.log(`${prefix} Probe done`, outcome);
+          return { ok: true, result: outcome };
+        } catch (error) {
+          console.error(`${prefix} Probe failed`, error?.message || error);
+          return { ok: false, error: error?.message || 'probe_failed' };
+        }
+      },
+      args: [{ timeoutMs: settings.risky_step_timeout_ms, prefix: '[RiskyMode]' }]
+    });
+    const outcome = response?.result;
+    if (!outcome?.ok) {
+      return { ok: false, error: outcome?.error || 'probe_failed' };
+    }
+    const summary = outcome.result || {};
+    return {
+      ok: true,
+      result: {
+        kebab: Boolean(summary.kebab),
+        deleteMenu: Boolean(summary.deleteMenu),
+        confirm: Boolean(summary.confirm)
+      }
+    };
   } catch (error) {
     await log(LogLevel.ERROR, 'deletion', 'Selector probe failed', { message: error?.message || String(error) });
     return { ok: false, error: error?.message || 'probe_failed' };
   }
 }
 
-/** Slovensky: Kód injektovaný do chatgpt tabu pre overenie selektorov. */
-async function selectorProbe(payload) {
-  const { timeoutMs, prefix, debug } = payload || {};
-  const logProbe = (message, meta) => {
-    if (debug) {
-      if (meta !== undefined) {
-        console.log(`${prefix} ${message}`, meta);
-      } else {
-        console.log(`${prefix} ${message}`);
-      }
-    }
-  };
-  const selectors = await import(chrome.runtime.getURL('automation/selectors.js'));
-  const summary = { kebab: false, deleteMenu: false, confirm: false };
-  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms || 0)));
+/** Slovensky: Overí, či tab smeruje na chatgpt.com. */
+async function isChatUrl(tabId) {
   try {
-    const kebab = await selectors.findKebabButton(document, timeoutMs);
-    summary.kebab = true;
-    logProbe('Test: kebab menu located', probeSummary(kebab));
-    kebab.click();
-    await pause(80);
-    try {
-      const deleteItem = await selectors.findDeleteMenuItem(document, timeoutMs);
-      summary.deleteMenu = true;
-      logProbe('Test: delete item located', probeSummary(deleteItem));
-      deleteItem.click();
-      await pause(80);
-      try {
-        const confirm = await selectors.findConfirmDeleteButton(document, timeoutMs);
-        summary.confirm = true;
-        logProbe('Test: confirm button located', probeSummary(confirm));
-        dismissModal(confirm);
-      } catch (error) {
-        summary.confirm = false;
-        logProbe('Test: confirm button missing', { code: error?.code || 'not_found', detail: error?.attempted });
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      }
-    } catch (error) {
-      summary.deleteMenu = false;
-      logProbe('Test: delete item missing', { code: error?.code || 'not_found', detail: error?.attempted });
-    }
-  } catch (error) {
-    summary.kebab = false;
-    logProbe('Test: kebab menu missing', { code: error?.code || 'not_found', detail: error?.attempted });
-  }
-  return summary;
-
-  function probeSummary(node) {
-    if (!(node instanceof HTMLElement)) {
-      return null;
-    }
-    const tag = node.tagName.toLowerCase();
-    const text = (node.textContent || '').trim().slice(0, 40);
-    const label = node.getAttribute('aria-label') || node.getAttribute('title') || '';
-    return { tag, text, label };
-  }
-
-  function dismissModal(confirmButton) {
-    const dialog = confirmButton?.closest('[role="dialog"],[role="alertdialog"]');
-    if (!dialog) {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      return;
-    }
-    const cancel = dialog.querySelector('button[aria-label*="cancel" i], button.secondary');
-    if (cancel) {
-      cancel.click();
-    } else {
-      dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    }
+    const tab = await chrome.tabs.get(tabId);
+    return typeof tab?.url === 'string' && tab.url.startsWith('https://chatgpt.com/');
+  } catch (_error) {
+    return false;
   }
 }

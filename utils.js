@@ -393,6 +393,19 @@ export function now() {
 }
 
 /**
+ * Slovensky: Zistí aktuálny aktívny tab ID z posledného fokuse okna.
+ * @returns {Promise<number|null>}
+ */
+export async function getActiveTabId() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    return Number.isInteger(tab?.id) ? tab.id : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+/**
  * Slovensky: Overí, či je riskantná relácia práve aktívna.
  * @param {Partial<RiskyConfig>} settings
  * @returns {boolean}
@@ -406,6 +419,23 @@ export function isRiskySessionActive(settings) {
     return false;
   }
   return normalized.risky_session_until > now();
+}
+
+/**
+ * Slovensky: Zaistí, že po expirácii risk módu prepneme na manuálne mazanie.
+ * @param {Partial<RiskyConfig>} settings
+ * @returns {ReturnType<typeof normalizeSettings>}
+ */
+export function ensureRiskyNotExpired(settings) {
+  const normalized = normalizeSettings(settings);
+  if (isRiskySessionActive(normalized)) {
+    return normalized;
+  }
+  return {
+    ...normalized,
+    risky_session_until: null,
+    deletionStrategyId: DeletionStrategyIds.MANUAL_OPEN
+  };
 }
 
 /**
