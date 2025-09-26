@@ -8,7 +8,8 @@ const deleteSelectedButton = document.getElementById('delete-selected-button');
 const cancelDeletionButton = document.getElementById('cancel-deletion-button');
 const testSelectorsButton = document.getElementById('test-selectors-button');
 const refreshButton = document.getElementById('refresh-button');
-const scanButton = document.getElementById('scan-button');
+const forceCaptureButton = document.getElementById('force-capture-button');
+const scanAllButton = document.getElementById('scan-all-button');
 const emptyState = document.getElementById('empty-state');
 const settingsForm = document.getElementById('settings-form');
 const riskyModeCheckbox = document.getElementById('risky_mode_enabled');
@@ -24,11 +25,13 @@ const jitterMinInput = document.getElementById('risky_jitter_min');
 const jitterMaxInput = document.getElementById('risky_jitter_max');
 const debugToggle = document.getElementById('debugLogs');
 const statusRoot = document.getElementById('status-root');
+const showAllToggle = document.getElementById('show-all-toggle');
 
 let backups = [];
 let selectedIds = new Set();
 let settings = { ...DEFAULT_SETTINGS };
 let busy = false;
+let showAll = false;
 
 cancelDeletionButton.disabled = true;
 
@@ -37,6 +40,7 @@ void bootstrap();
 /** Slovensky: Inicializuje rozhranie čističa. */
 async function bootstrap() {
   bindEvents();
+  showAllToggle.checked = showAll;
   await loadSettings();
   await loadBackups();
   updateSelectionState();
@@ -47,8 +51,11 @@ function bindEvents() {
   refreshButton.addEventListener('click', () => {
     void loadBackups();
   });
-  scanButton.addEventListener('click', () => {
-    void requestManualScan();
+  forceCaptureButton.addEventListener('click', () => {
+    void forceCaptureActiveTab();
+  });
+  scanAllButton.addEventListener('click', () => {
+    void scanAllTabs();
   });
   openNextButton.addEventListener('click', () => {
     void openSelected();
@@ -78,6 +85,16 @@ function bindEvents() {
       settings.risky_session_until = null;
     }
     updateRiskySessionStatus();
+  });
+  showAllToggle.addEventListener('change', () => {
+    showAll = showAllToggle.checked;
+    renderBackups();
+  });
+
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === 'BACKUPS_UPDATED') {
+      void loadBackups();
+    }
   });
 }
 
@@ -170,7 +187,9 @@ function setBusy(state) {
   cancelDeletionButton.disabled = !state;
   testSelectorsButton.disabled = state;
   refreshButton.disabled = state;
-  scanButton.disabled = state;
+  forceCaptureButton.disabled = state;
+  scanAllButton.disabled = state;
+  showAllToggle.disabled = state;
   riskyEnableSessionButton.disabled = state;
   settingsForm.querySelectorAll('input, button').forEach((node) => {
     if (node === cancelDeletionButton || node === riskyEnableSessionButton) {
@@ -198,17 +217,30 @@ async function loadBackups() {
 /** Slovensky: Vyrenderuje tabuľku záloh. */
 function renderBackups() {
   tableBody.textContent = '';
-  if (!backups.length) {
+  const visible = getVisibleBackups();
+  if (!visible.length) {
     emptyState.hidden = false;
+    updateSelectionState();
     return;
   }
   emptyState.hidden = true;
   const fragment = document.createDocumentFragment();
-  backups.forEach((item) => {
+  visible.forEach((item) => {
     fragment.appendChild(renderRow(item));
   });
   tableBody.appendChild(fragment);
-  syncSelection();
+  syncSelection(visible);
+}
+
+/** Slovensky: Určí zoznam viditeľných záznamov podľa filtra. */
+function getVisibleBackups() {
+  if (!Array.isArray(backups)) {
+    return [];
+  }
+  if (showAll) {
+    return [...backups];
+  }
+  return backups.filter((item) => item && item.eligible !== false);
 }
 
 /** Slovensky: Vytvorí riadok tabuľky pre zálohu. */
@@ -240,6 +272,19 @@ function renderRow(item) {
 
   const backupCell = document.createElement('td');
   backupCell.textContent = item.answerHTML ? 'Yes' : 'No';
+
+  const eligibleCell = document.createElement('td');
+  const eligibleFlag = item.eligible === false ? '×' : '✓';
+  eligibleCell.textContent = eligibleFlag;
+
+  const reasonCell = document.createElement('td');
+  if (item.eligible === false) {
+    const reasonText = formatEligibilityReason(item.eligibilityReason);
+    reasonCell.textContent = reasonText;
+    reasonCell.title = item.eligibilityReason || reasonText;
+  } else {
+    reasonCell.textContent = '—';
+  }
 
   const statusCell = document.createElement('td');
   statusCell.className = 'col-status';
@@ -276,7 +321,7 @@ function renderRow(item) {
   });
   actionsCell.append(openButton, exportButton, deleteButton);
 
-  row.append(selectCell, timeCell, promptCell, backupCell, statusCell, actionsCell);
+  row.append(selectCell, timeCell, promptCell, backupCell, eligibleCell, reasonCell, statusCell, actionsCell);
   return row;
 }
 
@@ -326,6 +371,29 @@ function formatOutcomeReason(outcome) {
   return outcome.reason ? outcome.reason.replace(/_/g, ' ') : 'Unknown';
 }
 
+/** Slovensky: Formátuje dôvod neeligibility. */
+function formatEligibilityReason(code) {
+  const mapping = {
+    too_many_messages: 'Too many messages',
+    too_old: 'Too old',
+    too_long_prompt: 'Prompt too long',
+    too_long_answer: 'Answer too long',
+    empty_prompt: 'Empty prompt',
+    empty_answer: 'Empty answer',
+    has_attachments: 'Has attachments',
+    invalid_summary: 'Invalid capture',
+    unknown: 'Unknown'
+  };
+  if (!code) {
+    return 'Unknown';
+  }
+  const key = String(code).toLowerCase();
+  if (mapping[key]) {
+    return mapping[key];
+  }
+  return key.replace(/_/g, ' ');
+}
+
 function formatRelativeTime(timestamp) {
   const diff = Date.now() - timestamp;
   if (diff < 0) {
@@ -356,31 +424,32 @@ function previewPrompt(prompt) {
 }
 
 /** Slovensky: Synchronizuje výber so zoznamom záznamov. */
-function syncSelection() {
-  const validIds = new Set(backups.map((item) => item.id));
+function syncSelection(visibleList = getVisibleBackups()) {
+  const validIds = new Set(visibleList.map((item) => item.id));
   selectedIds.forEach((id) => {
     if (!validIds.has(id)) {
       selectedIds.delete(id);
     }
   });
-  updateSelectionState();
+  updateSelectionState(visibleList);
 }
 
 /** Slovensky: Aktualizuje stav vybraných riadkov. */
-function updateSelectionState() {
+function updateSelectionState(visibleList = getVisibleBackups()) {
   selectionCounter.textContent = `${selectedIds.size} selected`;
   const hasSelection = selectedIds.size > 0;
   openNextButton.disabled = !hasSelection || busy;
   deleteSelectedButton.disabled = !hasSelection || busy;
-  selectAllInput.disabled = busy || !backups.length;
-  selectAllInput.checked = backups.length > 0 && selectedIds.size === backups.length;
-  selectAllInput.indeterminate = selectedIds.size > 0 && selectedIds.size < backups.length;
+  const totalVisible = visibleList.length;
+  selectAllInput.disabled = busy || totalVisible === 0;
+  selectAllInput.checked = totalVisible > 0 && selectedIds.size === totalVisible;
+  selectAllInput.indeterminate = selectedIds.size > 0 && selectedIds.size < totalVisible;
 }
 
 /** Slovensky: Prepne výber všetkých záznamov. */
 function toggleSelectAll(checked) {
   if (checked) {
-    backups.forEach((item) => selectedIds.add(item.id));
+    getVisibleBackups().forEach((item) => selectedIds.add(item.id));
   } else {
     selectedIds.clear();
   }
@@ -533,13 +602,52 @@ async function deleteBackup(id) {
   await showStatus('Backup forgotten');
 }
 
-/** Slovensky: Vyžiada manuálny scan otvorených tabov. */
-async function requestManualScan() {
-  const response = await chrome.runtime.sendMessage({ type: 'REQUEST_SCAN' });
-  if (response?.ok) {
-    await showStatus(`Scan requested (${response.dispatched || 0} tab(s))`);
-  } else {
-    await showStatus('Unable to trigger scan');
+/** Slovensky: Vynúti zachytenie z aktuálnej karty. */
+async function forceCaptureActiveTab() {
+  if (busy) {
+    return;
+  }
+  forceCaptureButton.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'captureActiveTabNow' });
+    if (response?.ok) {
+      const eligible = response?.heuristics?.eligible !== false;
+      await showStatus(eligible ? 'Captured active tab' : 'Captured (not eligible)');
+      await loadBackups();
+    } else {
+      if (response?.error === 'no_active_chatgpt_tab') {
+        await showStatus('No active chatgpt.com tab');
+      } else {
+        await showStatus('Capture failed');
+      }
+    }
+  } catch (_error) {
+    await showStatus('Capture failed');
+  } finally {
+    forceCaptureButton.disabled = busy;
+  }
+}
+
+/** Slovensky: Spustí zachytenie na všetkých kartách. */
+async function scanAllTabs() {
+  if (busy) {
+    return;
+  }
+  scanAllButton.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'scanAllChatgptTabs' });
+    if (response?.ok) {
+      const scanned = Number.isFinite(response.scanned) ? response.scanned : 0;
+      const stored = Number.isFinite(response.stored) ? response.stored : 0;
+      await showStatus(`Scan complete: ${stored}/${scanned} stored`);
+      await loadBackups();
+    } else {
+      await showStatus('Scan failed');
+    }
+  } catch (_error) {
+    await showStatus('Scan failed');
+  } finally {
+    scanAllButton.disabled = busy;
   }
 }
 

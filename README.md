@@ -14,10 +14,16 @@ Search Cleaner keeps short, search-like ChatGPT conversations in a local backup 
 
 ## Using the cleaner
 1. Load the unpacked extension via `chrome://extensions` and pin it if you like.
-2. Perform a short, search-like query on chatgpt.com; the conversation should show up in the list within a few seconds once it meets the heuristics (use **Scan** in the popup to nudge a rescan).
+2. Perform a short, search-like query on chatgpt.com; the conversation should show up in the list within a few seconds once it meets the heuristics (use **Force capture (active tab)** for the current chat or **Scan all tabs** to sweep every open chatgpt.com tab).
 3. In the popup, review the captured rows, tick the ones you want to clean up, and press **Open next (N)**.
 4. Switch to the newly opened ChatGPT tabs, press **Delete** in the official UI, and confirm.
 5. Return to the popup to export or “Forget” completed backups if you want to clear the local snapshot.
+
+## No items appear?
+1. Open a short conversation and press **Force capture (active tab)** in the popup.
+2. Want to sweep everything at once? Use **Scan all tabs** to ping every open chatgpt.com window.
+3. Toggle **Show all (ignore filter)** and inspect the **Why not eligible** column for heuristics rejections.
+4. Tweak the heuristic limits in **Settings** and press **Refresh** to apply the new thresholds.
 
 ## Risky mode (UI automation)
 - **Use at your own risk.** The automation only simulates official UI clicks, but it still depends on DOM selectors that can break without warning.

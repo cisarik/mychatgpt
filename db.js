@@ -117,8 +117,32 @@ function mapRecord(input = {}, existing = null) {
       : Number.isFinite(existing?.lastDeletionAttemptAt)
       ? existing.lastDeletionAttemptAt
       : null,
-    lastDeletionOutcome: input.lastDeletionOutcome ?? existing?.lastDeletionOutcome ?? null
+    lastDeletionOutcome: input.lastDeletionOutcome ?? existing?.lastDeletionOutcome ?? null,
+    eligible: normalizeEligibility(input.eligible, existing?.eligible),
+    eligibilityReason: normalizeEligibilityReason(input.eligibilityReason, existing?.eligibilityReason)
   };
+}
+
+/** Slovensky: Normalizuje flag eligibility na tri-stavový boolean. */
+function normalizeEligibility(nextValue, existingValue) {
+  if (typeof nextValue === 'boolean') {
+    return nextValue;
+  }
+  if (existingValue === true || existingValue === false) {
+    return existingValue;
+  }
+  return null;
+}
+
+/** Slovensky: Normalizuje text dôvodu neeligibility. */
+function normalizeEligibilityReason(nextValue, existingValue) {
+  if (typeof nextValue === 'string' && nextValue.trim()) {
+    return nextValue.trim();
+  }
+  if (typeof existingValue === 'string' && existingValue.trim()) {
+    return existingValue.trim();
+  }
+  return null;
 }
 
 /** Slovensky: Vyrobí krátky titulok zo zadania. */

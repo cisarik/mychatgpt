@@ -14,7 +14,8 @@
           <p>Keep short chat-based searches backed up locally for manual cleanup.</p>
         </div>
         <div class="header__actions">
-          <button id="scan-button" type="button" class="secondary">Scan</button>
+          <button id="force-capture-button" type="button" class="secondary">Force capture (active tab)</button>
+          <button id="scan-all-button" type="button" class="secondary">Scan all tabs</button>
           <button id="refresh-button" type="button" class="secondary">Refresh</button>
         </div>
       </header>
@@ -30,6 +31,12 @@
       </section>
 
       <section>
+        <div class="field field-inline" style="margin-bottom: 8px">
+          <label for="show-all-toggle">
+            <input id="show-all-toggle" type="checkbox" />
+            <span>Show all (ignore filter)</span>
+          </label>
+        </div>
         <table class="backup-table" aria-live="polite">
           <thead>
             <tr>
@@ -39,6 +46,8 @@
               <th scope="col" class="col-time">Time</th>
               <th scope="col">Prompt preview</th>
               <th scope="col">Backup?</th>
+              <th scope="col">Eligible?</th>
+              <th scope="col">Why not eligible</th>
               <th scope="col" class="col-status">Last deletion</th>
               <th scope="col" class="col-actions">Actions</th>
             </tr>

@@ -79,7 +79,9 @@ let debugWaiter = null;
  * @property {string} url
  * @property {number|null} lastDeletionAttemptAt
  * @property {DeletionOutcome|null} lastDeletionOutcome
- */
+ * @property {boolean|null} eligible
+ * @property {string|null} eligibilityReason
+*/
 
 /**
  * @typedef {Object} DeletionOutcome
@@ -219,31 +221,32 @@ export function normalizeSettings(raw) {
  * Slovensky: Posúdi kandidáta podľa heuristík.
  * @param {object} summary
  * @param {HeuristicsConfig} settings
- * @returns {{allowed:boolean,reasons:string[],settings:HeuristicsConfig}}
+ * @returns {{allowed:boolean,reasons:string[],reason:string|null,settings:HeuristicsConfig}}
  */
 export function passesHeuristics(summary, settings) {
   const normalized = normalizeSettings(settings);
   if (!summary || typeof summary !== 'object') {
-    return { allowed: false, reasons: ['invalid_summary'], settings: normalized };
+    return { allowed: false, reasons: ['invalid_summary'], reason: 'unknown', settings: normalized };
   }
   const reasons = [];
-  const messageCount = Number.isFinite(summary.messageCount) ? summary.messageCount : 0;
+  const messageCount = resolveMessageCount(summary);
   if (messageCount > normalized.maxMessageCount) {
     reasons.push('too_many_messages');
   }
-  const promptLength = (summary.userPrompt || '').trim().length;
-  if (promptLength === 0) {
+  const prompt = String(summary.userPrompt || summary.userPromptText || '').trim();
+  if (!prompt.length) {
     reasons.push('empty_prompt');
   }
-  if (promptLength > normalized.maxPromptLength) {
-    reasons.push('prompt_too_long');
+  if (prompt.length > normalized.maxPromptLength) {
+    reasons.push('too_long_prompt');
   }
-  const answerLength = countAnswerLength(summary.answerHTML || summary.firstAnswerHTML || '');
-  if (answerLength === 0) {
+  const answerSource = summary.answerHTML || summary.firstAnswerHTML || summary.assistantHTML || '';
+  const answerLength = countAnswerLength(answerSource);
+  if (!answerLength) {
     reasons.push('empty_answer');
   }
   if (answerLength > normalized.maxAnswerLength) {
-    reasons.push('answer_too_long');
+    reasons.push('too_long_answer');
   }
   const createdAt = Number.isFinite(summary.createdAt) ? summary.createdAt : Date.now();
   const capturedAt = Number.isFinite(summary.capturedAt) ? summary.capturedAt : Date.now();
@@ -254,7 +257,41 @@ export function passesHeuristics(summary, settings) {
   if (Array.isArray(summary.attachments) && summary.attachments.length) {
     reasons.push('has_attachments');
   }
-  return { allowed: reasons.length === 0, reasons, settings: normalized };
+  return { allowed: reasons.length === 0, reasons, reason: pickEligibilityReason(reasons), settings: normalized };
+}
+
+/** Slovensky: Odvodí hlavný dôvod neeligibility. */
+function pickEligibilityReason(reasons) {
+  if (!Array.isArray(reasons) || reasons.length === 0) {
+    return null;
+  }
+  const priority = [
+    'invalid_summary',
+    'empty_prompt',
+    'empty_answer',
+    'too_many_messages',
+    'too_old',
+    'too_long_prompt',
+    'too_long_answer',
+    'has_attachments'
+  ];
+  for (const code of priority) {
+    if (reasons.includes(code)) {
+      return code;
+    }
+  }
+  return reasons[0] || 'unknown';
+}
+
+/** Slovensky: Určí približný počet správ v kandidátovi. */
+function resolveMessageCount(summary) {
+  if (Number.isFinite(summary?.messageCount)) {
+    return summary.messageCount;
+  }
+  if (Number.isFinite(summary?.meta?.messageCountsApprox)) {
+    return summary.meta.messageCountsApprox;
+  }
+  return 0;
 }
 
 /**
@@ -423,6 +460,32 @@ export async function getActiveTabId() {
     return Number.isInteger(tab?.id) ? tab.id : null;
   } catch (_error) {
     return null;
+  }
+}
+
+/**
+ * Slovensky: Zistí aktívnu kartu chatgpt.com v aktuálnom okne.
+ * @returns {Promise<number|null>}
+ */
+export async function getActiveChatgptTabId() {
+  try {
+    const [tab] = await chrome.tabs.query({ url: 'https://chatgpt.com/*', active: true, lastFocusedWindow: true });
+    return Number.isInteger(tab?.id) ? tab.id : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+/**
+ * Slovensky: Vráti ID všetkých otvorených kariet chatgpt.com.
+ * @returns {Promise<number[]>}
+ */
+export async function getAllChatgptTabIds() {
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+    return tabs.map((tab) => (Number.isInteger(tab?.id) ? tab.id : null)).filter((id) => Number.isInteger(id));
+  } catch (_error) {
+    return [];
   }
 }
 

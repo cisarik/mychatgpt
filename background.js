@@ -8,6 +8,8 @@ import {
   getDeletionStrategy,
   getConversationIdFromUrl,
   getActiveTabId,
+  getActiveChatgptTabId,
+  getAllChatgptTabIds,
   log,
   LogLevel,
   normalizeChatUrl,
@@ -93,7 +95,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'OPEN_NEXT':
         return openNext(message.urls || []);
       case 'REQUEST_SCAN':
-        return triggerScan();
+        return scanAllChatgptTabs();
+      case 'captureActiveTabNow':
+        return captureActiveTabNow();
+      case 'scanAllChatgptTabs':
+        return scanAllChatgptTabs();
+      case 'BACKUPS_UPDATED':
+        return { ok: true };
       case 'DELETE_SELECTED':
         return deleteSelected(message.selection || message.urls || []);
       case 'CANCEL_DELETION':
@@ -121,15 +129,15 @@ async function handleCandidate(candidate, sender) {
   if (!cleaned) {
     return { ok: false, rejected: ['invalid_candidate'] };
   }
-  const heuristic = passesHeuristics(cleaned, settingsCache);
-  if (!heuristic.allowed) {
+  const heuristic = applyHeuristics(cleaned);
+  if (!heuristic.eligible) {
     await log(LogLevel.INFO, 'capture', 'Candidate rejected', {
       convoId: cleaned.convoId,
       reasons: heuristic.reasons
     });
     return { ok: false, rejected: heuristic.reasons };
   }
-  const stored = await backups.save(cleaned);
+  const stored = await persistCandidate(cleaned, heuristic, { storeWhenIneligible: false });
   await log(LogLevel.INFO, 'capture', 'Backup stored', {
     convoId: stored.convoId,
     createdAt: stored.createdAt,
@@ -145,8 +153,11 @@ function sanitizeCandidate(candidate, sender) {
   if (!convoId) {
     return null;
   }
-  const userPrompt = (candidate?.userPrompt || '').trim();
-  const answerHTML = sanitizeHTML(candidate?.firstAnswerHTML || candidate?.answerHTML || '');
+  const userPromptRaw = candidate?.userPromptText ?? candidate?.userPrompt ?? '';
+  const userPrompt = String(userPromptRaw).trim();
+  const answerSource =
+    candidate?.assistantHTML || candidate?.answerHTML || candidate?.firstAnswerHTML || '';
+  const answerHTML = sanitizeHTML(answerSource);
   if (!userPrompt || !answerHTML) {
     return null;
   }
@@ -159,8 +170,129 @@ function sanitizeCandidate(candidate, sender) {
     answerHTML,
     createdAt,
     capturedAt,
-    messageCount: Number.isFinite(candidate?.messageCount) ? candidate.messageCount : 0
+    messageCount: resolveMessageCount(candidate)
   };
+}
+
+/** Slovensky: Vráti približný počet správ. */
+function resolveMessageCount(candidate) {
+  if (Number.isFinite(candidate?.messageCount)) {
+    return candidate.messageCount;
+  }
+  if (Number.isFinite(candidate?.meta?.messageCountsApprox)) {
+    return candidate.meta.messageCountsApprox;
+  }
+  return 0;
+}
+
+/** Slovensky: Aplikuje heuristiky na kandidáta. */
+function applyHeuristics(candidate) {
+  const verdict = passesHeuristics(candidate, settingsCache);
+  return {
+    eligible: verdict.allowed,
+    reason: verdict.allowed ? null : verdict.reason || verdict.reasons?.[0] || 'unknown',
+    reasons: Array.isArray(verdict.reasons) ? verdict.reasons : []
+  };
+}
+
+/**
+ * Slovensky: Uloží kandidáta do DB s metadátami heuristík.
+ * @param {ReturnType<typeof sanitizeCandidate>} cleaned
+ * @param {{eligible:boolean,reason:string|null,reasons:string[]}} heuristics
+ * @param {{storeWhenIneligible?:boolean}} options
+ */
+async function persistCandidate(cleaned, heuristics, { storeWhenIneligible = false } = {}) {
+  if (!heuristics.eligible && !storeWhenIneligible) {
+    return null;
+  }
+  const stored = await backups.save({
+    ...cleaned,
+    eligible: heuristics.eligible ? true : false,
+    eligibilityReason: heuristics.eligible ? null : heuristics.reason || 'unknown'
+  });
+  await notifyBackupsUpdated();
+  return stored;
+}
+
+/** Slovensky: Vynúti zachytenie z aktívnej karty. */
+async function captureActiveTabNow() {
+  const tabId = await getActiveChatgptTabId();
+  if (!Number.isInteger(tabId)) {
+    return { ok: false, error: 'no_active_chatgpt_tab' };
+  }
+  const result = await captureFromTab(tabId, { storeWhenIneligible: true, source: 'active' });
+  return result;
+}
+
+/** Slovensky: Spustí zachytenie na všetkých otvorených kartách. */
+async function scanAllChatgptTabs() {
+  const tabIds = await getAllChatgptTabIds();
+  const outcomes = [];
+  let storedCount = 0;
+  for (const tabId of tabIds) {
+    await sleep(100 + Math.floor(Math.random() * 101));
+    const result = await captureFromTab(tabId, { storeWhenIneligible: true, source: 'bulk' });
+    if (result.ok && result.stored) {
+      storedCount += 1;
+    }
+    outcomes.push({ tabId, ...result });
+  }
+  await log(LogLevel.INFO, 'scan', 'Bulk capture finished', {
+    scanned: tabIds.length,
+    stored: storedCount
+  });
+  return { ok: true, scanned: tabIds.length, stored: storedCount, results: outcomes };
+}
+
+/** Slovensky: Požiada obsahový skript o zachytenie a uloží výsledok. */
+async function captureFromTab(tabId, { storeWhenIneligible = false, source = 'manual' } = {}) {
+  if (!Number.isInteger(tabId)) {
+    return { ok: false, error: 'invalid_tab' };
+  }
+  let tabInfo = null;
+  try {
+    tabInfo = await chrome.tabs.get(tabId);
+  } catch (_error) {
+    // karta mohla zaniknúť
+  }
+  let response;
+  try {
+    response = await chrome.tabs.sendMessage(tabId, { type: 'RUN_CAPTURE_NOW', includePayload: true });
+  } catch (error) {
+    return { ok: false, error: error?.message || 'send_failed' };
+  }
+  if (!response?.ok) {
+    return { ok: false, error: response?.error || 'capture_failed' };
+  }
+  const summary = response.summary || response.payload || null;
+  if (!summary) {
+    return { ok: false, error: 'empty_summary' };
+  }
+  const cleaned = sanitizeCandidate({ ...summary, url: summary.url || tabInfo?.url }, { tab: tabInfo });
+  if (!cleaned) {
+    return { ok: false, error: 'invalid_candidate' };
+  }
+  const heuristics = applyHeuristics(cleaned);
+  const stored = await persistCandidate(cleaned, heuristics, { storeWhenIneligible });
+  if (!stored) {
+    return { ok: false, error: 'rejected_by_heuristics', heuristics };
+  }
+  await log(LogLevel.INFO, 'capture', 'Manual capture stored', {
+    convoId: stored.convoId,
+    eligible: heuristics.eligible,
+    reason: heuristics.reason,
+    source
+  });
+  return { ok: true, stored, heuristics };
+}
+
+/** Slovensky: Odošle signál pre popup na obnovenie zoznamu. */
+async function notifyBackupsUpdated() {
+  try {
+    await chrome.runtime.sendMessage({ type: 'BACKUPS_UPDATED' });
+  } catch (_error) {
+    // Žiadny poslucháč nie je problém – popup sa obnoví manuálne.
+  }
 }
 
 /** Slovensky: Z URL vytiahne ID konverzácie. */
@@ -305,27 +437,6 @@ function markOpened(url) {
   }
   const timer = setTimeout(() => recentlyOpened.delete(normalized), 60000);
   recentlyOpened.set(normalized, timer);
-}
-
-/** Slovensky: Pošle obsahovým skriptom požiadavku na manuálny scan. */
-async function triggerScan() {
-  const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
-  let dispatched = 0;
-  await Promise.all(
-    tabs.map(async (tab) => {
-      if (!tab.id) {
-        return;
-      }
-      try {
-        await chrome.tabs.sendMessage(tab.id, { type: 'RUN_CAPTURE_NOW' });
-        dispatched += 1;
-      } catch (_error) {
-        // Content skript nemusí byť injektovaný; ignorujeme.
-      }
-    })
-  );
-  await log(LogLevel.INFO, 'scan', 'Manual scan requested', { dispatched });
-  return { ok: true, dispatched };
 }
 
 /** Slovensky: Spustí mazanie vybratých konverzácií podľa aktuálnych nastavení. */
