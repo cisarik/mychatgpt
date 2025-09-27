@@ -44,10 +44,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const questionText = normalizeQuestion(record.questionText);
       if (queryLaunch) {
-        queryLaunch.textContent = questionText;
-        queryLaunch.addEventListener('click', () => {
-          const q = encodeURIComponent(record.questionText || '');
-          chrome.tabs.create({ url: `https://www.google.com/search?q=${q}` });
+        const rawQuestion = (record.questionText || '').trim();
+        const targetUrl = `https://chatgpt.com/?q=${encodeURIComponent(rawQuestion)}&hints=search`;
+        queryLaunch.textContent = rawQuestion || questionText;
+        queryLaunch.classList.add('tablike');
+        queryLaunch.setAttribute('href', targetUrl);
+        queryLaunch.setAttribute('target', '_blank');
+        queryLaunch.setAttribute('rel', 'noopener');
+        queryLaunch.addEventListener('click', (event) => {
+          if (event.button === 0 && !event.metaKey && !event.ctrlKey) {
+            event.preventDefault();
+            chrome.tabs.create({ url: targetUrl });
+          }
         });
       }
 
@@ -55,12 +63,19 @@ document.addEventListener('DOMContentLoaded', () => {
         const formatted = typeof formatDate === 'function'
           ? formatDate(record.timestamp)
           : new Date(record.timestamp || Date.now()).toLocaleString();
-        const convoText = record.convoId ? record.convoId : 'no-convo';
-        const parts = [formatted, convoText];
+        meta.innerHTML = '';
+
+        const timeChip = document.createElement('span');
+        timeChip.className = 'meta-pill';
+        timeChip.textContent = formatted;
+        meta.appendChild(timeChip);
+
         if (record.answerTruncated) {
-          parts.push('(truncated)');
+          const truncatedChip = document.createElement('span');
+          truncatedChip.className = 'meta-pill meta-pill-warn';
+          truncatedChip.textContent = '(truncated)';
+          meta.appendChild(truncatedChip);
         }
-        meta.textContent = parts.join('  •  ');
       }
 
       const answerHTML = typeof record.answerHTML === 'string' ? record.answerHTML : '';

@@ -103,7 +103,7 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 
 ## Searches panel
 - The list now uses the first captured user message as the primary, clickable title (falling back to **“(untitled)”**) that opens `pages/backup_view.html?id=<uuid>` in a new tab.
-- The metadata line prints the localized timestamp, conversation ID (or `no-convo`), and a `(truncated)` marker when applicable using the `•` separators shared with the detail view.
+- The metadata line prints the localized timestamp and adds a `(truncated)` badge when applicable, keeping conversation IDs out of the UI.
 - The “Počet záloh v úložisku” counter reads straight from IndexedDB, and the page listens for background `backups_updated/searches_reload` broadcasts to refresh without a manual reload.
 
 ## Heuristics V1 & Cooldown
@@ -127,9 +127,9 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 
 ## Backup View page
 - Click any question in **Searches** to open `pages/backup_view.html?id=<uuid>` in a regular browser tab. The page mirrors the dark popup styling and focuses the stored prompt as a tab-like primary button.
-- The header button opens a Google query for the captured question. The metadata text prints the timestamp, conversation ID (or `no-convo`), and the optional `(truncated)` suffix with `•` separators.
-- Saved answers render immediately inside the page (no iframe). Stored HTML is inserted directly; only anchor tags are restyled as tab-like buttons that open in a hardened new tab (`target="_blank"`, `rel="noopener"`).
-- Missing or invalid IDs surface inline error messages within the answer card.
+- The header button now launches `https://chatgpt.com/?q=<query>&hints=search` in a new tab (or via middle/⌘-click) with the captured prompt prefilled. The metadata row only shows the localized timestamp plus a `(truncated)` badge when applicable—conversation IDs are intentionally omitted.
+- Saved answers render directly on the base surface with no extra card background. Stored HTML is inserted inline, and anchor tags are converted to tab-like buttons that open hardened new tabs (`target="_blank"`, `rel="noopener"`).
+- Missing or invalid IDs surface inline error messages within the answer area.
 
 ## Evaluate & Backup (if candidate)
 - The Debug toolbar now offers **Evaluate & Backup (if candidate)**. It runs the existing heuristics on the active ChatGPT tab, ignoring cooldowns, and immediately triggers the manual backup flow when the conversation qualifies.

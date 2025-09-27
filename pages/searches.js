@@ -199,12 +199,6 @@
     timestampSpan.textContent = formatTimestamp(backup.timestamp);
     timestampSpan.className = 'meta-pill';
     metaLine.appendChild(timestampSpan);
-    if (backup && backup.convoId) {
-      const convoSpan = document.createElement('span');
-      convoSpan.className = 'meta-pill';
-      convoSpan.textContent = backup.convoId;
-      metaLine.appendChild(convoSpan);
-    }
     if (backup && backup.answerTruncated) {
       const truncatedSpan = document.createElement('span');
       truncatedSpan.className = 'meta-pill meta-pill-warn';
