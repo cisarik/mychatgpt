@@ -7,11 +7,10 @@ This repository contains a minimal Manifest V3 Chrome/Brave extension scaffold f
 2. Enable **Developer mode**.
 3. Choose **Load unpacked** and select this repository folder.
 
-## Verify logging
-1. Open the extension popup from the toolbar.
-2. Navigate to the **Debug** tab and click **Test log**.
-3. Visit `chrome://extensions`, locate MyChatGPT, and use **Service worker → Inspect views** to review background logs in DevTools.
-4. Alternatively, open a `https://chatgpt.com` tab, launch DevTools (`Ctrl/Cmd + Shift + I`), and inspect the Console for content-script output.
+## Where to see logs
+1. Open the extension popup from the toolbar and switch to the **Debug** tab.
+2. Click **Test log** to emit a sample entry. The background Service worker console (open it via `chrome://extensions` → MyChatGPT → **Service worker → Inspect views**) will show `[MyChatGPT] Test log (SW) …` alongside the persisted log entry.
+3. With an active `https://chatgpt.com` tab, open its DevTools (`Ctrl/Cmd + Shift + I`) to see `[MyChatGPT] Test log (page)` routed from the content script. If no chatgpt.com tab is active, only the Service worker console prints.
 
 Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use DevTools consoles to stream live entries instead of the in-page log list.
 

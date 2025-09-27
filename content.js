@@ -187,6 +187,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return undefined;
   }
 
+  if (message.type === 'debug_console_log') {
+    console.info('[MyChatGPT] Test log (page)', message.payload || {});
+    return undefined;
+  }
+
   if (message.type === 'probe_metadata') {
     const traceId = message.traceId;
     try {

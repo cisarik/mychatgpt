@@ -15,6 +15,26 @@
   const backupModeLabel = document.getElementById('backup-mode-label');
   const backupToastContainer = document.getElementById('backup-toast');
   const backupHistoryContainer = document.getElementById('backup-history');
+  const debugToastContainer = document.getElementById('debug-toast');
+
+  /* Slovensky komentar: Zobrazi kratku toast spravu v debug nadpise. */
+  function showDebugToast(message) {
+    if (!debugToastContainer || !message) {
+      return;
+    }
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.textContent = message;
+    debugToastContainer.prepend(toast);
+    while (debugToastContainer.childElementCount > 2) {
+      debugToastContainer.removeChild(debugToastContainer.lastElementChild);
+    }
+    setTimeout(() => {
+      if (toast.parentElement === debugToastContainer) {
+        debugToastContainer.removeChild(toast);
+      }
+    }, 2600);
+  }
 
   /* Slovensky komentar: Prida toast do autoscan feedu. */
   function appendScanToast(message) {
@@ -75,24 +95,51 @@
     });
   }
 
+  function requestTestLog(note) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'debug_test_log', note }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(runtimeError);
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
   if (testLogButton) {
     testLogButton.addEventListener('click', async () => {
-      /* Slovensky komentar: Zapise testovaci zaznam pre rychle overenie. */
       const originalText = testLogButton.textContent;
+      const note = `debug_page:${Date.now()}`;
       testLogButton.disabled = true;
+      testLogButton.textContent = 'Odosielam…';
       try {
-        await Logger.log('info', 'debug', 'Manual test log triggered on debug page');
-        testLogButton.textContent = 'Logged!';
+        const response = await requestTestLog(note);
+        if (!response || response.ok !== true) {
+          const errorMessage = response && response.error ? response.error : 'Žiadna odozva';
+          throw new Error(errorMessage);
+        }
+        showDebugToast('Test log odoslaný (pozri DevTools)');
+        testLogButton.textContent = 'Odoslané';
+        await Logger.log('info', 'debug', 'Test log request forwarded', {
+          forwarded: Boolean(response.forwarded),
+          forwardError: response.forwardError || null,
+          requestedAt: response.requestedAt,
+          note
+        });
       } catch (error) {
-        testLogButton.textContent = 'Error';
-        await Logger.log('error', 'debug', 'Test log failed on debug page', {
-          message: error && error.message
+        testLogButton.textContent = 'Chyba';
+        showDebugToast('Test log zlyhal. Skontrolujte pripojenie.');
+        await Logger.log('error', 'debug', 'Test log request failed', {
+          message: error && error.message,
+          note
         });
       } finally {
         setTimeout(() => {
           testLogButton.textContent = originalText;
           testLogButton.disabled = false;
-        }, 1200);
+        }, 1400);
       }
     });
   }

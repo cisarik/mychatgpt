@@ -72,6 +72,28 @@ function getActiveTab() {
   });
 }
 
+/* Slovensky komentar: Posle debug log na aktivnu kartu, ak ide o chatgpt.com. */
+async function forwardDebugLogToActiveTab(payload) {
+  const activeTab = await getActiveTab();
+  if (!activeTab || !activeTab.id || !activeTab.url || !activeTab.url.startsWith('https://chatgpt.com/')) {
+    return { forwarded: false, reason: 'no_active_chatgpt' };
+  }
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(
+      activeTab.id,
+      { type: 'debug_console_log', payload },
+      () => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          resolve({ forwarded: false, reason: runtimeError.message || 'send_failed' });
+          return;
+        }
+        resolve({ forwarded: true, reason: null });
+      }
+    );
+  });
+}
+
 /* Slovensky komentar: Odošle ping na obsahový skript a vrati odpoved. */
 function sendPingRequest(tabId, traceId) {
   return new Promise((resolve, reject) => {
@@ -245,6 +267,52 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message && message.type === 'debug_test_log') {
+    (async () => {
+      const note = typeof message.note === 'string' ? message.note.trim() : '';
+      const requestedAt = new Date().toISOString();
+      const meta = { requestedAt };
+      if (note) {
+        meta.note = note;
+      }
+      let logError = null;
+      try {
+        await Logger.log('info', 'debug', 'Test log from popup', meta);
+      } catch (error) {
+        logError = error;
+      }
+      console.info(`[MyChatGPT] Test log (SW) ${requestedAt}`);
+      let forwardReport = { forwarded: false, reason: null };
+      try {
+        forwardReport = await forwardDebugLogToActiveTab({
+          msg: 'Test log from background',
+          requestedAt,
+          note: note || null
+        });
+      } catch (forwardError) {
+        forwardReport = {
+          forwarded: false,
+          reason: forwardError && forwardError.message ? forwardError.message : String(forwardError)
+        };
+      }
+      const responsePayload = {
+        ok: !logError,
+        requestedAt,
+        forwarded: Boolean(forwardReport.forwarded)
+      };
+      if (note) {
+        responsePayload.note = note;
+      }
+      if (logError) {
+        responsePayload.error = logError && logError.message ? logError.message : String(logError);
+      }
+      if (forwardReport.reason && !logError) {
+        responsePayload.forwardError = forwardReport.reason;
+      }
+      sendResponse(responsePayload);
+    })();
+    return true;
+  }
   if (message && message.type === 'heuristics_eval') {
     (async () => {
       const decision = {

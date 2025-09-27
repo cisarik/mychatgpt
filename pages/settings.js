@@ -2,6 +2,7 @@
 (async function () {
   const form = document.getElementById('settings-form');
   const statusText = document.getElementById('status-text');
+  const toastHost = document.getElementById('settings-toast');
   const healHints = new Map();
   document.querySelectorAll('.heal-hint').forEach((element) => {
     healHints.set(element.dataset.field, element);
@@ -9,12 +10,33 @@
 
   let currentSettings = SettingsStore.defaults();
 
+  /* Slovensky komentar: Zobrazi kratku toast notifikaciu. */
+  function showToast(message) {
+    if (!toastHost) {
+      return;
+    }
+    toastHost.textContent = '';
+    if (!message) {
+      return;
+    }
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.textContent = message;
+    toastHost.appendChild(toast);
+    setTimeout(() => {
+      if (toast.parentElement === toastHost) {
+        toastHost.removeChild(toast);
+      }
+    }, 2600);
+  }
+
   /* Slovensky komentar: Aktualizuje zobrazenie hintov pre opravene polia. */
   function renderHealedHints(healedFields) {
     healHints.forEach((element) => {
       element.hidden = true;
     });
-    healedFields.forEach((field) => {
+    const uniqueFields = Array.isArray(healedFields) ? Array.from(new Set(healedFields)) : [];
+    uniqueFields.forEach((field) => {
       const element = healHints.get(field);
       if (element) {
         element.hidden = false;
@@ -32,7 +54,13 @@
     form.MAX_MESSAGES.value = settings.MAX_MESSAGES;
     form.USER_MESSAGES_MAX.value = settings.USER_MESSAGES_MAX;
     form.SCAN_COOLDOWN_MIN.value = settings.SCAN_COOLDOWN_MIN;
-    form.SAFE_URL_PATTERNS.value = settings.SAFE_URL_PATTERNS.join('\n');
+    const normalizer = typeof normalizeSafeUrlPatterns === 'function' ? normalizeSafeUrlPatterns : null;
+    const patterns = normalizer
+      ? normalizer(settings.SAFE_URL_PATTERNS)
+      : Array.isArray(settings.SAFE_URL_PATTERNS)
+      ? settings.SAFE_URL_PATTERNS
+      : [];
+    form.SAFE_URL_PATTERNS.value = patterns.join('\n');
   }
 
   /* Slovensky komentar: Z formulara vycita hodnoty pre ulozenie. */
@@ -51,7 +79,9 @@
       }
     });
     const normalizer = typeof normalizeSafeUrlPatterns === 'function' ? normalizeSafeUrlPatterns : null;
-    const normalizedPatterns = normalizer ? normalizer(rawValue) : lines.map((line) => line.trim()).filter((line) => line);
+    const normalizedPatterns = normalizer
+      ? normalizer(rawValue)
+      : lines.map((line) => line.trim()).filter((line) => line && !line.startsWith('#'));
     return {
       LIST_ONLY: form.LIST_ONLY.checked,
       DRY_RUN: form.DRY_RUN.checked,
@@ -77,7 +107,7 @@
         ? Array.isArray(afterValue) && beforeValue.length === afterValue.length && beforeValue.every((value, index) => value === afterValue[index])
         : beforeValue === afterValue;
       if (!areEqual) {
-        diff[key] = { before: beforeValue, after: afterValue };
+        diff[key] = { old: beforeValue, new: afterValue };
       }
     });
     return diff;
@@ -92,22 +122,29 @@
     event.preventDefault();
     const previous = currentSettings;
     const rawInput = readFormValues();
-    const { SAFE_URL_ERRORS: patternErrors, ...preparedInput } = rawInput;
+    const { SAFE_URL_ERRORS: patternErrors, SAFE_URL_PATTERNS: nextPatterns, ...preparedInput } = rawInput;
     if (patternErrors.length) {
       const linesText = patternErrors.join(', ');
       setStatus(`Vzor na riadku ${linesText} presahuje limit 200 znakov.`);
       return;
     }
-    const { settings: sanitized, healedFields } = await SettingsStore.save(preparedInput);
+    const payload = {
+      ...currentSettings,
+      ...preparedInput,
+      SAFE_URL_PATTERNS: nextPatterns
+    };
+    const { settings: sanitized, healedFields } = await SettingsStore.save(payload);
     currentSettings = sanitized;
+    populateForm(sanitized);
     renderHealedHints(healedFields);
     const changes = diffSettings(previous, sanitized);
-    await Logger.log('info', 'settings', 'Settings updated', {
-      scope: 'settings',
-      changed: changes,
-      before: previous,
-      after: sanitized
-    });
+    if (Object.keys(changes).length || healedFields.length) {
+      await Logger.log('info', 'settings', 'Settings saved', {
+        diff: changes,
+        before: previous,
+        after: sanitized
+      });
+    }
     if (Object.keys(changes).length === 0 && healedFields.length === 0) {
       setStatus('Žiadne zmeny na uloženie.');
     } else {
@@ -115,18 +152,48 @@
     }
   });
 
-  document.getElementById('reset-btn').addEventListener('click', () => {
+  document.getElementById('reset-btn').addEventListener('click', async () => {
+    const previous = currentSettings;
     const defaults = SettingsStore.defaults();
-    populateForm(defaults);
-    renderHealedHints([]);
-    setStatus('Predvolené hodnoty boli obnovené v editore.');
+    try {
+      const { settings: savedDefaults } = await SettingsStore.save(defaults);
+      currentSettings = savedDefaults;
+      populateForm(savedDefaults);
+      renderHealedHints([]);
+      showToast('Nastavenia obnovené na defaulty');
+      setStatus('Predvolené hodnoty boli uložené.');
+      const changes = diffSettings(previous, savedDefaults);
+      await Logger.log('info', 'settings', 'Settings reset to defaults', {
+        diff: changes,
+        before: previous,
+        after: savedDefaults
+      });
+    } catch (error) {
+      setStatus('Reset zlyhal. Skúste znova.');
+      await Logger.log('error', 'settings', 'Failed to reset settings to defaults', {
+        message: error && error.message
+      });
+    }
   });
 
   try {
-    const { settings, healedFields } = await SettingsStore.load();
-    currentSettings = settings;
-    populateForm(settings);
-    renderHealedHints(healedFields);
+    const { settings, healedFields, meta } = await SettingsStore.load();
+    const normalizer = typeof normalizeSafeUrlPatterns === 'function' ? normalizeSafeUrlPatterns : null;
+    const normalizedPatterns = normalizer
+      ? normalizer(settings.SAFE_URL_PATTERNS)
+      : Array.isArray(settings.SAFE_URL_PATTERNS)
+      ? settings.SAFE_URL_PATTERNS
+      : [];
+    currentSettings = {
+      ...settings,
+      SAFE_URL_PATTERNS: normalizedPatterns
+    };
+    populateForm(currentSettings);
+    const hintFields = Array.isArray(healedFields) ? [...healedFields] : [];
+    if (meta && meta.addedRequiredPattern && !hintFields.includes('SAFE_URL_PATTERNS')) {
+      hintFields.push('SAFE_URL_PATTERNS');
+    }
+    renderHealedHints(hintFields);
     if (healedFields.length) {
       setStatus('Niektoré položky boli automaticky opravené.');
     }

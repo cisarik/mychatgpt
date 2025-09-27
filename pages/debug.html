@@ -23,7 +23,8 @@
         </p>
         <p>
           On <strong>chatgpt.com</strong> tabs press <strong>Ctrl/Cmd + Shift + I</strong> to inspect the page and review
-          content-script logs directly in DevTools.
+          content-script logs directly in DevTools. The <strong>Test log</strong> button will post to both consoles when an active
+          chatgpt.com tab is available.
         </p>
       </div>
       <div class="toolbar">
@@ -39,6 +40,8 @@
         </button>
       </div>
     </section>
+
+    <div id="debug-toast" class="toast-stack" role="status" aria-live="polite"></div>
 
     <section class="page-section panel panel-bleed">
       <h2 class="section-title">Auto-scan feed</h2>

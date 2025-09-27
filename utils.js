@@ -12,11 +12,14 @@ const DEFAULT_SETTINGS = Object.freeze({
   DRY_RUN: true,
   CONFIRM_BEFORE_DELETE: true,
   AUTO_SCAN: false,
+  SHOW_CANDIDATE_BADGE: true,
   MAX_MESSAGES: 2,
   USER_MESSAGES_MAX: 2,
-  SAFE_URL_PATTERNS: ['/workspaces', '/projects', '/new-project', REQUIRED_SAFE_URL_PATTERN],
   SCAN_COOLDOWN_MIN: 5,
-  CAPTURE_ONLY_CANDIDATES: true
+  MIN_AGE_MINUTES: 2,
+  DELETE_LIMIT: 10,
+  CAPTURE_ONLY_CANDIDATES: true,
+  SAFE_URL_PATTERNS: ['/workspaces', '/projects', '/new-project', REQUIRED_SAFE_URL_PATTERN]
 });
 
 /* Slovensky komentar: Ziska referenciu na globalny objekt pre rozne prostredia. */
@@ -66,15 +69,15 @@ function cloneDefaultSettings() {
 
 /* Slovensky komentar: Sanitizuje ulozene nastavenia a vrati zoznam opravenych poli. */
 function normalizeSafeUrlPatterns(strOrArray) {
-  /* Slovensky komentar: Normalizuje SAFE_URL vzory, odstrani prazdne, duplikaty a komentarove riadky. */
-  const lines = Array.isArray(strOrArray)
+  /* Slovensky komentar: Normalizuje SAFE_URL vzory (napr. '/workspaces', '/c/*', 'https://chatgpt.com/c/*'). */
+  const rawItems = Array.isArray(strOrArray)
     ? strOrArray
     : typeof strOrArray === 'string'
     ? strOrArray.split(/\r?\n/)
     : [];
   const seen = new Set();
-  const result = [];
-  lines.forEach((rawLine) => {
+  const normalized = [];
+  rawItems.forEach((rawLine) => {
     if (typeof rawLine !== 'string') {
       return;
     }
@@ -84,10 +87,10 @@ function normalizeSafeUrlPatterns(strOrArray) {
     }
     if (!seen.has(trimmed)) {
       seen.add(trimmed);
-      result.push(trimmed);
+      normalized.push(trimmed);
     }
   });
-  return result;
+  return normalized;
 }
 
 function sanitizeSettings(rawSettings) {
@@ -100,7 +103,14 @@ function sanitizeSettings(rawSettings) {
     return { settings: result, healedFields: Array.from(healedFields) };
   }
 
-  const boolFields = ['LIST_ONLY', 'DRY_RUN', 'CONFIRM_BEFORE_DELETE', 'AUTO_SCAN', 'CAPTURE_ONLY_CANDIDATES'];
+  const boolFields = [
+    'LIST_ONLY',
+    'DRY_RUN',
+    'CONFIRM_BEFORE_DELETE',
+    'AUTO_SCAN',
+    'CAPTURE_ONLY_CANDIDATES',
+    'SHOW_CANDIDATE_BADGE'
+  ];
   boolFields.forEach((key) => {
     if (typeof rawSettings[key] === 'boolean') {
       result[key] = rawSettings[key];
@@ -112,7 +122,9 @@ function sanitizeSettings(rawSettings) {
   const intFields = [
     { key: 'MAX_MESSAGES', min: 1 },
     { key: 'USER_MESSAGES_MAX', min: 1 },
-    { key: 'SCAN_COOLDOWN_MIN', min: 1 }
+    { key: 'SCAN_COOLDOWN_MIN', min: 1 },
+    { key: 'MIN_AGE_MINUTES', min: 0 },
+    { key: 'DELETE_LIMIT', min: 1 }
   ];
   intFields.forEach(({ key, min }) => {
     const value = rawSettings[key];
@@ -208,8 +220,10 @@ async function loadSettings() {
   let nextSettings = settings;
   const normalized = normalizeSafeUrlPatterns(nextSettings.SAFE_URL_PATTERNS);
   let mutated = false;
+  let addedRequiredPattern = false;
   if (!normalized.includes(REQUIRED_SAFE_URL_PATTERN)) {
     mutated = true;
+    addedRequiredPattern = true;
     nextSettings = {
       ...nextSettings,
       SAFE_URL_PATTERNS: [...normalized, REQUIRED_SAFE_URL_PATTERN]
@@ -238,7 +252,7 @@ async function loadSettings() {
       /* Slovensky komentar: Ignoruje neuspesne logovanie migracie. */
     }
   }
-  return { settings: nextSettings, healedFields };
+  return { settings: nextSettings, healedFields, meta: { addedRequiredPattern } };
 }
 
 /* Slovensky komentar: Ulozi nastavenia po sanitizacii a vrati pripadne opravy. */
@@ -276,31 +290,27 @@ function urlMatchesAnyPattern(url, patterns) {
   try {
     const parsed = new URL(url);
     const pathname = parsed.pathname || '/';
-    const candidates = normalizeSafeUrlPatterns(patterns);
-    if (!candidates.length) {
+    const normalized = normalizeSafeUrlPatterns(patterns);
+    if (!normalized.length) {
       return false;
     }
-    return candidates.some((pattern) => {
-      if (pattern.startsWith('http')) {
-        /* Slovensky komentar: Podpora globu so suffixom, napr. https://chatgpt.com/c/*. */
-        const wildcardIndex = pattern.indexOf('*');
-        if (wildcardIndex === -1) {
+    return normalized.some((pattern) => {
+      if (pattern.startsWith('http://') || pattern.startsWith('https://')) {
+        /* Slovensky komentar: Povoluje iba suffix glob, napr. https://chatgpt.com/c/*. */
+        if (!pattern.includes('*')) {
           return url === pattern;
         }
-        if (pattern.indexOf('*', wildcardIndex + 1) !== -1) {
+        if (!pattern.endsWith('*') || pattern.indexOf('*') !== pattern.length - 1) {
           return false;
         }
-        if (wildcardIndex !== pattern.length - 1) {
-          return false;
-        }
-        const prefix = pattern.slice(0, wildcardIndex);
-        return url.startsWith(prefix);
+        const prefix = pattern.slice(0, -1);
+        return prefix ? url.startsWith(prefix) : false;
       }
       if (pattern.startsWith('/')) {
-        /* Slovensky komentar: Vyhladava substring v pathname, napr. /workspaces. */
+        /* Slovensky komentar: Porovná substring na pathname, napr. /workspaces. */
         return pathname.includes(pattern);
       }
-      /* Slovensky komentar: Fallback na substring v pathname pre zdedené hodnoty. */
+      /* Slovensky komentar: Zanechá podporu zdedených hodnot ako substring na pathname. */
       return pathname.includes(pattern);
     });
   } catch (_error) {
