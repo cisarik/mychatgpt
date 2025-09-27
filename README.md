@@ -99,9 +99,10 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 - Auto-scans update `cooldown_v1.lastScanAt` and respect `SCAN_COOLDOWN_MIN` before re-running. Manual evaluations always return `cooldown.used=false`, signalling that cooldown gating is ignored in the debug workflow.
 
 ## Troubleshooting
+- Chrome MV3 does not support the `chrome.tabs.sendMessage` timeout option; we implement a manual timeout plus a one-time auto-injection & retry when the receiver is missing.
 - When a ChatGPT tab briefly lacks the content script (e.g., after a Next.js route swap), the background worker automatically re-injects `content.js` and retries once. The service worker console logs a single `{ scope: 'content', reasonCode: 'cs_injected_retry' }` line the first time recovery runs.
 - Open DevTools on chatgpt.com and look for `[MyChatGPT] content.js loaded` (plus occasional “content.js active” notices) to confirm the script is live without sending messages.
-- Manual **Evaluate heuristics** calls skip cooldown checks entirely; only auto-scan jobs wait on `cooldown_v1`. The debug panel now renders `cooldown=unused` for those manual runs.
+- Manual **Evaluate heuristics** calls skip cooldown checks entirely; only auto-scan jobs wait on `cooldown_v1`. The debug panel now renders `cooldown=inactive` for those manual runs.
 
 ## Backup write V1
 - The debug page now includes **Backup now (manual)**, which captures the active ChatGPT tab via the existing read-only content script and queues a single write into the `backups` IndexedDB store.

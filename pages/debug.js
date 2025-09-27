@@ -37,6 +37,23 @@
     }, 2600);
   }
 
+  /* Slovensky komentar: Extrahuje surovu chybovu spravu pre toast. */
+  function extractErrorMessage(error, fallback = 'Žiadna odozva') {
+    if (!error) {
+      return fallback;
+    }
+    if (typeof error === 'string') {
+      return error;
+    }
+    if (typeof error.message === 'string' && error.message) {
+      return error.message;
+    }
+    if (typeof error.reason === 'string' && error.reason) {
+      return error.reason;
+    }
+    return String(error);
+  }
+
   /* Slovensky komentar: Prida toast do autoscan feedu. */
   function appendScanToast(message) {
     if (!scanResultContainer) {
@@ -78,16 +95,17 @@
             result: response.result
           });
         } else {
-          const errorMessage = (response && response.error) || 'Neznáma chyba';
+          const errorMessage = extractErrorMessage(response && (response.error || response.message));
           appendScanToast(`Auto-scan chyba: ${errorMessage}`);
           await Logger.log('error', 'scan', 'Auto-scan feed stub failed', {
             message: errorMessage
           });
         }
       } catch (error) {
-        appendScanToast(`Auto-scan chyba: ${error && error.message}`);
+        const message = extractErrorMessage(error);
+        appendScanToast(`Auto-scan chyba: ${message}`);
         await Logger.log('error', 'scan', 'Auto-scan feed stub threw error', {
-          message: error && error.message
+          message
         });
       } finally {
         autoscanButton.disabled = false;
@@ -131,9 +149,10 @@
         });
       } catch (error) {
         testLogButton.textContent = 'Chyba';
-        showDebugToast('Test log zlyhal. Skontrolujte pripojenie.');
+        const message = extractErrorMessage(error);
+        showDebugToast(`Test log zlyhal: ${message}`);
         await Logger.log('error', 'debug', 'Test log request failed', {
-          message: error && error.message,
+          message,
           note
         });
       } finally {
@@ -186,7 +205,7 @@
           traceId: response.payload.traceId
         });
       } else {
-        const errorMessage = (response && response.error) || 'Neznáma chyba';
+        const errorMessage = extractErrorMessage(response && (response.error || response.message));
         appendConnectivityRecord(`Chyba: ${errorMessage}`);
         await Logger.log('warn', 'debug', 'Connectivity test returned warning', {
           reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
@@ -194,9 +213,10 @@
         });
       }
     } catch (error) {
-      appendConnectivityRecord(`Chyba: ${error && error.message}`);
+      const message = extractErrorMessage(error);
+      appendConnectivityRecord(`Chyba: ${message}`);
       await Logger.log('error', 'debug', 'Connectivity test request threw error', {
-        message: error && error.message
+        message
       });
     } finally {
       connectivityButton.disabled = false;
@@ -218,7 +238,7 @@
             reasonCode: response.reasonCode || 'ping_ok'
           });
         } else {
-          const errorMessage = (response && response.error) || 'Žiadna odozva';
+          const errorMessage = extractErrorMessage(response && (response.error || response.message));
           checkCsButton.textContent = 'Content script chýba';
           appendConnectivityRecord(`Check CS chyba: ${errorMessage}`);
           await Logger.log('warn', 'debug', 'Content script check warning', {
@@ -228,7 +248,7 @@
         }
       } catch (error) {
         checkCsButton.textContent = 'Content script chýba';
-        const message = error && error.message ? error.message : 'Neznáma chyba';
+        const message = extractErrorMessage(error);
         appendConnectivityRecord(`Check CS chyba: ${message}`);
         await Logger.log('error', 'debug', 'Content script check threw error', {
           message
@@ -290,7 +310,7 @@
             skipped: Boolean(payload.skipped)
           });
         } else {
-          const errorMessage = (response && response.error) || 'Neznáma chyba';
+          const errorMessage = extractErrorMessage(response && (response.error || response.message));
           appendProbeRecord(`Chyba: ${errorMessage}`);
           await Logger.log('warn', 'debug', 'Metadata probe returned warning', {
             reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
@@ -298,9 +318,10 @@
           });
         }
       } catch (error) {
-        appendProbeRecord(`Chyba: ${error && error.message}`);
+        const message = extractErrorMessage(error);
+        appendProbeRecord(`Chyba: ${message}`);
         await Logger.log('error', 'debug', 'Metadata probe request threw error', {
-          message: error && error.message
+          message
         });
       } finally {
         probeButton.disabled = false;
@@ -352,8 +373,8 @@
           const candidateText = decision.decided ? `candidate=${decision.isCandidate}` : 'candidate=undecided';
           const cooldown = response.cooldown || { used: false, remainingMs: 0 };
           const cooldownText = cooldown.used
-            ? `cooldown=wait ${cooldown.remainingMs}ms`
-            : 'cooldown=unused';
+            ? `cooldown=active (${cooldown.remainingMs}ms)`
+            : 'cooldown=inactive';
           appendHeuristicsRecord(`[${timestamp}] ${candidateText}; reasons=[${reasons}]; counts=${countsText}; ${cooldownText}`);
           await Logger.log('info', 'debug', 'Heuristics evaluation invoked manually', {
             reasonCode: response.reasonCode,
@@ -364,15 +385,19 @@
           });
         } else {
           const reason = response && response.reasonCode ? response.reasonCode : 'unknown';
-          appendHeuristicsRecord(`[${timestamp}] Heuristics failed: ${reason}`);
+          const errorDetail = extractErrorMessage(response && (response.error || response.message), '').trim();
+          const reasonLine = errorDetail ? `${reason} (${errorDetail})` : reason;
+          appendHeuristicsRecord(`[${timestamp}] Heuristics failed: ${reasonLine}`);
           await Logger.log('warn', 'debug', 'Heuristics evaluation returned warning', {
-            reasonCode: reason
+            reasonCode: reason,
+            message: errorDetail || null
           });
         }
       } catch (error) {
-        appendHeuristicsRecord(`Heuristics error: ${error && error.message}`);
+        const message = extractErrorMessage(error);
+        appendHeuristicsRecord(`Heuristics error: ${message}`);
         await Logger.log('error', 'debug', 'Heuristics evaluation request threw error', {
-          message: error && error.message
+          message
         });
       } finally {
         heuristicsButton.disabled = false;
@@ -431,7 +456,7 @@
             skipped: Boolean(payload.skipped)
           });
         } else {
-          const message = (response && response.error) || 'Neznáma chyba';
+          const message = extractErrorMessage(response && (response.error || response.message));
           appendCaptureRecord(`Chyba: ${message}`);
           await Logger.log('warn', 'debug', 'Capture preview returned warning', {
             reasonCode: response && response.reasonCode ? response.reasonCode : 'capture_error',
@@ -439,9 +464,10 @@
           });
         }
       } catch (error) {
-        appendCaptureRecord(`Chyba: ${error && error.message}`);
+        const message = extractErrorMessage(error);
+        appendCaptureRecord(`Chyba: ${message}`);
         await Logger.log('error', 'debug', 'Capture preview request threw error', {
-          message: error && error.message
+          message
         });
       } finally {
         captureButton.disabled = false;
@@ -535,16 +561,18 @@
           });
         } else {
           const reason = response && response.reasonCode ? response.reasonCode : 'unknown';
-          appendBackupToast(response && response.message ? response.message : 'Manual backup failed.');
+          const message = extractErrorMessage(response && (response.message || response.error));
+          appendBackupToast(message || 'Manual backup failed.');
           await Logger.log('warn', 'debug', 'Manual backup blocked', {
             reasonCode: reason,
-            message: response && response.message ? response.message : null
+            message: message || null
           });
         }
       } catch (error) {
-        appendBackupToast(error && error.message ? error.message : 'Manual backup error.');
+        const message = extractErrorMessage(error);
+        appendBackupToast(message || 'Manual backup error.');
         await Logger.log('error', 'debug', 'Manual backup threw error', {
-          message: error && error.message
+          message
         });
       } finally {
         backupButton.disabled = false;

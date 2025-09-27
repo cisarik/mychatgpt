@@ -189,23 +189,25 @@ function shouldCooldown(lastMs, minutes) {
   return { cooldown: true, remainingMs };
 }
 
-/* Slovensky komentar: Rozpozna chybove hlasky pre chybanuci obsahovy skript. */
-function isNoReceiverError(errorMessage) {
-  if (!errorMessage) {
-    return false;
-  }
-  const messageText = typeof errorMessage === 'string'
-    ? errorMessage
-    : errorMessage && errorMessage.message
-    ? errorMessage.message
-    : String(errorMessage);
-  const lower = messageText.toLowerCase();
-  return [
-    'receiving end does not exist',
-    'the message port closed',
-    'a listener indicated an asynchronous response',
-    'no receiving end'
-  ].some((fragment) => lower.includes(fragment));
+/* Slovensky komentar: Rozpozna chybu o neexistujucom prijimatelovi spravy. */
+function isNoReceiverError(message = '') {
+  return /Receiving end does not exist|The message port closed/i.test(String(message || ''));
+}
+
+/* Slovensky komentar: Zabalí promise do manualneho timeoutu. */
+function withManualTimeout(promise, ms) {
+  let timerId = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timerId = setTimeout(() => {
+      reject(new Error('timeout'));
+    }, ms);
+  });
+  const guarded = Promise.resolve(promise).finally(() => {
+    if (timerId !== null) {
+      clearTimeout(timerId);
+    }
+  });
+  return Promise.race([guarded, timeoutPromise]);
 }
 
 /* Slovensky komentar: Nacita nastavenia a vykona automaticke opravy. */
@@ -297,6 +299,8 @@ globalTarget.SettingsStore = SettingsStore;
 globalTarget.urlMatchesAnyPattern = urlMatchesAnyPattern;
 globalTarget.normalizeSafeUrlPatterns = normalizeSafeUrlPatterns;
 globalTarget.shouldCooldown = shouldCooldown;
+globalTarget.isNoReceiverError = isNoReceiverError;
+globalTarget.withManualTimeout = withManualTimeout;
 globalTarget.COOLDOWN_STORAGE_KEY = COOLDOWN_STORAGE_KEY;
 globalTarget.SAFE_URL_DEFAULTS = SAFE_URL_DEFAULTS;
 globalTarget.SETTINGS_DEFAULTS = SETTINGS_DEFAULTS;

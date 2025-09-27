@@ -153,53 +153,38 @@ function getActiveTab() {
   });
 }
 
-/* Slovensky komentar: Posle spravu a pri chybe reinjektuje obsahovy skript a zopakuje pokus. */
-async function sendWithEnsureCS(tabId, message, { timeoutMs = 1500 } = {}) {
-  const attemptSend = () =>
-    new Promise((resolve, reject) => {
-      try {
-        chrome.tabs.sendMessage(tabId, message, { timeout: timeoutMs }, (response) => {
-          const runtimeError = chrome.runtime.lastError;
-          if (runtimeError) {
-            reject(new Error(runtimeError.message || 'sendMessage failed'));
-            return;
-          }
-          resolve(response);
-        });
-      } catch (error) {
-        reject(error);
-      }
-    });
-
+/* Slovensky komentar: Posle spravu s manualnym timeoutom a pri chybe reinjektuje obsahovy skript. */
+async function sendWithEnsureCS(tabId, payload, { timeoutMs = 1500 } = {}) {
   try {
-    return await attemptSend();
-  } catch (error) {
-    const messageText = error && error.message ? error.message : String(error);
-    if (!isNoReceiverError(messageText)) {
-      throw error;
+    const firstAttempt = chrome.tabs.sendMessage(tabId, payload);
+    return await withManualTimeout(firstAttempt, timeoutMs);
+  } catch (firstError) {
+    const runtimeMessage =
+      (chrome.runtime && chrome.runtime.lastError && chrome.runtime.lastError.message)
+        || (firstError && firstError.message)
+        || '';
+    if (!isNoReceiverError(runtimeMessage)) {
+      throw firstError;
     }
   }
 
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
-    console.debug('[MyChatGPT]', {
-      scope: 'content',
-      reasonCode: 'cs_injected_retry',
-      meta: { tabId }
-    });
+    console.info('[MyChatGPT] cs_injected_retry', { tabId });
+    try {
+      await Logger.log('info', 'content', 'Content script auto-injected for retry', {
+        reasonCode: 'cs_injected_retry',
+        tabId
+      });
+    } catch (logError) {
+      console.warn('cs_injected_retry log failed', logError);
+    }
   } catch (injectError) {
-    const wrapped = new Error('no_response');
-    wrapped.cause = injectError;
-    throw wrapped;
+    throw injectError;
   }
 
-  try {
-    return await attemptSend();
-  } catch (retryError) {
-    const wrapped = new Error('no_response');
-    wrapped.cause = retryError;
-    throw wrapped;
-  }
+  const retryAttempt = chrome.tabs.sendMessage(tabId, payload);
+  return withManualTimeout(retryAttempt, timeoutMs);
 }
 
 /* Slovensky komentar: Posle debug log na aktivnu kartu, ak ide o chatgpt.com. */

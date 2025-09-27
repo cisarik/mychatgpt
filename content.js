@@ -1,4 +1,9 @@
-console.info('[MyChatGPT] content.js loaded');
+/* Slovensky komentar: Zamedzi duplicitnemu logu pri reinjekcii. */
+const csGlobal = typeof window !== 'undefined' ? window : self;
+if (!csGlobal.__mychatgptContentLogged) {
+  console.info('[MyChatGPT] content.js loaded');
+  csGlobal.__mychatgptContentLogged = true;
+}
 
 /* Slovensky komentar: Sleduje udalosti na jemne potvrdenie aktivity skriptu. */
 const announcementState = { pageShow: false, visibility: false };
