@@ -4,6 +4,37 @@
   const tabButtons = Array.from(document.querySelectorAll('.tab-btn'));
   const panels = new Map();
   let suppressHashChange = false;
+  let activeTabName = null;
+  const globalTarget = typeof window !== 'undefined' ? window : self;
+
+  function getDebugAPI() {
+    return globalTarget && globalTarget.DebugPanel ? globalTarget.DebugPanel : null;
+  }
+
+  function scheduleDebugMount() {
+    const api = getDebugAPI();
+    if (!api || typeof api.mountDebug !== 'function') {
+      return;
+    }
+    if (typeof globalTarget.setTimeout !== 'function') {
+      if (activeTabName === 'debug') {
+        api.mountDebug();
+      }
+      return;
+    }
+    globalTarget.setTimeout(() => {
+      if (activeTabName === 'debug') {
+        api.mountDebug();
+      }
+    }, 0);
+  }
+
+  function unmountDebugPanel() {
+    const api = getDebugAPI();
+    if (api && typeof api.unmountDebug === 'function') {
+      api.unmountDebug();
+    }
+  }
 
   tabButtons.forEach((button) => {
     const tabName = button.dataset.tab;
@@ -26,6 +57,25 @@
     const panel = panels.get(tabName);
     if (!button || !panel) {
       return;
+    }
+
+    const previousTab = activeTabName;
+    if (previousTab === tabName) {
+      if (focus) {
+        button.focus();
+      }
+      if (updateHash) {
+        const nextHash = `#${tabName}`;
+        if (window.location.hash !== nextHash) {
+          suppressHashChange = true;
+          window.location.hash = nextHash;
+        }
+      }
+      return;
+    }
+
+    if (previousTab === 'debug' && tabName !== 'debug') {
+      unmountDebugPanel();
     }
 
     tabButtons.forEach((item) => {
@@ -52,6 +102,11 @@
         suppressHashChange = true;
         window.location.hash = nextHash;
       }
+    }
+
+    activeTabName = tabName;
+    if (tabName === 'debug') {
+      scheduleDebugMount();
     }
   }
 
@@ -96,6 +151,12 @@
   if (tabButtons.length) {
     syncFromHash({ focus: false, ensureHash: true });
   }
+
+  document.addEventListener('mychatgpt:debug-panel-ready', () => {
+    if (activeTabName === 'debug') {
+      scheduleDebugMount();
+    }
+  });
 
   const testButton = document.getElementById('test-log-btn');
   if (testButton) {

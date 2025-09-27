@@ -14,7 +14,7 @@
       <p class="text-muted">Review diagnostics, export JSON dumps and trigger safe probes.</p>
     </header>
 
-    <section class="page-section panel">
+    <section id="panel-debug" class="page-section panel">
       <div>
         <h2 class="section-title">Log access</h2>
         <p>
@@ -27,25 +27,29 @@
           chatgpt.com tab is available.
         </p>
       </div>
-      <div class="toolbar">
-        <button id="test-log-btn">Test log</button>
-        <button id="connectivity-btn">Connectivity test (chatgpt.com)</button>
-        <button id="check-cs-btn" class="button-sub">Check content script</button>
-        <button id="probe-btn">Probe metadata (read-only)</button>
-        <button id="heuristics-btn">Evaluate heuristics (active tab)</button>
-        <button id="eval-backup-btn" class="button-sub">Evaluate &amp; Backup (if candidate)</button>
-        <button id="autoscan-feed-btn">Auto-scan feed (stub)</button>
-        <button id="capture-btn">Capture preview (read-only)</button>
-        <button id="backup-btn" class="button-sub">
-          <span>Backup now (manual)</span>
-          <small id="backup-mode-label">Candidates only</small>
-        </button>
-        <button id="bulk-open-tabs-btn" class="button-sub">Backup candidates (open tabs)</button>
-      </div>
-      <div class="row">
-        <button id="backup-delete-active-btn" class="button-sub">Backup &amp; Delete (active tab)</button>
-      </div>
-      <div id="backup-delete-history" class="history-feed" aria-live="polite"></div>
+      <section id="debug-actions" class="section">
+        <div class="toolbar">
+          <button id="test-log-btn">Test log</button>
+          <button id="connectivity-btn">Connectivity test (chatgpt.com)</button>
+          <button id="check-cs-btn" class="button-sub">Check content script</button>
+          <button id="probe-btn">Probe metadata (read-only)</button>
+          <button id="heuristics-btn">Evaluate heuristics (active tab)</button>
+          <button id="eval-backup-btn" class="button-sub">Evaluate &amp; Backup (if candidate)</button>
+          <button id="autoscan-feed-btn">Auto-scan feed (stub)</button>
+          <button id="capture-btn">Capture preview (read-only)</button>
+          <button id="backup-btn" class="button-sub">
+            <span>Backup now (manual)</span>
+            <small id="backup-mode-label">Candidates only</small>
+          </button>
+          <button id="bulk-open-tabs-btn" class="button-sub">Backup candidates (open tabs)</button>
+        </div>
+        <div class="row">
+          <button id="backup-delete-active-btn" class="button-sub">
+            Backup &amp; Delete (active tab)
+          </button>
+        </div>
+        <div id="backup-delete-history" class="history-feed" aria-live="polite"></div>
+      </section>
     </section>
 
     <div id="debug-toast" class="toast-stack" role="status" aria-live="polite"></div>

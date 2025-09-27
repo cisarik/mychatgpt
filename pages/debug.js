@@ -1,49 +1,82 @@
 /* Slovensky komentar: Debug stranka ponuka manualne akcie bez ziveho streamu logov. */
-async function initDebugPage() {
-  const backupDeleteButton = document.getElementById('backup-delete-active-btn');
-  if (!backupDeleteButton) {
-    console.warn('Debug: backup-delete button missing');
-    return;
+(function (globalTarget) {
+  const state = {
+    mounted: false,
+    panel: null,
+    document: null,
+    elements: {},
+    cleanup: [],
+    runtimeListener: null
+  };
+
+  function getPanelRoot() {
+    const doc = globalTarget.document || document;
+    return doc.getElementById('panel-debug') || doc.getElementById('page-debug') || null;
   }
-  const backupDeleteHistory = document.getElementById('backup-delete-history');
-  const testLogButton = document.getElementById('test-log-btn');
-  const autoscanButton = document.getElementById('autoscan-feed-btn');
-  const scanResultContainer = document.getElementById('scan-result');
-  const connectivityButton = document.getElementById('connectivity-btn');
-  const checkCsButton = document.getElementById('check-cs-btn');
-  const connectivityContainer = document.getElementById('connectivity-results');
-  const probeButton = document.getElementById('probe-btn');
-  const metadataContainer = document.getElementById('metadata-results');
-  const heuristicsButton = document.getElementById('heuristics-btn');
-  const heuristicsContainer = document.getElementById('heuristics-results');
-  const captureButton = document.getElementById('capture-btn');
-  const captureContainer = document.getElementById('capture-results');
-  const backupButton = document.getElementById('backup-btn');
-  const backupModeLabel = document.getElementById('backup-mode-label');
-  const backupToastContainer = document.getElementById('backup-toast');
-  const backupHistoryContainer = document.getElementById('backup-history');
-  const debugToastContainer = document.getElementById('debug-toast');
-  const bulkOpenTabsButton = document.getElementById('bulk-open-tabs-btn');
-  const bulkOpenTabsHistory = document.getElementById('bulk-open-tabs-history');
-  const evalBackupButton = document.getElementById('eval-backup-btn');
-  const evalBackupHistory = document.getElementById('eval-backup-history');
+
+  function resolveElement(panel, id) {
+    if (!panel) {
+      return null;
+    }
+    return panel.querySelector(`#${id}`) || null;
+  }
+
+  function resolveDocumentElement(doc, id) {
+    if (!doc) {
+      return null;
+    }
+    return doc.getElementById(id);
+  }
+
+  function rememberCleanup(fn) {
+    if (typeof fn === 'function') {
+      state.cleanup.push(fn);
+    }
+  }
+
+  function createNode(tagName) {
+    const doc = state.document || globalTarget.document || document;
+    return doc.createElement(tagName);
+  }
+
+  function getElement(name) {
+    return state.elements[name] || null;
+  }
+
+  function addListener(element, type, handler, options) {
+    if (!element || typeof element.addEventListener !== 'function') {
+      return;
+    }
+    element.addEventListener(type, handler, options);
+    rememberCleanup(() => {
+      element.removeEventListener(type, handler, options);
+    });
+  }
+
+  function isMounted() {
+    return state.mounted && Boolean(state.panel);
+  }
 
   /* Slovensky komentar: Zobrazi kratku toast spravu v debug nadpise. */
   function showDebugToast(message, options = {}) {
-    if (!debugToastContainer || !message) {
+    if (!isMounted() || !message) {
       return;
     }
-    const toast = document.createElement('div');
+    const container = getElement('debugToastContainer');
+    if (!container) {
+      return;
+    }
+    const toast = createNode('div');
     toast.className = 'toast';
 
-    const textSpan = document.createElement('span');
+    const textSpan = createNode('span');
     textSpan.textContent = message;
     toast.appendChild(textSpan);
 
     const actionLabel = options && typeof options.actionLabel === 'string' ? options.actionLabel : null;
     const onAction = options && typeof options.onAction === 'function' ? options.onAction : null;
     if (actionLabel && onAction) {
-      const actionButton = document.createElement('button');
+      const actionButton = createNode('button');
       actionButton.type = 'button';
       actionButton.className = 'toast-action';
       actionButton.textContent = actionLabel;
@@ -61,15 +94,21 @@ async function initDebugPage() {
       toast.appendChild(actionButton);
     }
 
-    debugToastContainer.prepend(toast);
-    while (debugToastContainer.childElementCount > 2) {
-      debugToastContainer.removeChild(debugToastContainer.lastElementChild);
+    container.prepend(toast);
+    while (container.childElementCount > 2) {
+      container.removeChild(container.lastElementChild);
     }
-    setTimeout(() => {
-      if (toast.parentElement === debugToastContainer) {
-        debugToastContainer.removeChild(toast);
+    const timeoutId = globalTarget.setTimeout(() => {
+      if (toast.parentElement === container) {
+        container.removeChild(toast);
       }
     }, 2600);
+    rememberCleanup(() => {
+      globalTarget.clearTimeout(timeoutId);
+      if (toast.parentElement === container) {
+        container.removeChild(toast);
+      }
+    });
   }
 
   /* Slovensky komentar: Zostavi textovy zaznam pre backup-delete akciu. */
@@ -106,15 +145,19 @@ async function initDebugPage() {
 
   /* Slovensky komentar: Prida zaznam o backup-delete akcii. */
   function appendBackupDeleteHistoryEntry(entry) {
-    if (!backupDeleteHistory) {
+    if (!isMounted()) {
       return;
     }
-    const block = document.createElement('div');
+    const historyHost = getElement('backupDeleteHistory');
+    if (!historyHost) {
+      return;
+    }
+    const block = createNode('div');
     block.className = 'history-entry';
     block.textContent = formatBackupDeleteHistory(entry || {});
-    backupDeleteHistory.prepend(block);
-    while (backupDeleteHistory.childElementCount > 10) {
-      backupDeleteHistory.removeChild(backupDeleteHistory.lastElementChild);
+    historyHost.prepend(block);
+    while (historyHost.childElementCount > 10) {
+      historyHost.removeChild(historyHost.lastElementChild);
     }
   }
 
@@ -188,38 +231,32 @@ async function initDebugPage() {
 
   /* Slovensky komentar: Prida toast do autoscan feedu. */
   function appendScanToast(message) {
-    if (!scanResultContainer) {
+    if (!isMounted() || !message) {
       return;
     }
-    const block = document.createElement('div');
+    const container = getElement('scanResultContainer');
+    if (!container) {
+      return;
+    }
+    const block = createNode('div');
     block.className = 'log-entry';
     block.textContent = message;
-    scanResultContainer.prepend(block);
-    while (scanResultContainer.childElementCount > 5) {
-      scanResultContainer.removeChild(scanResultContainer.lastElementChild);
+    container.prepend(block);
+    while (container.childElementCount > 5) {
+      container.removeChild(container.lastElementChild);
     }
-  }
-
-  /* Slovensky komentar: Odosle stub pozadovku na autoscan. */
-  function requestAutoscanStub() {
-    return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ type: 'scan_now' }, (response) => {
-        const runtimeError = chrome.runtime.lastError;
-        if (runtimeError) {
-          reject(runtimeError);
-          return;
-        }
-        resolve(response);
-      });
-    });
   }
 
   /* Slovensky komentar: Prida JSON riadok do historie bulk backupu. */
   function appendBulkOpenTabsHistory(summary) {
-    if (!bulkOpenTabsHistory) {
+    if (!isMounted()) {
       return;
     }
-    const block = document.createElement('div');
+    const history = getElement('bulkOpenTabsHistory');
+    if (!history) {
+      return;
+    }
+    const block = createNode('div');
     block.className = 'log-entry';
     const dryRun = summary && typeof summary === 'object'
       ? Boolean(summary.dryRun || Array.isArray(summary.wouldWrite))
@@ -238,18 +275,22 @@ async function initDebugPage() {
         }
       : { note: 'no summary' };
     block.textContent = JSON.stringify(payload);
-    bulkOpenTabsHistory.prepend(block);
-    while (bulkOpenTabsHistory.childElementCount > 10) {
-      bulkOpenTabsHistory.removeChild(bulkOpenTabsHistory.lastElementChild);
+    history.prepend(block);
+    while (history.childElementCount > 10) {
+      history.removeChild(history.lastElementChild);
     }
   }
 
   /* Slovensky komentar: Pridá krátky záznam o Evaluate & Backup akcii. */
   function appendEvalBackupHistory(entry) {
-    if (!evalBackupHistory) {
+    if (!isMounted()) {
       return;
     }
-    const toast = document.createElement('div');
+    const history = getElement('evalBackupHistory');
+    if (!history) {
+      return;
+    }
+    const toast = createNode('div');
     toast.className = 'toast';
     const now = new Date();
     const timestamp = Number.isFinite(now.getTime()) ? now.toLocaleTimeString() : '';
@@ -274,9 +315,9 @@ async function initDebugPage() {
       parts.push(entry.message);
     }
     toast.textContent = parts.join(' · ');
-    evalBackupHistory.prepend(toast);
-    while (evalBackupHistory.childElementCount > 6) {
-      evalBackupHistory.removeChild(evalBackupHistory.lastElementChild);
+    history.prepend(toast);
+    while (history.childElementCount > 6) {
+      history.removeChild(history.lastElementChild);
     }
   }
 
@@ -314,6 +355,189 @@ async function initDebugPage() {
     };
   }
 
+  /* Slovensky komentar: Prida zaznam z konektivity do histórie. */
+  function appendConnectivityRecord(text) {
+    if (!isMounted()) {
+      return;
+    }
+    const history = getElement('connectivityContainer');
+    if (!history) {
+      return;
+    }
+    const block = createNode('div');
+    block.className = 'log-entry';
+    block.textContent = text;
+    history.prepend(block);
+    while (history.childElementCount > 5) {
+      history.removeChild(history.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Vytvori zaznam o metadata probe v historii. */
+  function appendProbeRecord(text) {
+    if (!isMounted()) {
+      return;
+    }
+    const history = getElement('metadataContainer');
+    if (!history) {
+      return;
+    }
+    const block = createNode('div');
+    block.className = 'log-entry';
+    block.textContent = text;
+    history.prepend(block);
+    while (history.childElementCount > 5) {
+      history.removeChild(history.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Prida zaznam o heuristike do historie. */
+  function appendHeuristicsRecord(text) {
+    if (!isMounted()) {
+      return;
+    }
+    const history = getElement('heuristicsContainer');
+    if (!history) {
+      return;
+    }
+    const block = createNode('div');
+    block.className = 'log-entry';
+    block.textContent = text;
+    history.prepend(block);
+    while (history.childElementCount > 5) {
+      history.removeChild(history.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Prida zaznam o capture preview do historie. */
+  function appendCaptureRecord(text) {
+    if (!isMounted()) {
+      return;
+    }
+    const history = getElement('captureContainer');
+    if (!history) {
+      return;
+    }
+    const block = createNode('div');
+    block.className = 'log-entry';
+    block.textContent = text;
+    history.prepend(block);
+    while (history.childElementCount > 5) {
+      history.removeChild(history.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Vykresli toast pre manualne zalozenie. */
+  function appendBackupToast(text) {
+    if (!isMounted()) {
+      return;
+    }
+    const container = getElement('backupToastContainer');
+    if (!container) {
+      return;
+    }
+    const block = createNode('div');
+    block.className = 'log-entry';
+    block.textContent = text;
+    container.prepend(block);
+    while (container.childElementCount > 4) {
+      container.removeChild(container.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Prida kartu s vysledkom manualnej zalohy. */
+  function appendBackupHistoryCard(record) {
+    if (!isMounted() || !record) {
+      return;
+    }
+    const container = getElement('backupHistoryContainer');
+    if (!container) {
+      return;
+    }
+    const card = createNode('div');
+    card.className = 'log-entry';
+    const qLen = record.questionText ? record.questionText.length : 0;
+    const aLen = record.answerHTML ? record.answerHTML.length : 0;
+    const titlePreview = record.title ? record.title : '(bez názvu)';
+    const convoPreview = record.convoId ? record.convoId : '∅';
+    const truncatedText = record.answerTruncated ? 'truncated=yes' : 'truncated=no';
+    card.textContent = `id=${record.id} | title=${titlePreview} | qLen=${qLen} | aLen=${aLen} | convo=${convoPreview} | ${truncatedText}`;
+    container.prepend(card);
+    while (container.childElementCount > 5) {
+      container.removeChild(container.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Prida toast do searches sekcie cez hash. */
+  function showSearchesToast(message) {
+    if (!message) {
+      return;
+    }
+    const doc = state.document || globalTarget.document || document;
+    const toastHost = doc.getElementById('searches-toast');
+    if (!toastHost) {
+      return;
+    }
+    const toast = createNode('div');
+    toast.className = 'toast';
+    toast.textContent = message;
+    toastHost.prepend(toast);
+    while (toastHost.childElementCount > 3) {
+      toastHost.removeChild(toastHost.lastElementChild);
+    }
+    const timeoutId = globalTarget.setTimeout(() => {
+      if (toast.parentElement === toastHost) {
+        toastHost.removeChild(toast);
+      }
+    }, 3200);
+    rememberCleanup(() => {
+      globalTarget.clearTimeout(timeoutId);
+      if (toast.parentElement === toastHost) {
+        toastHost.removeChild(toast);
+      }
+    });
+  }
+
+  /* Slovensky komentar: Naformatuje sumar do toast spravy v searches. */
+  function summarizeBulkResult(summary) {
+    if (!summary || typeof summary !== 'object') {
+      return 'Bulk backup completed.';
+    }
+    const scanned = Number.isFinite(summary.scannedTabs) ? summary.scannedTabs : 0;
+    const candidates = summary.stats && Number.isFinite(summary.stats.candidates)
+      ? summary.stats.candidates
+      : 0;
+    const writtenCount = Array.isArray(summary.written) ? summary.written.length : 0;
+    const wouldWriteCount = Array.isArray(summary.wouldWrite) ? summary.wouldWrite.length : 0;
+    const skippedCount = Array.isArray(summary.skipped) ? summary.skipped.length : 0;
+    const dryRun = Array.isArray(summary.wouldWrite);
+    const writtenPart = dryRun
+      ? `${writtenCount} written / ${wouldWriteCount} wouldWrite`
+      : `${writtenCount} written`;
+    return `${scanned} scanned · ${candidates} candidates · ${writtenPart} · ${skippedCount} skipped`;
+  }
+
+  /* Slovensky komentar: Ulozi cleanup funkciu pre timeout. */
+  function rememberTimeout(timeoutId) {
+    rememberCleanup(() => {
+      globalTarget.clearTimeout(timeoutId);
+    });
+  }
+
+  /* Slovensky komentar: Vyziada stub pozadovku na autoscan. */
+  function requestAutoscanStub() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'scan_now' }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(runtimeError);
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
   /* Slovensky komentar: Vyziada bulk backup na pozadi. */
   function requestBulkBackupOpenTabs() {
     return new Promise((resolve, reject) => {
@@ -328,38 +552,7 @@ async function initDebugPage() {
     });
   }
 
-  if (autoscanButton) {
-    autoscanButton.addEventListener('click', async () => {
-      const originalLabel = autoscanButton.textContent;
-      autoscanButton.disabled = true;
-      autoscanButton.textContent = 'Prebieha…';
-      try {
-        const response = await requestAutoscanStub();
-        if (response && response.ok) {
-          appendScanToast(`Auto-scan stub: ${JSON.stringify(response.result)}`);
-          await Logger.log('info', 'scan', 'Auto-scan feed stub executed', {
-            result: response.result
-          });
-        } else {
-          const errorMessage = extractErrorMessage(response && (response.error || response.message));
-          appendScanToast(`Auto-scan chyba: ${errorMessage}`);
-          await Logger.log('error', 'scan', 'Auto-scan feed stub failed', {
-            message: errorMessage
-          });
-        }
-      } catch (error) {
-        const message = extractErrorMessage(error);
-        appendScanToast(`Auto-scan chyba: ${message}`);
-        await Logger.log('error', 'scan', 'Auto-scan feed stub threw error', {
-          message
-        });
-      } finally {
-        autoscanButton.disabled = false;
-        autoscanButton.textContent = originalLabel;
-      }
-    });
-  }
-
+  /* Slovensky komentar: Vyziada test log z backgroundu. */
   function requestTestLog(note) {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ type: 'debug_test_log', note }, (response) => {
@@ -371,57 +564,6 @@ async function initDebugPage() {
         resolve(response);
       });
     });
-  }
-
-  if (testLogButton) {
-    testLogButton.addEventListener('click', async () => {
-      const originalText = testLogButton.textContent;
-      const note = `debug_page:${Date.now()}`;
-      testLogButton.disabled = true;
-      testLogButton.textContent = 'Odosielam…';
-      try {
-        const response = await requestTestLog(note);
-        if (!response || response.ok !== true) {
-          const errorMessage = response && response.error ? response.error : 'Žiadna odozva';
-          throw new Error(errorMessage);
-        }
-        showDebugToast('Test log odoslaný (pozri DevTools)');
-        testLogButton.textContent = 'Odoslané';
-        await Logger.log('info', 'debug', 'Test log request forwarded', {
-          forwarded: Boolean(response.forwarded),
-          forwardError: response.forwardError || null,
-          requestedAt: response.requestedAt,
-          note
-        });
-      } catch (error) {
-        testLogButton.textContent = 'Chyba';
-        const message = extractErrorMessage(error);
-        showDebugToast(`Test log zlyhal: ${message}`);
-        await Logger.log('error', 'debug', 'Test log request failed', {
-          message,
-          note
-        });
-      } finally {
-        setTimeout(() => {
-          testLogButton.textContent = originalText;
-          testLogButton.disabled = false;
-        }, 1400);
-      }
-    });
-  }
-
-  /* Slovensky komentar: Prida zaznam z konektivity do histórie. */
-  function appendConnectivityRecord(text) {
-    if (!connectivityContainer) {
-      return;
-    }
-    const block = document.createElement('div');
-    block.className = 'log-entry';
-    block.textContent = text;
-    connectivityContainer.prepend(block);
-    while (connectivityContainer.childElementCount > 5) {
-      connectivityContainer.removeChild(connectivityContainer.lastElementChild);
-    }
   }
 
   /* Slovensky komentar: Poziada background o test konektivity. */
@@ -438,90 +580,6 @@ async function initDebugPage() {
     });
   }
 
-  connectivityButton.addEventListener('click', async () => {
-    const originalLabel = connectivityButton.textContent;
-    connectivityButton.disabled = true;
-    connectivityButton.textContent = 'Overujem…';
-    try {
-      const response = await requestConnectivityTest();
-      if (response && response.ok && response.payload) {
-        appendConnectivityRecord(`OK: ${JSON.stringify(response.payload)}`);
-        await Logger.log('info', 'debug', 'Connectivity test succeeded', {
-          reasonCode: response.reasonCode,
-          traceId: response.payload.traceId
-        });
-      } else {
-        const errorMessage = extractErrorMessage(response && (response.error || response.message));
-        appendConnectivityRecord(`Chyba: ${errorMessage}`);
-        await Logger.log('warn', 'debug', 'Connectivity test returned warning', {
-          reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
-          message: errorMessage
-        });
-      }
-    } catch (error) {
-      const message = extractErrorMessage(error);
-      appendConnectivityRecord(`Chyba: ${message}`);
-      await Logger.log('error', 'debug', 'Connectivity test request threw error', {
-        message
-      });
-    } finally {
-      connectivityButton.disabled = false;
-      connectivityButton.textContent = originalLabel;
-    }
-  });
-
-  if (checkCsButton) {
-    checkCsButton.addEventListener('click', async () => {
-      const originalText = checkCsButton.textContent;
-      checkCsButton.disabled = true;
-      checkCsButton.textContent = 'Overujem…';
-      try {
-        const response = await requestConnectivityTest();
-        if (response && response.ok) {
-          checkCsButton.textContent = 'Content script aktívny';
-          appendConnectivityRecord(`Check CS OK: ${JSON.stringify(response.payload || {})}`);
-          await Logger.log('info', 'debug', 'Content script check succeeded', {
-            reasonCode: response.reasonCode || 'ping_ok'
-          });
-        } else {
-          const errorMessage = extractErrorMessage(response && (response.error || response.message));
-          checkCsButton.textContent = 'Content script chýba';
-          appendConnectivityRecord(`Check CS chyba: ${errorMessage}`);
-          await Logger.log('warn', 'debug', 'Content script check warning', {
-            reasonCode: response && response.reasonCode ? response.reasonCode : 'no_response',
-            message: errorMessage
-          });
-        }
-      } catch (error) {
-        checkCsButton.textContent = 'Content script chýba';
-        const message = extractErrorMessage(error);
-        appendConnectivityRecord(`Check CS chyba: ${message}`);
-        await Logger.log('error', 'debug', 'Content script check threw error', {
-          message
-        });
-      } finally {
-        setTimeout(() => {
-          checkCsButton.textContent = originalText;
-          checkCsButton.disabled = false;
-        }, 1400);
-      }
-    });
-  }
-
-  /* Slovensky komentar: Vytvori zaznam o metadata probe v historii. */
-  function appendProbeRecord(text) {
-    if (!metadataContainer) {
-      return;
-    }
-    const block = document.createElement('div');
-    block.className = 'log-entry';
-    block.textContent = text;
-    metadataContainer.prepend(block);
-    while (metadataContainer.childElementCount > 5) {
-      metadataContainer.removeChild(metadataContainer.lastElementChild);
-    }
-  }
-
   /* Slovensky komentar: Vyziada z backgroundu prehliadanie metadata. */
   function requestMetadataProbe() {
     return new Promise((resolve, reject) => {
@@ -534,60 +592,6 @@ async function initDebugPage() {
         resolve(response);
       });
     });
-  }
-
-  if (probeButton) {
-    probeButton.addEventListener('click', async () => {
-      const originalLabel = probeButton.textContent;
-      probeButton.disabled = true;
-      probeButton.textContent = 'Prebieha…';
-      try {
-        const response = await requestMetadataProbe();
-        if (response && response.ok && response.payload) {
-          const payload = response.payload;
-          if (payload.skipped && payload.reason === 'probe_safe_url') {
-            appendProbeRecord('Preskocené: Aktívna stránka je chránená vzorom SAFE_URL.');
-          } else {
-            appendProbeRecord(`OK: ${JSON.stringify(payload)}`);
-          }
-          await Logger.log('info', 'debug', 'Metadata probe completed', {
-            reasonCode: response.reasonCode,
-            traceId: payload.traceId,
-            skipped: Boolean(payload.skipped)
-          });
-        } else {
-          const errorMessage = extractErrorMessage(response && (response.error || response.message));
-          appendProbeRecord(`Chyba: ${errorMessage}`);
-          await Logger.log('warn', 'debug', 'Metadata probe returned warning', {
-            reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
-            message: errorMessage
-          });
-        }
-      } catch (error) {
-        const message = extractErrorMessage(error);
-        appendProbeRecord(`Chyba: ${message}`);
-        await Logger.log('error', 'debug', 'Metadata probe request threw error', {
-          message
-        });
-      } finally {
-        probeButton.disabled = false;
-        probeButton.textContent = originalLabel;
-      }
-    });
-  }
-
-  /* Slovensky komentar: Prida zaznam o heuristike do historie. */
-  function appendHeuristicsRecord(text) {
-    if (!heuristicsContainer) {
-      return;
-    }
-    const block = document.createElement('div');
-    block.className = 'log-entry';
-    block.textContent = text;
-    heuristicsContainer.prepend(block);
-    while (heuristicsContainer.childElementCount > 5) {
-      heuristicsContainer.removeChild(heuristicsContainer.lastElementChild);
-    }
   }
 
   /* Slovensky komentar: Poziada background o vyhodnotenie heuristiky. */
@@ -604,68 +608,6 @@ async function initDebugPage() {
     });
   }
 
-  if (heuristicsButton) {
-    heuristicsButton.addEventListener('click', async () => {
-      const originalLabel = heuristicsButton.textContent;
-      heuristicsButton.disabled = true;
-      heuristicsButton.textContent = 'Evaluating…';
-      try {
-        const response = await requestHeuristicsEvaluation();
-        const timestamp = new Date().toLocaleTimeString();
-        if (response && response.decision) {
-          const decision = response.decision;
-          const reasons = decision.reasonCodes && decision.reasonCodes.length ? decision.reasonCodes.join(', ') : 'none';
-          const countsText = JSON.stringify(decision.snapshot && decision.snapshot.counts ? decision.snapshot.counts : {});
-          const candidateText = decision.decided ? `candidate=${decision.isCandidate}` : 'candidate=undecided';
-          const cooldown = response.cooldown || { used: false, remainingMs: 0 };
-          const cooldownText = cooldown.used
-            ? `cooldown=active (${cooldown.remainingMs}ms)`
-            : 'cooldown=inactive';
-          appendHeuristicsRecord(`[${timestamp}] ${candidateText}; reasons=[${reasons}]; counts=${countsText}; ${cooldownText}`);
-          await Logger.log('info', 'debug', 'Heuristics evaluation invoked manually', {
-            reasonCode: response.reasonCode,
-            candidate: decision.isCandidate,
-            decided: decision.decided,
-            reasonCodes: decision.reasonCodes,
-            cooldown
-          });
-        } else {
-          const reason = response && response.reasonCode ? response.reasonCode : 'unknown';
-          const errorDetail = extractErrorMessage(response && (response.error || response.message), '').trim();
-          const reasonLine = errorDetail ? `${reason} (${errorDetail})` : reason;
-          appendHeuristicsRecord(`[${timestamp}] Heuristics failed: ${reasonLine}`);
-          await Logger.log('warn', 'debug', 'Heuristics evaluation returned warning', {
-            reasonCode: reason,
-            message: errorDetail || null
-          });
-        }
-      } catch (error) {
-        const message = extractErrorMessage(error);
-        appendHeuristicsRecord(`Heuristics error: ${message}`);
-        await Logger.log('error', 'debug', 'Heuristics evaluation request threw error', {
-          message
-        });
-      } finally {
-        heuristicsButton.disabled = false;
-        heuristicsButton.textContent = originalLabel;
-      }
-    });
-  }
-
-  /* Slovensky komentar: Prida zaznam o capture preview do historie. */
-  function appendCaptureRecord(text) {
-    if (!captureContainer) {
-      return;
-    }
-    const block = document.createElement('div');
-    block.className = 'log-entry';
-    block.textContent = text;
-    captureContainer.prepend(block);
-    while (captureContainer.childElementCount > 5) {
-      captureContainer.removeChild(captureContainer.lastElementChild);
-    }
-  }
-
   /* Slovensky komentar: Vyziada read-only capture z backgroundu. */
   function requestCapturePreview() {
     return new Promise((resolve, reject) => {
@@ -678,149 +620,6 @@ async function initDebugPage() {
         resolve(response);
       });
     });
-  }
-
-  if (captureButton) {
-    captureButton.addEventListener('click', async () => {
-      const originalLabel = captureButton.textContent;
-      captureButton.disabled = true;
-      captureButton.textContent = 'Capturing…';
-      try {
-        const response = await requestCapturePreview();
-        if (response && response.ok && response.payload) {
-          const payload = response.payload;
-          if (payload.skipped) {
-            appendCaptureRecord('Preskočené: SAFE_URL vzor blokuje capture.');
-          } else {
-            const title = payload.title || '(bez názvu)';
-            const qLen = payload.questionText ? payload.questionText.length : 0;
-            const aLen = payload.answerHTML ? payload.answerHTML.length : 0;
-            appendCaptureRecord(`OK: title=${title} | qLen=${qLen} | aLen=${aLen}`);
-          }
-          await Logger.log('info', 'debug', 'Capture preview invoked', {
-            reasonCode: response.reasonCode,
-            skipped: Boolean(payload.skipped)
-          });
-        } else {
-          const message = extractErrorMessage(response && (response.error || response.message));
-          appendCaptureRecord(`Chyba: ${message}`);
-          await Logger.log('warn', 'debug', 'Capture preview returned warning', {
-            reasonCode: response && response.reasonCode ? response.reasonCode : 'capture_error',
-            message
-          });
-        }
-      } catch (error) {
-        const message = extractErrorMessage(error);
-        appendCaptureRecord(`Chyba: ${message}`);
-        await Logger.log('error', 'debug', 'Capture preview request threw error', {
-          message
-        });
-      } finally {
-        captureButton.disabled = false;
-        captureButton.textContent = originalLabel;
-      }
-    });
-  }
-
-  if (bulkOpenTabsButton) {
-    bulkOpenTabsButton.addEventListener('click', async () => {
-      const originalText = bulkOpenTabsButton.textContent;
-      bulkOpenTabsButton.disabled = true;
-      bulkOpenTabsButton.textContent = 'Working…';
-      try {
-        const response = await requestBulkBackupOpenTabs();
-        if (response && response.ok) {
-          const summary = response.summary || {};
-          const toastMeta = summarizeBulkToast(summary);
-          const toastOptions = !toastMeta.dryRun && toastMeta.writtenCount > 0
-            ? {
-                actionLabel: 'Open list',
-                onAction: () => {
-                  if (typeof window !== 'undefined') {
-                    window.location.hash = '#searches';
-                  }
-                }
-              }
-            : undefined;
-          showDebugToast(toastMeta.message, toastOptions);
-          const dryRun = toastMeta.dryRun;
-          const meta = {
-            reasonCode: dryRun ? 'bulk_backup_dry_run' : 'bulk_backup_ok',
-            scannedTabs: toastMeta.scanned,
-            candidates: toastMeta.candidates,
-            written: toastMeta.writtenCount,
-            wouldWrite: toastMeta.dryRun ? toastMeta.wouldWriteCount : 0,
-            skipped: toastMeta.skippedCount
-          };
-          await Logger.log('info', 'debug', 'Bulk backup over open tabs finished', meta);
-        } else {
-          const message = extractErrorMessage(response && (response.error || response.message), 'Bulk backup failed.');
-          showDebugToast(message);
-          await Logger.log('warn', 'debug', 'Bulk backup over open tabs blocked', {
-            message,
-            reasonCode: 'bulk_backup_error'
-          });
-        }
-      } catch (error) {
-        const message = extractErrorMessage(error, 'Bulk backup error.');
-        showDebugToast(message);
-        await Logger.log('error', 'debug', 'Bulk backup over open tabs threw error', {
-          message
-        });
-      } finally {
-        bulkOpenTabsButton.disabled = false;
-        bulkOpenTabsButton.textContent = originalText;
-      }
-    });
-  }
-
-  /* Slovensky komentar: Vykresli toast pre manualne zalozenie. */
-  function appendBackupToast(text) {
-    if (!backupToastContainer) {
-      return;
-    }
-    const block = document.createElement('div');
-    block.className = 'log-entry';
-    block.textContent = text;
-    backupToastContainer.prepend(block);
-    while (backupToastContainer.childElementCount > 4) {
-      backupToastContainer.removeChild(backupToastContainer.lastElementChild);
-    }
-  }
-
-  /* Slovensky komentar: Prida kartu s vysledkom manualnej zalohy. */
-  function appendBackupHistoryCard(record) {
-    if (!backupHistoryContainer || !record) {
-      return;
-    }
-    const card = document.createElement('div');
-    card.className = 'log-entry';
-    const qLen = record.questionText ? record.questionText.length : 0;
-    const aLen = record.answerHTML ? record.answerHTML.length : 0;
-    const titlePreview = record.title ? record.title : '(bez názvu)';
-    const convoPreview = record.convoId ? record.convoId : '∅';
-    const truncatedText = record.answerTruncated ? 'truncated=yes' : 'truncated=no';
-    card.textContent = `id=${record.id} | title=${titlePreview} | qLen=${qLen} | aLen=${aLen} | convo=${convoPreview} | ${truncatedText}`;
-    backupHistoryContainer.prepend(card);
-    while (backupHistoryContainer.childElementCount > 5) {
-      backupHistoryContainer.removeChild(backupHistoryContainer.lastElementChild);
-    }
-  }
-
-  /* Slovensky komentar: Aktualizuje popis rezimu zalohy. */
-  async function refreshBackupModeLabel() {
-    if (!backupModeLabel) {
-      return;
-    }
-    try {
-      const { settings } = await SettingsStore.load();
-      backupModeLabel.textContent = settings.CAPTURE_ONLY_CANDIDATES ? 'Candidates only' : 'All chats allowed';
-    } catch (error) {
-      backupModeLabel.textContent = 'Mode unknown';
-      await Logger.log('warn', 'debug', 'Failed to read settings for backup label', {
-        message: error && error.message
-      });
-    }
   }
 
   /* Slovensky komentar: Vyziada manualne zalozenie. */
@@ -865,137 +664,555 @@ async function initDebugPage() {
     });
   }
 
-  if (backupButton) {
-    backupButton.addEventListener('click', async () => {
-      const labelSpan = backupButton.querySelector('span');
-      const originalLabel = labelSpan ? labelSpan.textContent : backupButton.textContent;
-      backupButton.disabled = true;
-      if (labelSpan) {
-        labelSpan.textContent = 'Working…';
-      } else {
-        backupButton.textContent = 'Working…';
+  /* Slovensky komentar: Aktualizuje popis rezimu zalohy. */
+  async function refreshBackupModeLabel() {
+    if (!isMounted()) {
+      return;
+    }
+    const label = getElement('backupModeLabel');
+    if (!label) {
+      return;
+    }
+    try {
+      const { settings } = await SettingsStore.load();
+      if (!isMounted()) {
+        return;
       }
-      try {
-        const response = await requestManualBackup();
-        if (response && response.ok) {
-          appendBackupToast(response.message || 'Backup completed.');
-          appendBackupHistoryCard(response.record);
+      label.textContent = settings.CAPTURE_ONLY_CANDIDATES ? 'Candidates only' : 'All chats allowed';
+    } catch (error) {
+      label.textContent = 'Mode unknown';
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('warn', 'debug', 'Failed to read settings for backup label', {
+          message: error && error.message
+        });
+      }
+    }
+  }
+
+  function resetInteractiveElements() {
+    const candidates = [
+      'autoscanButton',
+      'testLogButton',
+      'connectivityButton',
+      'checkCsButton',
+      'probeButton',
+      'heuristicsButton',
+      'captureButton',
+      'bulkOpenTabsButton',
+      'backupButton',
+      'evalBackupButton',
+      'backupDeleteButton'
+    ];
+    candidates.forEach((key) => {
+      const element = getElement(key);
+      if (element && element.disabled) {
+        element.disabled = false;
+        element.removeAttribute('aria-busy');
+      }
+    });
+  }
+
+  async function handleAutoscanClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Prebieha…';
+    try {
+      const response = await requestAutoscanStub();
+      if (response && response.ok) {
+        appendScanToast(`Auto-scan stub: ${JSON.stringify(response.result)}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'scan', 'Auto-scan feed stub executed', {
+            result: response.result
+          });
+        }
+      } else {
+        const errorMessage = extractErrorMessage(response && (response.error || response.message));
+        appendScanToast(`Auto-scan chyba: ${errorMessage}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('error', 'scan', 'Auto-scan feed stub failed', {
+            message: errorMessage
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      appendScanToast(`Auto-scan chyba: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'scan', 'Auto-scan feed stub threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+
+  async function handleTestLogClick(button) {
+    const originalText = button.textContent;
+    const note = `debug_page:${Date.now()}`;
+    button.disabled = true;
+    button.textContent = 'Odosielam…';
+    try {
+      const response = await requestTestLog(note);
+      if (!response || response.ok !== true) {
+        const errorMessage = response && response.error ? response.error : 'Žiadna odozva';
+        throw new Error(errorMessage);
+      }
+      showDebugToast('Test log odoslaný (pozri DevTools)');
+      button.textContent = 'Odoslané';
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('info', 'debug', 'Test log request forwarded', {
+          forwarded: Boolean(response.forwarded),
+          forwardError: response.forwardError || null,
+          requestedAt: response.requestedAt,
+          note
+        });
+      }
+    } catch (error) {
+      button.textContent = 'Chyba';
+      const message = extractErrorMessage(error);
+      showDebugToast(`Test log zlyhal: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Test log request failed', {
+          message,
+          note
+        });
+      }
+    } finally {
+      const timeoutId = globalTarget.setTimeout(() => {
+        if (button) {
+          button.textContent = originalText;
+          button.disabled = false;
+        }
+      }, 1400);
+      rememberTimeout(timeoutId);
+    }
+  }
+
+  async function handleConnectivityClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Overujem…';
+    try {
+      const response = await requestConnectivityTest();
+      if (response && response.ok && response.payload) {
+        appendConnectivityRecord(`OK: ${JSON.stringify(response.payload)}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Connectivity test succeeded', {
+            reasonCode: response.reasonCode,
+            traceId: response.payload.traceId
+          });
+        }
+      } else {
+        const errorMessage = extractErrorMessage(response && (response.error || response.message));
+        appendConnectivityRecord(`Chyba: ${errorMessage}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Connectivity test returned warning', {
+            reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
+            message: errorMessage
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      appendConnectivityRecord(`Chyba: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Connectivity test request threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+
+  async function handleCheckCsClick(button) {
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Overujem…';
+    try {
+      const response = await requestConnectivityTest();
+      if (response && response.ok) {
+        button.textContent = 'Content script aktívny';
+        appendConnectivityRecord(`Check CS OK: ${JSON.stringify(response.payload || {})}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Content script check succeeded', {
+            reasonCode: response.reasonCode || 'ping_ok'
+          });
+        }
+      } else {
+        const errorMessage = extractErrorMessage(response && (response.error || response.message));
+        button.textContent = 'Content script chýba';
+        appendConnectivityRecord(`Check CS chyba: ${errorMessage}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Content script check warning', {
+            reasonCode: response && response.reasonCode ? response.reasonCode : 'no_response',
+            message: errorMessage
+          });
+        }
+      }
+    } catch (error) {
+      button.textContent = 'Content script chýba';
+      const message = extractErrorMessage(error);
+      appendConnectivityRecord(`Check CS chyba: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Content script check threw error', {
+          message
+        });
+      }
+    } finally {
+      const timeoutId = globalTarget.setTimeout(() => {
+        if (button) {
+          button.textContent = originalText;
+          button.disabled = false;
+        }
+      }, 1400);
+      rememberTimeout(timeoutId);
+    }
+  }
+
+  async function handleProbeClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Prebieha…';
+    try {
+      const response = await requestMetadataProbe();
+      if (response && response.ok && response.payload) {
+        const payload = response.payload;
+        if (payload.skipped && payload.reason === 'probe_safe_url') {
+          appendProbeRecord('Preskocené: Aktívna stránka je chránená vzorom SAFE_URL.');
+        } else {
+          appendProbeRecord(`OK: ${JSON.stringify(payload)}`);
+        }
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Metadata probe completed', {
+            reasonCode: response.reasonCode,
+            traceId: payload.traceId,
+            skipped: Boolean(payload.skipped)
+          });
+        }
+      } else {
+        const errorMessage = extractErrorMessage(response && (response.error || response.message));
+        appendProbeRecord(`Chyba: ${errorMessage}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Metadata probe returned warning', {
+            reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
+            message: errorMessage
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      appendProbeRecord(`Chyba: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Metadata probe request threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+
+  async function handleHeuristicsClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Evaluating…';
+    try {
+      const response = await requestHeuristicsEvaluation();
+      const timestamp = new Date().toLocaleTimeString();
+      if (response && response.decision) {
+        const decision = response.decision;
+        const reasons = decision.reasonCodes && decision.reasonCodes.length ? decision.reasonCodes.join(', ') : 'none';
+        const countsText = JSON.stringify(decision.snapshot && decision.snapshot.counts ? decision.snapshot.counts : {});
+        const candidateText = decision.decided ? `candidate=${decision.isCandidate}` : 'candidate=undecided';
+        const cooldown = response.cooldown || { used: false, remainingMs: 0 };
+        const cooldownText = cooldown.used
+          ? `cooldown=active (${cooldown.remainingMs}ms)`
+          : 'cooldown=inactive';
+        appendHeuristicsRecord(`[${timestamp}] ${candidateText}; reasons=[${reasons}]; counts=${countsText}; ${cooldownText}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Heuristics evaluation invoked manually', {
+            reasonCode: response.reasonCode,
+            candidate: decision.isCandidate,
+            decided: decision.decided,
+            reasonCodes: decision.reasonCodes,
+            cooldown
+          });
+        }
+      } else {
+        const reason = response && response.reasonCode ? response.reasonCode : 'unknown';
+        const errorDetail = extractErrorMessage(response && (response.error || response.message), '').trim();
+        const reasonLine = errorDetail ? `${reason} (${errorDetail})` : reason;
+        appendHeuristicsRecord(`[${timestamp}] Heuristics failed: ${reasonLine}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Heuristics evaluation returned warning', {
+            reasonCode: reason,
+            message: errorDetail || null
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      appendHeuristicsRecord(`Heuristics error: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Heuristics evaluation request threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+
+  async function handleCaptureClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Capturing…';
+    try {
+      const response = await requestCapturePreview();
+      if (response && response.ok && response.payload) {
+        const payload = response.payload;
+        if (payload.skipped) {
+          appendCaptureRecord('Preskočené: SAFE_URL vzor blokuje capture.');
+        } else {
+          const title = payload.title || '(bez názvu)';
+          const qLen = payload.questionText ? payload.questionText.length : 0;
+          const aLen = payload.answerHTML ? payload.answerHTML.length : 0;
+          appendCaptureRecord(`OK: title=${title} | qLen=${qLen} | aLen=${aLen}`);
+        }
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Capture preview invoked', {
+            reasonCode: response.reasonCode,
+            skipped: Boolean(payload.skipped)
+          });
+        }
+      } else {
+        const message = extractErrorMessage(response && (response.error || response.message));
+        appendCaptureRecord(`Chyba: ${message}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Capture preview returned warning', {
+            reasonCode: response && response.reasonCode ? response.reasonCode : 'capture_error',
+            message
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      appendCaptureRecord(`Chyba: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Capture preview request threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+
+  async function handleBulkOpenTabsClick(button) {
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Working…';
+    try {
+      const response = await requestBulkBackupOpenTabs();
+      if (response && response.ok) {
+        const summary = response.summary || {};
+        const toastMeta = summarizeBulkToast(summary);
+        const toastOptions = !toastMeta.dryRun && toastMeta.writtenCount > 0
+          ? {
+              actionLabel: 'Open list',
+              onAction: () => {
+                if (typeof globalTarget !== 'undefined' && globalTarget.location) {
+                  globalTarget.location.hash = '#searches';
+                }
+                showSearchesToast(summarizeBulkResult(summary));
+              }
+            }
+          : undefined;
+        showDebugToast(toastMeta.message, toastOptions);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          const meta = {
+            reasonCode: toastMeta.dryRun ? 'bulk_backup_dry_run' : 'bulk_backup_ok',
+            scannedTabs: toastMeta.scanned,
+            candidates: toastMeta.candidates,
+            written: toastMeta.writtenCount,
+            wouldWrite: toastMeta.dryRun ? toastMeta.wouldWriteCount : 0,
+            skipped: toastMeta.skippedCount
+          };
+          await Logger.log('info', 'debug', 'Bulk backup over open tabs finished', meta);
+        }
+      } else {
+        const message = extractErrorMessage(response && (response.error || response.message), 'Bulk backup failed.');
+        showDebugToast(message);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Bulk backup over open tabs blocked', {
+            message,
+            reasonCode: 'bulk_backup_error'
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error, 'Bulk backup error.');
+      showDebugToast(message);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Bulk backup over open tabs threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+
+  async function handleManualBackupClick(button) {
+    const labelSpan = button.querySelector('span');
+    const originalLabel = labelSpan ? labelSpan.textContent : button.textContent;
+    button.disabled = true;
+    if (labelSpan) {
+      labelSpan.textContent = 'Working…';
+    } else {
+      button.textContent = 'Working…';
+    }
+    try {
+      const response = await requestManualBackup();
+      if (response && response.ok) {
+        appendBackupToast(response.message || 'Backup completed.');
+        appendBackupHistoryCard(response.record);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
           await Logger.log('info', 'debug', 'Manual backup executed', {
             reasonCode: response.reasonCode,
             dryRun: Boolean(response.dryRun),
             id: response.record ? response.record.id : null
           });
-        } else {
-          const reason = response && response.reasonCode ? response.reasonCode : 'unknown';
-          const message = extractErrorMessage(response && (response.message || response.error));
-          appendBackupToast(message || 'Manual backup failed.');
+        }
+      } else {
+        const reason = response && response.reasonCode ? response.reasonCode : 'unknown';
+        const message = extractErrorMessage(response && (response.message || response.error));
+        appendBackupToast(message || 'Manual backup failed.');
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
           await Logger.log('warn', 'debug', 'Manual backup blocked', {
             reasonCode: reason,
             message: message || null
           });
         }
-      } catch (error) {
-        const message = extractErrorMessage(error);
-        appendBackupToast(message || 'Manual backup error.');
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      appendBackupToast(message || 'Manual backup error.');
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
         await Logger.log('error', 'debug', 'Manual backup threw error', {
           message
         });
-      } finally {
-        backupButton.disabled = false;
-        if (labelSpan) {
-          labelSpan.textContent = originalLabel;
-        } else {
-          backupButton.textContent = originalLabel;
-        }
-        await refreshBackupModeLabel();
       }
-    });
+    } finally {
+      button.disabled = false;
+      if (labelSpan) {
+        labelSpan.textContent = originalLabel;
+      } else {
+        button.textContent = originalLabel;
+      }
+      await refreshBackupModeLabel();
+    }
   }
 
-  if (evalBackupButton) {
-    evalBackupButton.addEventListener('click', async () => {
-      const originalLabel = evalBackupButton.textContent;
-      evalBackupButton.disabled = true;
-      evalBackupButton.textContent = 'Evaluating…';
-      try {
-        const response = await requestEvalAndBackup();
-        const reasons = Array.isArray(response && response.reasonCodes) ? response.reasonCodes : [];
-        let toastMessage = '';
-        if (response && response.ok) {
-          if (response.didBackup) {
-            toastMessage = response.dryRun
-              ? 'Dry run: backup would be written.'
-              : 'Backup stored for candidate chat.';
-          } else {
-            toastMessage = reasons.length
-              ? `No backup executed (reasons: ${reasons.join(', ')}).`
-              : 'No backup executed.';
-          }
-          showDebugToast(toastMessage);
-          await Logger.log('info', 'debug', 'Evaluate & backup summary', {
+  async function handleEvalBackupClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Evaluating…';
+    try {
+      const response = await requestEvalAndBackup();
+      const reasons = Array.isArray(response && response.reasonCodes)
+        ? response.reasonCodes
+        : response && typeof response.reasonCode === 'string'
+          ? [response.reasonCode]
+          : [];
+      if (response && response.ok) {
+        const toastMessage = response.message || 'Evaluate & backup: completed.';
+        showDebugToast(toastMessage);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Evaluate & backup completed', {
             ok: true,
-            didBackup: Boolean(response.didBackup),
-            dryRun: Boolean(response.dryRun),
+            reasonCodes: reasons,
             id: response.id || null,
-            reasonCodes: reasons
+            dryRun: Boolean(response.dryRun)
           });
-        } else {
-          toastMessage = extractErrorMessage(response && (response.message || response.error));
-          showDebugToast(toastMessage);
+        }
+      } else {
+        const toastMessage = response && response.message ? response.message : 'Evaluate & backup blocked.';
+        showDebugToast(toastMessage);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
           await Logger.log('warn', 'debug', 'Evaluate & backup blocked', {
             ok: false,
             reasonCodes: reasons,
             message: toastMessage
           });
         }
-        appendEvalBackupHistory({
-          didBackup: Boolean(response && response.didBackup),
-          dryRun: Boolean(response && response.dryRun),
-          id: response && response.id ? response.id : null,
-          reasonCodes: reasons,
-          message: response && response.message ? response.message : undefined
-        });
-      } catch (error) {
-        const message = extractErrorMessage(error);
-        showDebugToast(message);
-        appendEvalBackupHistory({
-          didBackup: false,
-          dryRun: false,
-          reasonCodes: ['error'],
-          message
-        });
+      }
+      appendEvalBackupHistory({
+        didBackup: Boolean(response && response.didBackup),
+        dryRun: Boolean(response && response.dryRun),
+        id: response && response.id ? response.id : null,
+        reasonCodes: reasons,
+        message: response && response.message ? response.message : undefined
+      });
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      showDebugToast(message);
+      appendEvalBackupHistory({
+        didBackup: false,
+        dryRun: false,
+        reasonCodes: ['error'],
+        message
+      });
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
         await Logger.log('error', 'debug', 'Evaluate & backup threw error', {
           message
         });
-      } finally {
-        evalBackupButton.disabled = false;
-        evalBackupButton.textContent = originalLabel;
       }
-    });
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
   }
 
-  backupDeleteButton.addEventListener('click', async () => {
-    const originalLabel = backupDeleteButton.textContent;
-    backupDeleteButton.disabled = true;
-    backupDeleteButton.textContent = 'Working…';
+  async function handleBackupDeleteClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Working…';
 
     let confirmRequired = true;
     try {
       const { settings } = await SettingsStore.load();
       confirmRequired = Boolean(settings.CONFIRM_BEFORE_DELETE);
     } catch (error) {
-      await Logger.log('warn', 'debug', 'Backup-delete confirm guard unavailable', {
-        message: error && error.message
-      });
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('warn', 'debug', 'Backup-delete confirm guard unavailable', {
+          message: error && error.message
+        });
+      }
     }
 
     if (confirmRequired) {
-      const confirmed = window.confirm('Naozaj zálohovať a zmazať aktívny chat?');
-      if (!confirmed) {
-        showDebugToast('Cancelled');
-        backupDeleteButton.disabled = false;
-        backupDeleteButton.textContent = originalLabel;
-        return;
+      const confirmFn = typeof globalTarget.confirm === 'function'
+        ? globalTarget.confirm.bind(globalTarget)
+        : typeof confirm === 'function'
+          ? confirm
+          : null;
+      if (confirmFn) {
+        const confirmed = confirmFn('Naozaj zálohovať a zmazať aktívny chat?');
+        if (!confirmed) {
+          showDebugToast('Cancelled');
+          button.disabled = false;
+          button.textContent = originalLabel;
+          return;
+        }
       }
     }
 
@@ -1007,12 +1224,14 @@ async function initDebugPage() {
       if (toastMessage) {
         showDebugToast(toastMessage);
       }
-      await Logger.log(summary.ok ? 'info' : 'warn', 'debug', 'Backup-delete summary (debug page)', {
-        reasonCode: summary.reasonCode,
-        didDelete: summary.didDelete,
-        dryRun: summary.dryRun,
-        candidate: summary.candidate
-      });
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log(summary.ok ? 'info' : 'warn', 'debug', 'Backup-delete summary (debug panel)', {
+          reasonCode: summary.reasonCode,
+          didDelete: summary.didDelete,
+          dryRun: summary.dryRun,
+          candidate: summary.candidate
+        });
+      }
     } catch (error) {
       const message = extractErrorMessage(error, 'Runtime error');
       const failure = normalizeBackupDeleteSummary({
@@ -1027,41 +1246,217 @@ async function initDebugPage() {
       });
       appendBackupDeleteHistoryEntry(failure);
       showDebugToast('Failed: runtime_error');
-      await Logger.log('error', 'debug', 'Backup-delete threw error (debug page)', {
-        message
-      });
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Backup-delete threw error (debug panel)', {
+          message
+        });
+      }
     } finally {
-      backupDeleteButton.disabled = false;
-      backupDeleteButton.textContent = originalLabel;
+      button.disabled = false;
+      button.textContent = originalLabel;
     }
-  });
+  }
 
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message && message.type === 'bulk_backup_summary') {
-      appendBulkOpenTabsHistory(message.summary);
+  async function loadInitialBulkHistory() {
+    try {
+      const storedBulk = await chrome.storage.local.get({ last_bulk_backup: null });
+      if (!isMounted()) {
+        return;
+      }
+      if (storedBulk.last_bulk_backup) {
+        appendBulkOpenTabsHistory(storedBulk.last_bulk_backup);
+      }
+    } catch (error) {
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('warn', 'debug', 'Failed to load bulk backup summary history', {
+          message: error && error.message
+        });
+      }
     }
-    if (message && message.type === 'backups_updated' && message.reason === 'bulk_backup') {
-      showDebugToast('Stored backups refreshed.');
-    }
-  });
+  }
 
-  try {
-    const storedBulk = await chrome.storage.local.get({ last_bulk_backup: null });
-    if (storedBulk.last_bulk_backup) {
-      appendBulkOpenTabsHistory(storedBulk.last_bulk_backup);
+  function attachHandlers() {
+    const {
+      autoscanButton,
+      testLogButton,
+      connectivityButton,
+      checkCsButton,
+      probeButton,
+      heuristicsButton,
+      captureButton,
+      bulkOpenTabsButton,
+      backupButton,
+      evalBackupButton,
+      backupDeleteButton
+    } = state.elements;
+
+    if (autoscanButton) {
+      addListener(autoscanButton, 'click', () => handleAutoscanClick(autoscanButton));
     }
-  } catch (error) {
-    await Logger.log('warn', 'debug', 'Failed to load bulk backup summary history', {
-      message: error && error.message
+    if (testLogButton) {
+      addListener(testLogButton, 'click', () => handleTestLogClick(testLogButton));
+    }
+    if (connectivityButton) {
+      addListener(connectivityButton, 'click', () => handleConnectivityClick(connectivityButton));
+    }
+    if (checkCsButton) {
+      addListener(checkCsButton, 'click', () => handleCheckCsClick(checkCsButton));
+    }
+    if (probeButton) {
+      addListener(probeButton, 'click', () => handleProbeClick(probeButton));
+    }
+    if (heuristicsButton) {
+      addListener(heuristicsButton, 'click', () => handleHeuristicsClick(heuristicsButton));
+    }
+    if (captureButton) {
+      addListener(captureButton, 'click', () => handleCaptureClick(captureButton));
+    }
+    if (bulkOpenTabsButton) {
+      addListener(bulkOpenTabsButton, 'click', () => handleBulkOpenTabsClick(bulkOpenTabsButton));
+    }
+    if (backupButton) {
+      addListener(backupButton, 'click', () => handleManualBackupClick(backupButton));
+    }
+    if (evalBackupButton) {
+      addListener(evalBackupButton, 'click', () => handleEvalBackupClick(evalBackupButton));
+    }
+    if (backupDeleteButton) {
+      addListener(backupDeleteButton, 'click', () => handleBackupDeleteClick(backupDeleteButton));
+    }
+  }
+
+  function attachRuntimeListener() {
+    if (state.runtimeListener) {
+      return;
+    }
+    const listener = (message) => {
+      if (!isMounted()) {
+        return;
+      }
+      if (message && message.type === 'bulk_backup_summary') {
+        appendBulkOpenTabsHistory(message.summary);
+      }
+      if (message && message.type === 'backups_updated' && message.reason === 'bulk_backup') {
+        showDebugToast('Stored backups refreshed.');
+      }
+    };
+    chrome.runtime.onMessage.addListener(listener);
+    state.runtimeListener = listener;
+    rememberCleanup(() => {
+      if (state.runtimeListener === listener) {
+        chrome.runtime.onMessage.removeListener(listener);
+        state.runtimeListener = null;
+      }
     });
   }
 
-  await refreshBackupModeLabel();
-  await Logger.log('info', 'db', 'Debug page opened');
-}
+  async function mountDebug() {
+    if (state.mounted) {
+      return;
+    }
+    const panel = getPanelRoot();
+    if (!panel) {
+      return;
+    }
+    const doc = panel.ownerDocument || globalTarget.document || document;
+    const backupDeleteButton = resolveElement(panel, 'backup-delete-active-btn');
+    const backupDeleteHistory = resolveElement(panel, 'backup-delete-history');
+    if (!backupDeleteButton || !backupDeleteHistory) {
+      return;
+    }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initDebugPage, { once: true });
-} else {
-  initDebugPage();
-}
+    state.panel = panel;
+    state.document = doc;
+    state.cleanup = [];
+    state.elements = {
+      backupDeleteButton,
+      backupDeleteHistory,
+      testLogButton: resolveElement(panel, 'test-log-btn'),
+      autoscanButton: resolveElement(panel, 'autoscan-feed-btn'),
+      scanResultContainer: resolveElement(panel, 'scan-result'),
+      connectivityButton: resolveElement(panel, 'connectivity-btn'),
+      checkCsButton: resolveElement(panel, 'check-cs-btn'),
+      connectivityContainer: resolveElement(panel, 'connectivity-results'),
+      probeButton: resolveElement(panel, 'probe-btn'),
+      metadataContainer: resolveElement(panel, 'metadata-results'),
+      heuristicsButton: resolveElement(panel, 'heuristics-btn'),
+      heuristicsContainer: resolveElement(panel, 'heuristics-results'),
+      captureButton: resolveElement(panel, 'capture-btn'),
+      captureContainer: resolveElement(panel, 'capture-results'),
+      backupButton: resolveElement(panel, 'backup-btn'),
+      backupModeLabel: resolveElement(panel, 'backup-mode-label') || resolveDocumentElement(doc, 'backup-mode-label'),
+      backupToastContainer: resolveElement(panel, 'backup-toast') || resolveDocumentElement(doc, 'backup-toast'),
+      backupHistoryContainer: resolveElement(panel, 'backup-history') || resolveDocumentElement(doc, 'backup-history'),
+      debugToastContainer: resolveElement(panel, 'debug-toast') || resolveDocumentElement(doc, 'debug-toast'),
+      bulkOpenTabsButton: resolveElement(panel, 'bulk-open-tabs-btn'),
+      bulkOpenTabsHistory: resolveElement(panel, 'bulk-open-tabs-history') || resolveDocumentElement(doc, 'bulk-open-tabs-history'),
+      evalBackupButton: resolveElement(panel, 'eval-backup-btn'),
+      evalBackupHistory: resolveElement(panel, 'eval-backup-history') || resolveDocumentElement(doc, 'eval-backup-history')
+    };
+
+    state.mounted = true;
+    attachHandlers();
+    attachRuntimeListener();
+    await refreshBackupModeLabel();
+    await loadInitialBulkHistory();
+    if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+      await Logger.log('info', 'db', 'Debug panel mounted');
+    }
+  }
+
+  function unmountDebug() {
+    if (!state.mounted) {
+      return;
+    }
+    while (state.cleanup.length) {
+      const cleanupFn = state.cleanup.pop();
+      try {
+        cleanupFn();
+      } catch (error) {
+        // swallow cleanup errors
+      }
+    }
+    if (state.runtimeListener) {
+      chrome.runtime.onMessage.removeListener(state.runtimeListener);
+      state.runtimeListener = null;
+    }
+    resetInteractiveElements();
+    state.mounted = false;
+    state.panel = null;
+    state.document = null;
+    state.elements = {};
+  }
+
+  if (!globalTarget.DebugPanel) {
+    globalTarget.DebugPanel = {};
+  }
+  globalTarget.DebugPanel.mountDebug = mountDebug;
+  globalTarget.DebugPanel.unmountDebug = unmountDebug;
+
+  const doc = globalTarget.document || document;
+
+  function maybeMountStandalone() {
+    if (!doc) {
+      return;
+    }
+    if (doc.getElementById('panel-debug')) {
+      mountDebug();
+    }
+  }
+
+  function signalReady() {
+    if (doc) {
+      doc.dispatchEvent(new CustomEvent('mychatgpt:debug-panel-ready'));
+    }
+  }
+
+  if (doc && doc.readyState === 'loading') {
+    doc.addEventListener('DOMContentLoaded', () => {
+      maybeMountStandalone();
+      signalReady();
+    }, { once: true });
+  } else {
+    maybeMountStandalone();
+    signalReady();
+  }
+})(typeof window !== 'undefined' ? window : self);
