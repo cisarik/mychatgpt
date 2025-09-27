@@ -3,9 +3,137 @@
   const backupsCount = document.getElementById('backups-count');
   const backupsList = document.getElementById('backups-list');
   const emptySection = document.querySelector('.empty-state');
+  const bulkSummarySection = document.getElementById('bulk-summary');
+  const bulkSummaryToggle = document.getElementById('bulk-summary-toggle');
+  const bulkSummaryList = document.getElementById('bulk-summary-list');
+  const bulkSummaryMeta = document.getElementById('bulk-summary-meta');
+  const bulkSummaryEmpty = document.getElementById('bulk-summary-empty');
+  let bulkSummaryExpanded = false;
 
   if (!backupsCount || !backupsList) {
     return;
+  }
+
+  /* Slovensky komentar: Prepne viditelnost detailov sumarnej karty. */
+  function toggleBulkSummary(explicitState) {
+    if (!bulkSummaryToggle || !bulkSummaryList) {
+      return;
+    }
+    const nextState = typeof explicitState === 'boolean' ? explicitState : !bulkSummaryExpanded;
+    bulkSummaryExpanded = nextState;
+    bulkSummaryList.hidden = !bulkSummaryExpanded;
+    bulkSummaryToggle.setAttribute('aria-expanded', String(bulkSummaryExpanded));
+    bulkSummaryToggle.textContent = bulkSummaryExpanded ? 'Hide details' : 'Show details';
+  }
+
+  /* Slovensky komentar: Orezanie URL pre zobrazenie. */
+  function truncateUrl(url) {
+    if (!url || typeof url !== 'string') {
+      return '(unknown)';
+    }
+    const trimmed = url.trim();
+    return trimmed.length > 80 ? `${trimmed.slice(0, 77)}…` : trimmed;
+  }
+
+  /* Slovensky komentar: Vytvori riadok pre polozku sumarneho prehladu. */
+  function buildBulkSummaryItem(entry) {
+    if (!entry) {
+      return null;
+    }
+    const wrapper = document.createElement('div');
+    wrapper.className = 'bulk-summary-item';
+    wrapper.setAttribute('role', 'listitem');
+
+    const urlSpan = document.createElement('span');
+    urlSpan.textContent = truncateUrl(entry.url);
+    wrapper.appendChild(urlSpan);
+
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = entry.convoId ? entry.convoId : '∅';
+    wrapper.appendChild(badge);
+
+    const metrics = document.createElement('span');
+    metrics.className = 'bulk-summary-metrics';
+    const qLen = Number.isFinite(entry.qLen) ? entry.qLen : 0;
+    const aLen = Number.isFinite(entry.aLen) ? entry.aLen : 0;
+    const truncated = entry.truncated ? ' · truncated' : '';
+    metrics.textContent = ` · q=${qLen} · aBytes=${aLen}${truncated}`;
+    wrapper.appendChild(metrics);
+
+    return wrapper;
+  }
+
+  /* Slovensky komentar: Zobrazi kartu so sumarom bulk backupu. */
+  function renderBulkSummary(summary) {
+    if (!bulkSummarySection || !bulkSummaryMeta || !bulkSummaryEmpty || !bulkSummaryList || !bulkSummaryToggle) {
+      return;
+    }
+
+    if (!summary || typeof summary !== 'object') {
+      bulkSummaryMeta.textContent = 'Bulk backup not executed yet.';
+      bulkSummaryEmpty.textContent = 'No candidates were stored yet.';
+      bulkSummaryEmpty.style.display = '';
+      bulkSummaryList.innerHTML = '';
+      bulkSummaryList.hidden = true;
+      bulkSummaryToggle.disabled = true;
+      toggleBulkSummary(false);
+      return;
+    }
+
+    const dryRun = Array.isArray(summary.wouldWrite);
+    const scanned = Number.isFinite(summary.scannedTabs) ? summary.scannedTabs : 0;
+    const candidates = summary.stats && Number.isFinite(summary.stats.candidates)
+      ? summary.stats.candidates
+      : 0;
+    const writtenCount = Array.isArray(summary.written) ? summary.written.length : 0;
+    const wouldWriteCount = Array.isArray(summary.wouldWrite) ? summary.wouldWrite.length : 0;
+    const skippedCount = Array.isArray(summary.skipped) ? summary.skipped.length : 0;
+    const whenText = Number.isFinite(summary.timestamp)
+      ? new Date(summary.timestamp).toLocaleString()
+      : 'Unknown time';
+    const writtenPart = dryRun
+      ? `${writtenCount} written / ${wouldWriteCount} wouldWrite`
+      : `${writtenCount} written`;
+
+    bulkSummaryMeta.textContent = `${whenText} · ${scanned} scanned · ${candidates} candidates · ${writtenPart} · ${skippedCount} skipped`;
+
+    const itemsSource = dryRun && wouldWriteCount ? summary.wouldWrite : summary.written;
+    bulkSummaryList.innerHTML = '';
+
+    if (!Array.isArray(itemsSource) || itemsSource.length === 0) {
+      bulkSummaryEmpty.textContent = dryRun
+        ? 'Dry run: nothing persisted.'
+        : 'No new backups were written.';
+      bulkSummaryEmpty.style.display = '';
+      bulkSummaryList.hidden = true;
+      bulkSummaryToggle.disabled = true;
+      toggleBulkSummary(false);
+      return;
+    }
+
+    bulkSummaryEmpty.style.display = 'none';
+    const limited = itemsSource.slice(0, 10);
+    limited.forEach((entry) => {
+      const item = buildBulkSummaryItem(entry);
+      if (item) {
+        bulkSummaryList.appendChild(item);
+      }
+    });
+    bulkSummaryToggle.disabled = false;
+    toggleBulkSummary(false);
+  }
+
+  /* Slovensky komentar: Nacita sumar z local storage. */
+  async function loadBulkSummaryFromStorage() {
+    try {
+      const stored = await chrome.storage.local.get({ last_bulk_backup: null });
+      renderBulkSummary(stored.last_bulk_backup);
+    } catch (error) {
+      await Logger.log('warn', 'db', 'Failed to load bulk summary', {
+        message: error && error.message
+      });
+    }
   }
 
   /* Slovensky komentar: Vyberie titulok alebo fallback z textu otazky. */
@@ -202,11 +330,21 @@
     }
   }
 
+  if (bulkSummaryToggle) {
+    bulkSummaryToggle.addEventListener('click', () => {
+      toggleBulkSummary();
+    });
+  }
+
   chrome.runtime.onMessage.addListener((message) => {
     if (message && message.type === 'backups_updated') {
       refreshBackups();
     }
+    if (message && message.type === 'bulk_backup_summary') {
+      renderBulkSummary(message.summary);
+    }
   });
 
+  await loadBulkSummaryFromStorage();
   await refreshBackups();
 })();

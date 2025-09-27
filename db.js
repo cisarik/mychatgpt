@@ -118,9 +118,45 @@ const Database = {
         id: record && record.id ? record.id : null,
         timestamp: record && record.timestamp ? record.timestamp : null
       });
-      return record;
+      return record && record.id ? record.id : null;
     } catch (error) {
       await Logger.log('error', 'db', 'Backup persist failed', { message: error && error.message });
+      throw error;
+    }
+  },
+  /* Slovensky komentar: Najde existujucu zalohu podla convoId. */
+  getBackupByConvoId: async (convoId) => {
+    if (!convoId) {
+      return null;
+    }
+    try {
+      const db = await Database.initDB();
+      return await new Promise((resolve, reject) => {
+        try {
+          const transaction = db.transaction([STORE_BACKUPS], 'readonly');
+          const store = transaction.objectStore(STORE_BACKUPS);
+          const index = store.index('byConvo');
+          const request = index.get(convoId);
+
+          request.onsuccess = () => {
+            resolve(request.result || null);
+          };
+          request.onerror = () => {
+            reject(request.error);
+          };
+
+          transaction.onerror = () => {
+            reject(transaction.error);
+          };
+          transaction.onabort = () => {
+            reject(transaction.error);
+          };
+        } catch (innerError) {
+          reject(innerError);
+        }
+      });
+    } catch (error) {
+      await Logger.log('error', 'db', 'Lookup by convoId failed', { message: error && error.message });
       throw error;
     }
   },

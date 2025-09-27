@@ -17,6 +17,8 @@
   const backupToastContainer = document.getElementById('backup-toast');
   const backupHistoryContainer = document.getElementById('backup-history');
   const debugToastContainer = document.getElementById('debug-toast');
+  const bulkOpenTabsButton = document.getElementById('bulk-open-tabs-btn');
+  const bulkOpenTabsHistory = document.getElementById('bulk-open-tabs-history');
 
   /* Slovensky komentar: Zobrazi kratku toast spravu v debug nadpise. */
   function showDebugToast(message) {
@@ -72,6 +74,67 @@
   function requestAutoscanStub() {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ type: 'scan_now' }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(runtimeError);
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
+  /* Slovensky komentar: Prida JSON riadok do historie bulk backupu. */
+  function appendBulkOpenTabsHistory(summary) {
+    if (!bulkOpenTabsHistory) {
+      return;
+    }
+    const block = document.createElement('div');
+    block.className = 'log-entry';
+    const dryRun = summary && Array.isArray(summary.wouldWrite);
+    const payload = summary && typeof summary === 'object'
+      ? {
+          timestamp: summary.timestamp || null,
+          scannedTabs: Number.isFinite(summary.scannedTabs) ? summary.scannedTabs : 0,
+          candidates: summary.stats && Number.isFinite(summary.stats.candidates)
+            ? summary.stats.candidates
+            : 0,
+          written: Array.isArray(summary.written) ? summary.written.length : 0,
+          wouldWrite: dryRun ? (summary.wouldWrite ? summary.wouldWrite.length : 0) : 0,
+          skipped: Array.isArray(summary.skipped) ? summary.skipped.length : 0,
+          dryRun
+        }
+      : { note: 'no summary' };
+    block.textContent = JSON.stringify(payload);
+    bulkOpenTabsHistory.prepend(block);
+    while (bulkOpenTabsHistory.childElementCount > 10) {
+      bulkOpenTabsHistory.removeChild(bulkOpenTabsHistory.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Naformatuje sumar bulk backupu pre toast. */
+  function summarizeBulkToast(summary) {
+    if (!summary || typeof summary !== 'object') {
+      return 'Bulk backup completed.';
+    }
+    const scanned = Number.isFinite(summary.scannedTabs) ? summary.scannedTabs : 0;
+    const candidates = summary.stats && Number.isFinite(summary.stats.candidates)
+      ? summary.stats.candidates
+      : 0;
+    const writtenCount = Array.isArray(summary.written) ? summary.written.length : 0;
+    const wouldWriteCount = Array.isArray(summary.wouldWrite) ? summary.wouldWrite.length : 0;
+    const skippedCount = Array.isArray(summary.skipped) ? summary.skipped.length : 0;
+    const dryRun = Array.isArray(summary.wouldWrite);
+    const writtenPart = dryRun
+      ? `${writtenCount} written / ${wouldWriteCount} wouldWrite`
+      : `${writtenCount} written`;
+    return `${scanned} scanned · ${candidates} candidates · ${writtenPart} · ${skippedCount} skipped`;
+  }
+
+  /* Slovensky komentar: Vyziada bulk backup na pozadi. */
+  function requestBulkBackupOpenTabs() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'bulk_backup_open_tabs' }, (response) => {
         const runtimeError = chrome.runtime.lastError;
         if (runtimeError) {
           reject(runtimeError);
@@ -476,6 +539,49 @@
     });
   }
 
+  if (bulkOpenTabsButton) {
+    bulkOpenTabsButton.addEventListener('click', async () => {
+      const originalText = bulkOpenTabsButton.textContent;
+      bulkOpenTabsButton.disabled = true;
+      bulkOpenTabsButton.textContent = 'Working…';
+      try {
+        const response = await requestBulkBackupOpenTabs();
+        if (response && response.ok) {
+          showDebugToast(summarizeBulkToast(response.summary));
+          const summary = response.summary || {};
+          const dryRun = summary && Array.isArray(summary.wouldWrite);
+          const meta = {
+            reasonCode: dryRun ? 'bulk_backup_dry_run' : 'bulk_backup_ok',
+            scannedTabs: Number.isFinite(summary.scannedTabs) ? summary.scannedTabs : 0,
+            candidates: summary.stats && Number.isFinite(summary.stats.candidates)
+              ? summary.stats.candidates
+              : 0,
+            written: Array.isArray(summary.written) ? summary.written.length : 0,
+            wouldWrite: dryRun ? (summary.wouldWrite ? summary.wouldWrite.length : 0) : 0,
+            skipped: Array.isArray(summary.skipped) ? summary.skipped.length : 0
+          };
+          await Logger.log('info', 'debug', 'Bulk backup over open tabs finished', meta);
+        } else {
+          const message = extractErrorMessage(response && (response.error || response.message), 'Bulk backup failed.');
+          showDebugToast(message);
+          await Logger.log('warn', 'debug', 'Bulk backup over open tabs blocked', {
+            message,
+            reasonCode: 'bulk_backup_error'
+          });
+        }
+      } catch (error) {
+        const message = extractErrorMessage(error, 'Bulk backup error.');
+        showDebugToast(message);
+        await Logger.log('error', 'debug', 'Bulk backup over open tabs threw error', {
+          message
+        });
+      } finally {
+        bulkOpenTabsButton.disabled = false;
+        bulkOpenTabsButton.textContent = originalText;
+      }
+    });
+  }
+
   /* Slovensky komentar: Vykresli toast pre manualne zalozenie. */
   function appendBackupToast(text) {
     if (!backupToastContainer) {
@@ -583,6 +689,23 @@
         }
         await refreshBackupModeLabel();
       }
+    });
+  }
+
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message && message.type === 'bulk_backup_summary') {
+      appendBulkOpenTabsHistory(message.summary);
+    }
+  });
+
+  try {
+    const storedBulk = await chrome.storage.local.get({ last_bulk_backup: null });
+    if (storedBulk.last_bulk_backup) {
+      appendBulkOpenTabsHistory(storedBulk.last_bulk_backup);
+    }
+  } catch (error) {
+    await Logger.log('warn', 'debug', 'Failed to load bulk backup summary history', {
+      message: error && error.message
     });
   }
 

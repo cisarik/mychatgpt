@@ -92,6 +92,15 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 2. SAFE URL matches respond with reason code `capture_safe_url` and skip the capture; remove or adjust the pattern to allow previews.
 3. Successful captures include the question/answer lengths in the debug panel and log a `capture_ok` summary in the Service worker console.
 
+## Bulk backup (open tabs)
+- Trigger the **Backup candidates (open tabs)** button from the popup Searches tab or the Debug page toolbar to scan every open `https://chatgpt.com/*` tab sequentially.
+- SAFE URL patterns are enforced up front; matching tabs land in the `safe_url` bucket without probing or capturing content.
+- Heuristics V1 always applies (short chats only). Tabs missing counts contribute to `counts_unknown`, while over-limit conversations increment `over_max`.
+- Each successful candidate requires a `convoId`; duplicates are skipped via `Database.getBackupByConvoId` so existing backups stay untouched.
+- When `DRY_RUN=true`, the summary returns a `wouldWrite` list, leaves IndexedDB unchanged, and the Searches list does not refresh.
+- With `DRY_RUN=false`, truncated answers (≤250 KB) are persisted via `Database.saveBackup`, the Searches panel refreshes immediately, and history cards surface the candidate counts.
+- Check the background Service worker console (`Inspect views`) for `scope:"db"` entries labelled `bulk_backup_ok`, `bulk_backup_dry_run`, or `bulk_backup_error` to audit each run.
+
 ## Heuristics V1 & Cooldown
 - The background worker exposes **Evaluate heuristics (active tab)** on the debug page to score the active ChatGPT conversation without mutating the DOM or touching IndexedDB.
 - SAFE URL patterns always bypass the heuristic, while candidates require `counts.total ≤ MAX_MESSAGES` and, when available, `counts.user ≤ USER_MESSAGES_MAX`. Unknown totals defer the decision.

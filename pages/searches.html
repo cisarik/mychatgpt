@@ -24,6 +24,18 @@
       <p id="backups-count" class="stat-value">Načítavam počet záloh…</p>
     </section>
 
+    <section id="bulk-summary" class="page-section panel" aria-live="polite">
+      <div class="panel-heading">
+        <h2>Last bulk backup</h2>
+        <button id="bulk-summary-toggle" type="button" class="button-sub" aria-expanded="false">
+          Show details
+        </button>
+      </div>
+      <p id="bulk-summary-meta" class="text-muted">Bulk backup not executed yet.</p>
+      <div id="bulk-summary-empty" class="backups-empty">No candidates were stored yet.</div>
+      <div id="bulk-summary-list" class="backups-list" role="list" hidden></div>
+    </section>
+
     <section class="page-section panel">
       <div class="panel-heading">
         <h2>Prehľad posledných záloh</h2>

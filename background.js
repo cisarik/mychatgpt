@@ -231,6 +231,20 @@ async function sendCaptureRequest(tabId, traceId) {
   return response || null;
 }
 
+/* Slovensky komentar: Ziska zoznam chatgpt.com tabov v deterministickom poradi. */
+function queryChatgptTabs() {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.query({ url: 'https://chatgpt.com/*' }, (tabs) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message || 'tabs.query failed'));
+        return;
+      }
+      resolve(Array.isArray(tabs) ? tabs : []);
+    });
+  });
+}
+
 /* Slovensky komentar: Vyhodnoti kandidat status z metadata probe. */
 function evaluateCandidateFromProbe(probePayload, settings) {
   const result = {
@@ -999,6 +1013,251 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           dryRun: Boolean(settings && settings.DRY_RUN)
         });
         sendResponse(responsePayload);
+      }
+    })();
+    return true;
+  }
+  if (message && message.type === 'bulk_backup_open_tabs') {
+    (async () => {
+      const summary = {
+        timestamp: Date.now(),
+        scannedTabs: 0,
+        written: [],
+        skipped: [],
+        stats: {
+          candidates: 0,
+          safeUrl: 0,
+          overMax: 0,
+          countsUnknown: 0,
+          alreadyBacked: 0,
+          noConvoId: 0
+        }
+      };
+      const wouldWrite = [];
+      let settings = null;
+      let tabs = [];
+      let reasonCode = 'bulk_backup_error';
+
+      try {
+        settings = await getSettingsFresh();
+        tabs = await queryChatgptTabs();
+        summary.scannedTabs = tabs.length;
+        const dryRun = Boolean(settings && settings.DRY_RUN);
+
+        for (const tab of tabs) {
+          const tabId = tab && typeof tab.id === 'number' ? tab.id : null;
+          const tabUrl = tab && typeof tab.url === 'string' ? tab.url : '';
+          if (!tabId) {
+            summary.skipped.push({ tabId: null, url: tabUrl || null, reason: 'tab_missing' });
+            continue;
+          }
+          const matchesSafe = tabUrl ? urlMatchesAnyPattern(tabUrl, settings.SAFE_URL_PATTERNS) : false;
+          if (!tabUrl || matchesSafe) {
+            if (matchesSafe) {
+              summary.stats.safeUrl += 1;
+              summary.skipped.push({ tabId, url: tabUrl, reason: 'safe_url' });
+            } else {
+              summary.skipped.push({ tabId, url: tabUrl || null, reason: 'url_missing' });
+            }
+            continue;
+          }
+
+          let evaluation = {
+            ok: false,
+            reasonCode: 'counts_unknown',
+            counts: { total: null, user: null, assistant: null },
+            convoId: null
+          };
+          try {
+            const probeResponse = await sendProbeRequest(tabId, `bulk:${Date.now()}`);
+            evaluation = evaluateCandidateFromProbe(probeResponse, settings);
+          } catch (probeError) {
+            evaluation.reasonCode = 'counts_unknown';
+            await Logger.log('warn', 'scan', 'Bulk backup probe failed', {
+              tabId,
+              url: tabUrl,
+              message: probeError && probeError.message
+            });
+          }
+
+          if (!evaluation.ok) {
+            if (evaluation.reasonCode === 'over_max' || evaluation.reasonCode === 'user_over_limit') {
+              summary.stats.overMax += 1;
+              summary.skipped.push({ tabId, url: tabUrl, reason: 'over_max' });
+            } else {
+              summary.stats.countsUnknown += 1;
+              summary.skipped.push({ tabId, url: tabUrl, reason: 'counts_unknown' });
+            }
+            continue;
+          }
+
+          const convoId = evaluation.convoId || null;
+          if (!convoId) {
+            summary.stats.noConvoId += 1;
+            summary.skipped.push({ tabId, url: tabUrl, reason: 'no_convoid' });
+            continue;
+          }
+
+          summary.stats.candidates += 1;
+
+          let existingRecord = null;
+          try {
+            existingRecord = await Database.getBackupByConvoId(convoId);
+          } catch (lookupError) {
+            await Logger.log('warn', 'db', 'Bulk backup lookup failed', {
+              convoId,
+              message: lookupError && lookupError.message
+            });
+            summary.skipped.push({ tabId, url: tabUrl, reason: 'lookup_error' });
+            continue;
+          }
+
+          if (existingRecord) {
+            summary.stats.alreadyBacked += 1;
+            summary.skipped.push({ tabId, url: tabUrl, reason: 'already_backed_up' });
+            continue;
+          }
+
+          let capturePayload = null;
+          try {
+            capturePayload = await sendCaptureRequest(tabId, `bulk:${Date.now()}`);
+          } catch (captureError) {
+            await Logger.log('warn', 'scan', 'Bulk backup capture failed', {
+              convoId,
+              tabId,
+              message: captureError && captureError.message
+            });
+            summary.skipped.push({ tabId, url: tabUrl, reason: 'capture_error' });
+            continue;
+          }
+
+          if (!capturePayload || !capturePayload.ok) {
+            summary.skipped.push({ tabId, url: tabUrl, reason: 'capture_error' });
+            continue;
+          }
+
+          const now = Date.now();
+          const questionText = capturePayload.questionText && typeof capturePayload.questionText === 'string'
+            ? capturePayload.questionText.trim()
+            : null;
+          const answerRaw = capturePayload.answerHTML && typeof capturePayload.answerHTML === 'string'
+            ? capturePayload.answerHTML
+            : '';
+          const truncateResult = truncateAnswerHtml(answerRaw);
+          const questionLength = questionText ? questionText.length : 0;
+          const summaryEntry = {
+            tabId,
+            url: tabUrl,
+            convoId: capturePayload.convoId || convoId,
+            qLen: questionLength,
+            aLen: truncateResult.bytes,
+            truncated: truncateResult.truncated,
+            id: null
+          };
+
+          if (dryRun) {
+            wouldWrite.push(summaryEntry);
+            continue;
+          }
+
+          const record = {
+            id:
+              typeof crypto !== 'undefined' && crypto.randomUUID
+                ? crypto.randomUUID()
+                : `bulk-${now}-${tabId}`,
+            title:
+              capturePayload.title && typeof capturePayload.title === 'string' && capturePayload.title.trim()
+                ? capturePayload.title.trim()
+                : questionText
+                ? questionText.slice(0, 80)
+                : null,
+            questionText: questionText || null,
+            answerHTML: truncateResult.value || null,
+            timestamp: now,
+            category: null,
+            convoId: capturePayload.convoId || convoId,
+            answerTruncated: truncateResult.truncated
+          };
+
+          try {
+            const savedId = await Database.saveBackup(record);
+            summaryEntry.id = savedId || record.id;
+            summary.written.push(summaryEntry);
+          } catch (writeError) {
+            await Logger.log('error', 'db', 'Bulk backup persist failed', {
+              convoId: record.convoId,
+              message: writeError && writeError.message
+            });
+            summary.skipped.push({ tabId, url: tabUrl, reason: 'write_error' });
+          }
+        }
+
+        summary.timestamp = Date.now();
+
+        if (dryRun) {
+          summary.written = [];
+          summary.wouldWrite = wouldWrite;
+        }
+
+        const payloadForStorage = { ...summary };
+        if (!dryRun) {
+          delete payloadForStorage.wouldWrite;
+        }
+
+        try {
+          await chrome.storage.local.set({ last_bulk_backup: payloadForStorage });
+        } catch (storageError) {
+          await Logger.log('warn', 'db', 'Bulk backup summary store failed', {
+            message: storageError && storageError.message
+          });
+        }
+
+        reasonCode = dryRun ? 'bulk_backup_dry_run' : 'bulk_backup_ok';
+        await Logger.log('info', 'db', 'Bulk backup run finished', {
+          reasonCode,
+          scannedTabs: summary.scannedTabs,
+          written: summary.written.length,
+          wouldWrite: dryRun ? wouldWrite.length : 0,
+          skipped: summary.skipped.length,
+          stats: summary.stats
+        });
+
+        sendResponse({ ok: true, summary });
+
+        try {
+          chrome.runtime.sendMessage({ type: 'bulk_backup_summary', summary });
+        } catch (_broadcastError) {
+          // Slovensky komentar: Broadcast chyba sa ignoruje.
+        }
+
+        if (!dryRun && summary.written.length) {
+          try {
+            chrome.runtime.sendMessage(
+              {
+                type: 'backups_updated',
+                reason: 'bulk_backup',
+                timestamp: Date.now(),
+                count: summary.written.length
+              },
+              () => {
+                const runtimeError = chrome.runtime.lastError;
+                if (runtimeError) {
+                  // Slovensky komentar: Ignoruje sa, ak nikto nepocuva.
+                }
+              }
+            );
+          } catch (_notifyError) {
+            // Slovensky komentar: Broadcast zlyhanie je tiché.
+          }
+        }
+      } catch (error) {
+        const messageText = error && error.message ? error.message : String(error);
+        summary.error = messageText;
+        await Logger.log('error', 'db', 'Bulk backup run failed', {
+          reasonCode,
+          message: messageText
+        });
+        sendResponse({ ok: false, error: messageText, summary });
       }
     })();
     return true;

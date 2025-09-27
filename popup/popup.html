@@ -52,10 +52,26 @@
       >
         <header class="page-header">
           <h2>Search backups</h2>
+          <button id="bulk-backup-open-tabs-btn" class="button-sub" type="button">
+            Backup candidates (open tabs)
+          </button>
           <p class="text-muted">
             Latest exports from your sessions will show up automatically inside this popup.
           </p>
+          <div id="searches-toast" class="toast-stack" role="status" aria-live="polite"></div>
         </header>
+
+        <div id="bulk-summary" class="panel stack" aria-live="polite">
+          <div class="panel-heading">
+            <h3>Last bulk backup</h3>
+            <button id="bulk-summary-toggle" type="button" class="button-sub" aria-expanded="false">
+              Show details
+            </button>
+          </div>
+          <p id="bulk-summary-meta" class="text-muted">Bulk backup not executed yet.</p>
+          <div id="bulk-summary-empty" class="backups-empty">No candidates were stored yet.</div>
+          <div id="bulk-summary-list" class="backups-list" role="list" hidden></div>
+        </div>
 
         <div class="panel stack empty-state" aria-live="polite">
           <h3>Žiadne zálohy zatiaľ neexistujú</h3>

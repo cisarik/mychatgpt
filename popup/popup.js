@@ -108,4 +108,82 @@
       }, 1500);
     });
   }
+
+  const bulkBackupButton = document.getElementById('bulk-backup-open-tabs-btn');
+  const searchesToast = document.getElementById('searches-toast');
+
+  /* Slovensky komentar: Zobrazi kratku toast spravu v sekcii Searches. */
+  function showSearchToast(message) {
+    if (!searchesToast || !message) {
+      return;
+    }
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.textContent = message;
+    searchesToast.prepend(toast);
+    while (searchesToast.childElementCount > 3) {
+      searchesToast.removeChild(searchesToast.lastElementChild);
+    }
+    setTimeout(() => {
+      if (toast.parentElement === searchesToast) {
+        searchesToast.removeChild(toast);
+      }
+    }, 3200);
+  }
+
+  /* Slovensky komentar: Naformatuje sumar do toast spravy. */
+  function summarizeBulkResult(summary) {
+    if (!summary || typeof summary !== 'object') {
+      return 'Bulk backup completed.';
+    }
+    const scanned = Number.isFinite(summary.scannedTabs) ? summary.scannedTabs : 0;
+    const candidates = summary.stats && Number.isFinite(summary.stats.candidates)
+      ? summary.stats.candidates
+      : 0;
+    const writtenCount = Array.isArray(summary.written) ? summary.written.length : 0;
+    const wouldWriteCount = Array.isArray(summary.wouldWrite) ? summary.wouldWrite.length : 0;
+    const skippedCount = Array.isArray(summary.skipped) ? summary.skipped.length : 0;
+    const dryRun = Array.isArray(summary.wouldWrite);
+    const writtenPart = dryRun
+      ? `${writtenCount} written / ${wouldWriteCount} wouldWrite`
+      : `${writtenCount} written`;
+    return `${scanned} scanned · ${candidates} candidates · ${writtenPart} · ${skippedCount} skipped`;
+  }
+
+  /* Slovensky komentar: Vyziada bulk backup spracovanie od backgroundu. */
+  function requestBulkBackupOpenTabs() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'bulk_backup_open_tabs' }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(runtimeError);
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
+  if (bulkBackupButton) {
+    bulkBackupButton.addEventListener('click', async () => {
+      const originalText = bulkBackupButton.textContent;
+      bulkBackupButton.disabled = true;
+      bulkBackupButton.textContent = 'Working…';
+      try {
+        const response = await requestBulkBackupOpenTabs();
+        if (response && response.ok) {
+          showSearchToast(summarizeBulkResult(response.summary));
+        } else {
+          const message = response && response.error ? response.error : 'Bulk backup failed.';
+          showSearchToast(message);
+        }
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        showSearchToast(`Bulk backup error: ${message}`);
+      } finally {
+        bulkBackupButton.disabled = false;
+        bulkBackupButton.textContent = originalText;
+      }
+    });
+  }
 })();
