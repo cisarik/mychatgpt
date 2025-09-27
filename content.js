@@ -192,28 +192,47 @@ function captureLatestConversationPair() {
 }
 
 /* Slovensky komentar: Bezpecne vrati pole kandidatov podla selektora (ignoruje syntakticke chyby). */
-function safeQueryAll(selector) {
-  if (typeof selector !== 'string' || !selector) {
-    return [];
-  }
-  try {
-    return Array.from(document.querySelectorAll(selector));
-  } catch (_error) {
-    return [];
-  }
-}
+const safeQueryAll = typeof window !== 'undefined' && typeof window.safeQueryAll === 'function'
+  ? window.safeQueryAll
+  : function safeQueryAllLocal(selector) {
+      if (typeof selector !== 'string' || !selector) {
+        return [];
+      }
+      try {
+        return Array.from(document.querySelectorAll(selector));
+      } catch (_error) {
+        return [];
+      }
+    };
 
 /* Slovensky komentar: Normalizuje text elementu na porovnavanie. */
-function normalizeNodeText(node) {
+const normalizeNodeText = typeof window !== 'undefined' && typeof window.normalizeNodeText === 'function'
+  ? window.normalizeNodeText
+  : function normalizeNodeTextLocal(node) {
+      if (!node) {
+        return '';
+      }
+      const raw = typeof node.innerText === 'string' && node.innerText.trim()
+        ? node.innerText
+        : typeof node.textContent === 'string'
+        ? node.textContent
+        : '';
+      return raw.trim().toLowerCase();
+    };
+
+/* Slovensky komentar: Overi, ci je element interaktivny a nie je zakazany. */
+function isNodeEnabled(node) {
   if (!node) {
-    return '';
+    return false;
   }
-  const raw = typeof node.innerText === 'string' && node.innerText.trim()
-    ? node.innerText
-    : typeof node.textContent === 'string'
-    ? node.textContent
-    : '';
-  return raw.trim().toLowerCase();
+  if (typeof node.disabled === 'boolean' && node.disabled) {
+    return false;
+  }
+  const ariaDisabled = typeof node.getAttribute === 'function' ? node.getAttribute('aria-disabled') : null;
+  if (ariaDisabled && ariaDisabled.toLowerCase() === 'true') {
+    return false;
+  }
+  return true;
 }
 
 /* Slovensky komentar: Klikne na element po jeho ziskani s opakovanim. */
@@ -277,10 +296,17 @@ function findMoreActionsButton() {
     'button[aria-label="More actions"]',
     'button[aria-haspopup="menu"][aria-label*="More"]',
     'button[aria-label="Options"]',
-    'button:has(svg[aria-label="More"])'
+    'button[aria-label="More"]'
   ];
   for (const selector of selectors) {
-    const candidates = safeQueryAll(selector).filter((node) => node && typeof node.disabled !== 'boolean' ? true : !node.disabled);
+    const candidates = safeQueryAll(selector).filter((node) => isNodeEnabled(node));
+    if (candidates.length) {
+      return candidates[0];
+    }
+  }
+  const optionalSelectors = ['button:has(svg[aria-label="More"])'];
+  for (const selector of optionalSelectors) {
+    const candidates = safeQueryAll(selector).filter((node) => isNodeEnabled(node));
     if (candidates.length) {
       return candidates[0];
     }
@@ -293,6 +319,9 @@ function findDeleteMenuItem() {
   const targetText = 'delete';
   const roleMatches = safeQueryAll('[role="menuitem"]');
   for (const node of roleMatches) {
+    if (!isNodeEnabled(node)) {
+      continue;
+    }
     if (normalizeNodeText(node) === targetText) {
       return node;
     }
@@ -302,7 +331,11 @@ function findDeleteMenuItem() {
   for (const menu of menus) {
     const interactive = Array.from(menu.querySelectorAll('button, div, a'));
     for (const node of interactive) {
-      if (normalizeNodeText(node) === targetText || normalizeNodeText(node).includes(targetText)) {
+      if (!isNodeEnabled(node)) {
+        continue;
+      }
+      const normalized = normalizeNodeText(node);
+      if (normalized === targetText || normalized.includes(targetText)) {
         return node;
       }
     }
@@ -310,7 +343,11 @@ function findDeleteMenuItem() {
 
   const fallback = safeQueryAll('button, div, a');
   for (const node of fallback) {
-    if (normalizeNodeText(node) === targetText || normalizeNodeText(node).includes(targetText)) {
+    if (!isNodeEnabled(node)) {
+      continue;
+    }
+    const normalized = normalizeNodeText(node);
+    if (normalized === targetText || normalized.includes(targetText)) {
       return node;
     }
   }
@@ -323,9 +360,22 @@ function findDeleteConfirmButton() {
   for (const dialog of dialogs) {
     const buttons = Array.from(dialog.querySelectorAll('[role="button"], button'));
     for (const node of buttons) {
+      if (!isNodeEnabled(node)) {
+        continue;
+      }
       if (normalizeNodeText(node).includes('delete')) {
         return node;
       }
+    }
+  }
+
+  const fallbackButtons = safeQueryAll('button');
+  for (const node of fallbackButtons) {
+    if (!isNodeEnabled(node)) {
+      continue;
+    }
+    if (normalizeNodeText(node).includes('delete')) {
+      return node;
     }
   }
   return null;

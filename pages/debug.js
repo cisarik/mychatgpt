@@ -68,6 +68,42 @@
     }, 2600);
   }
 
+  /* Slovensky komentar: Zostavi textovy zaznam pre backup-delete akciu. */
+  function formatBackupDeleteHistory(entry) {
+    const timestampValue = Number.isFinite(entry?.timestamp)
+      ? new Date(entry.timestamp)
+      : new Date();
+    const timestamp = Number.isFinite(timestampValue.getTime())
+      ? timestampValue.toLocaleTimeString()
+      : '';
+    const status = entry?.ok
+      ? entry.didDelete
+        ? 'deleted'
+        : 'completed'
+      : 'failed';
+    const reason = entry?.reasonCode || 'unknown';
+    const candidate = entry?.candidate === true ? 'yes' : entry?.candidate === false ? 'no' : 'unknown';
+    const dryRun = entry?.dryRun ? 'dry-run' : 'live';
+    const recordId = entry?.backup && entry.backup.recordId ? entry.backup.recordId : null;
+    const steps = entry?.ui && entry.ui.steps
+      ? entry.ui.steps
+      : { menu: false, item: false, confirm: false };
+    const stepLabel = `steps=menu:${steps.menu ? '1' : '0'}/item:${steps.item ? '1' : '0'}/confirm:${steps.confirm ? '1' : '0'}`;
+    const parts = [];
+    if (timestamp) {
+      parts.push(`[${timestamp}]`);
+    }
+    parts.push(`status=${status}`);
+    parts.push(`reason=${reason}`);
+    parts.push(`candidate=${candidate}`);
+    parts.push(dryRun);
+    if (recordId) {
+      parts.push(`id=${recordId}`);
+    }
+    parts.push(stepLabel);
+    return parts.join(' ');
+  }
+
   /* Slovensky komentar: Prida zaznam o backup-delete akcii. */
   function appendBackupDeleteHistoryEntry(entry) {
     if (!backupDeleteHistory) {
@@ -75,38 +111,51 @@
     }
     const block = document.createElement('div');
     block.className = 'toast';
-    const now = new Date();
-    const timestamp = Number.isFinite(now.getTime()) ? now.toLocaleTimeString() : '';
-    const status = entry && entry.ok ? (entry.didDelete ? 'deleted' : 'completed') : 'failed';
-    const reason = entry && entry.reasonCode ? entry.reasonCode : 'unknown';
-    const candidate = typeof entry?.candidate === 'boolean'
-      ? entry.candidate
-        ? 'candidate=yes'
-        : 'candidate=no'
-      : 'candidate=∅';
-    const dryRun = entry && entry.dryRun ? 'dry-run' : 'live';
-    const parts = [];
-    if (timestamp) {
-      parts.push(`[${timestamp}]`);
-    }
-    parts.push(status);
-    parts.push(`reason=${reason}`);
-    parts.push(candidate);
-    parts.push(dryRun);
-    const backupId = entry && entry.backup && entry.backup.recordId ? entry.backup.recordId : null;
-    if (backupId) {
-      parts.push(`id=${backupId}`);
-    }
-    if (entry && entry.ui && entry.ui.reason) {
-      parts.push(`ui=${entry.ui.reason}`);
-    }
-    if (entry && entry.message) {
-      parts.push(entry.message);
-    }
-    block.textContent = parts.join(' · ');
+    block.textContent = formatBackupDeleteHistory(entry || {});
     backupDeleteHistory.prepend(block);
     while (backupDeleteHistory.childElementCount > 6) {
       backupDeleteHistory.removeChild(backupDeleteHistory.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Vrati toast spravu podla vysledku backup-delete. */
+  function getBackupDeleteToastMessage(summary) {
+    if (!summary) {
+      return 'Backup & delete failed.';
+    }
+    if (summary.ok) {
+      if (summary.didDelete) {
+        return 'Backup & delete: done.';
+      }
+      if (summary.reasonCode === 'dry_run' || summary.dryRun) {
+        return 'Dry run—backup only.';
+      }
+      if (summary.reasonCode === 'blocked_by_list_only') {
+        return 'Read-only mode: nothing deleted.';
+      }
+      return summary.message || 'Backup-delete completed.';
+    }
+    switch (summary.reasonCode) {
+      case 'blocked_by_list_only':
+        return 'Read-only mode: nothing deleted.';
+      case 'dry_run':
+        return 'Dry run—backup only.';
+      case 'not_candidate':
+        return 'Chat skipped—heuristics blocked deletion.';
+      case 'not_chatgpt':
+        return 'Active tab is not chatgpt.com.';
+      case 'no_active_tab':
+        return 'No active tab available.';
+      case 'menu_not_found':
+        return 'Menu button not found.';
+      case 'delete_item_not_found':
+        return 'Delete item not found.';
+      case 'confirm_dialog_not_found':
+        return 'Confirm button not found.';
+      case 'ui_click_failed':
+        return 'Delete clicks failed.';
+      default:
+        return summary.message || 'Backup & delete failed.';
     }
   }
 
@@ -920,14 +969,12 @@
       const originalLabel = backupDeleteButton.textContent;
       backupDeleteButton.disabled = true;
       backupDeleteButton.textContent = 'Working…';
-      let settingsSnapshot = null;
+
       let confirmRequired = true;
       try {
         const { settings } = await SettingsStore.load();
-        settingsSnapshot = settings;
         confirmRequired = Boolean(settings.CONFIRM_BEFORE_DELETE);
       } catch (error) {
-        confirmRequired = true;
         await Logger.log('warn', 'debug', 'Backup-delete confirm guard unavailable', {
           message: error && error.message
         });
@@ -936,9 +983,9 @@
       if (confirmRequired) {
         const confirmed = window.confirm('Naozaj: zálohovať a zmazať aktívny chat?');
         if (!confirmed) {
+          showDebugToast('Cancelled');
           backupDeleteButton.disabled = false;
           backupDeleteButton.textContent = originalLabel;
-          showDebugToast('Backup & Delete cancelled.');
           return;
         }
       }
@@ -947,43 +994,22 @@
         const response = await requestBackupDeleteActive();
         const entry = {
           ...response,
-          candidate: Boolean(response && response.candidate)
+          candidate: typeof response?.candidate === 'boolean' ? response.candidate : null
         };
         appendBackupDeleteHistoryEntry(entry);
-        let toastMessage = '';
-        if (response && response.ok) {
-          if (response.reasonCode === 'ui_delete_ok') {
-            toastMessage = 'Chat deleted po úspešnej zálohe.';
-          } else if (response.reasonCode === 'dry_run') {
-            toastMessage = 'Dry run: mazanie preskočené.';
-          } else if (response.reasonCode === 'blocked_by_list_only') {
-            toastMessage = 'LIST_ONLY guard zabránil mazaniu.';
-          } else {
-            toastMessage = response.message || `Akcia dokončená (${response.reasonCode}).`;
-          }
-          await Logger.log('info', 'debug', 'Backup-delete summary (debug page)', {
-            ok: true,
-            reasonCode: response.reasonCode,
-            dryRun: Boolean(response && response.dryRun),
-            didDelete: Boolean(response && response.didDelete),
-            candidate: Boolean(response && response.candidate)
-          });
-        } else {
-          const message = extractErrorMessage(response && (response.message || response.error), 'Akcia zlyhala.');
-          toastMessage = message;
-          await Logger.log('warn', 'debug', 'Backup-delete blocked (debug page)', {
-            ok: false,
-            reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
-            message,
-            candidate: Boolean(response && response.candidate)
-          });
-        }
+        const toastMessage = getBackupDeleteToastMessage(response);
         if (toastMessage) {
           showDebugToast(toastMessage);
         }
+        await Logger.log(response?.ok ? 'info' : 'warn', 'debug', 'Backup-delete summary (debug page)', {
+          reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
+          didDelete: Boolean(response && response.didDelete),
+          dryRun: Boolean(response && response.dryRun),
+          candidate: Boolean(response && response.candidate)
+        });
       } catch (error) {
-        const message = extractErrorMessage(error);
-        appendBackupDeleteHistoryEntry({ ok: false, reasonCode: 'error', message, candidate: null, dryRun: false });
+        const message = extractErrorMessage(error, 'Runtime error');
+        appendBackupDeleteHistoryEntry({ ok: false, reasonCode: 'runtime_error', message, dryRun: false, candidate: null });
         showDebugToast(message);
         await Logger.log('error', 'debug', 'Backup-delete threw error (debug page)', {
           message
@@ -991,9 +1017,6 @@
       } finally {
         backupDeleteButton.disabled = false;
         backupDeleteButton.textContent = originalLabel;
-        if (settingsSnapshot && settingsSnapshot.CONFIRM_BEFORE_DELETE === false) {
-          // Slovensky komentar: Ziadna dalsia akcia.
-        }
       }
     });
   }

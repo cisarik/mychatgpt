@@ -234,6 +234,28 @@ function withManualTimeout(promise, ms) {
   return Promise.race([guarded, timeoutPromise]);
 }
 
+/* Slovensky komentar: Bezpecne vrati pole elementov pre dany selektor (ignoruje syntakticke chyby). */
+function safeQueryAll(selector) {
+  if (typeof selector !== 'string' || !selector) {
+    return [];
+  }
+  try {
+    return Array.from(document.querySelectorAll(selector));
+  } catch (_error) {
+    return [];
+  }
+}
+
+/* Slovensky komentar: Normalizuje textovy obsah uzla na porovnanie. */
+function normalizeNodeText(node) {
+  if (!node) {
+    return '';
+  }
+  const inner = typeof node.innerText === 'string' ? node.innerText : null;
+  const fallback = typeof node.textContent === 'string' ? node.textContent : '';
+  return (inner && inner.trim() ? inner : fallback).trim().toLowerCase();
+}
+
 /* Slovensky komentar: Nacita nastavenia a vykona automaticke opravy. */
 async function loadSettings() {
   const stored = await chrome.storage.local.get({ [SETTINGS_STORAGE_KEY]: null });
@@ -325,6 +347,8 @@ globalTarget.normalizeSafeUrlPatterns = normalizeSafeUrlPatterns;
 globalTarget.shouldCooldown = shouldCooldown;
 globalTarget.isNoReceiverError = isNoReceiverError;
 globalTarget.withManualTimeout = withManualTimeout;
+globalTarget.safeQueryAll = safeQueryAll;
+globalTarget.normalizeNodeText = normalizeNodeText;
 globalTarget.COOLDOWN_STORAGE_KEY = COOLDOWN_STORAGE_KEY;
 globalTarget.SAFE_URL_DEFAULTS = SAFE_URL_DEFAULTS;
 globalTarget.SETTINGS_DEFAULTS = SETTINGS_DEFAULTS;
