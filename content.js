@@ -1,3 +1,24 @@
+console.info('[MyChatGPT] content.js loaded');
+
+/* Slovensky komentar: Sleduje udalosti na jemne potvrdenie aktivity skriptu. */
+const announcementState = { pageShow: false, visibility: false };
+
+window.addEventListener('pageshow', () => {
+  if (announcementState.pageShow) {
+    return;
+  }
+  announcementState.pageShow = true;
+  console.info('[MyChatGPT] content.js active (pageshow)');
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || announcementState.visibility) {
+    return;
+  }
+  announcementState.visibility = true;
+  console.info('[MyChatGPT] content.js active (visibilitychange)');
+});
+
 /* Slovensky komentar: Ziska ID konverzacie z URL, ak existuje. */
 function extractConvoId(url) {
   if (!url) {

@@ -4,6 +4,7 @@
   const autoscanButton = document.getElementById('autoscan-feed-btn');
   const scanResultContainer = document.getElementById('scan-result');
   const connectivityButton = document.getElementById('connectivity-btn');
+  const checkCsButton = document.getElementById('check-cs-btn');
   const connectivityContainer = document.getElementById('connectivity-results');
   const probeButton = document.getElementById('probe-btn');
   const metadataContainer = document.getElementById('metadata-results');
@@ -203,6 +204,44 @@
     }
   });
 
+  if (checkCsButton) {
+    checkCsButton.addEventListener('click', async () => {
+      const originalText = checkCsButton.textContent;
+      checkCsButton.disabled = true;
+      checkCsButton.textContent = 'Overujem…';
+      try {
+        const response = await requestConnectivityTest();
+        if (response && response.ok) {
+          checkCsButton.textContent = 'Content script aktívny';
+          appendConnectivityRecord(`Check CS OK: ${JSON.stringify(response.payload || {})}`);
+          await Logger.log('info', 'debug', 'Content script check succeeded', {
+            reasonCode: response.reasonCode || 'ping_ok'
+          });
+        } else {
+          const errorMessage = (response && response.error) || 'Žiadna odozva';
+          checkCsButton.textContent = 'Content script chýba';
+          appendConnectivityRecord(`Check CS chyba: ${errorMessage}`);
+          await Logger.log('warn', 'debug', 'Content script check warning', {
+            reasonCode: response && response.reasonCode ? response.reasonCode : 'no_response',
+            message: errorMessage
+          });
+        }
+      } catch (error) {
+        checkCsButton.textContent = 'Content script chýba';
+        const message = error && error.message ? error.message : 'Neznáma chyba';
+        appendConnectivityRecord(`Check CS chyba: ${message}`);
+        await Logger.log('error', 'debug', 'Content script check threw error', {
+          message
+        });
+      } finally {
+        setTimeout(() => {
+          checkCsButton.textContent = originalText;
+          checkCsButton.disabled = false;
+        }, 1400);
+      }
+    });
+  }
+
   /* Slovensky komentar: Vytvori zaznam o metadata probe v historii. */
   function appendProbeRecord(text) {
     if (!metadataContainer) {
@@ -311,8 +350,10 @@
           const reasons = decision.reasonCodes && decision.reasonCodes.length ? decision.reasonCodes.join(', ') : 'none';
           const countsText = JSON.stringify(decision.snapshot && decision.snapshot.counts ? decision.snapshot.counts : {});
           const candidateText = decision.decided ? `candidate=${decision.isCandidate}` : 'candidate=undecided';
-          const cooldown = response.cooldown || { wouldWait: false, remainingMs: 0 };
-          const cooldownText = `autoCooldown=${cooldown.wouldWait ? `wait ${cooldown.remainingMs}ms` : 'ready'}`;
+          const cooldown = response.cooldown || { used: false, remainingMs: 0 };
+          const cooldownText = cooldown.used
+            ? `cooldown=wait ${cooldown.remainingMs}ms`
+            : 'cooldown=unused';
           appendHeuristicsRecord(`[${timestamp}] ${candidateText}; reasons=[${reasons}]; counts=${countsText}; ${cooldownText}`);
           await Logger.log('info', 'debug', 'Heuristics evaluation invoked manually', {
             reasonCode: response.reasonCode,

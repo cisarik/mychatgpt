@@ -153,91 +153,97 @@ function getActiveTab() {
   });
 }
 
+/* Slovensky komentar: Posle spravu a pri chybe reinjektuje obsahovy skript a zopakuje pokus. */
+async function sendWithEnsureCS(tabId, message, { timeoutMs = 1500 } = {}) {
+  const attemptSend = () =>
+    new Promise((resolve, reject) => {
+      try {
+        chrome.tabs.sendMessage(tabId, message, { timeout: timeoutMs }, (response) => {
+          const runtimeError = chrome.runtime.lastError;
+          if (runtimeError) {
+            reject(new Error(runtimeError.message || 'sendMessage failed'));
+            return;
+          }
+          resolve(response);
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+
+  try {
+    return await attemptSend();
+  } catch (error) {
+    const messageText = error && error.message ? error.message : String(error);
+    if (!isNoReceiverError(messageText)) {
+      throw error;
+    }
+  }
+
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+    console.debug('[MyChatGPT]', {
+      scope: 'content',
+      reasonCode: 'cs_injected_retry',
+      meta: { tabId }
+    });
+  } catch (injectError) {
+    const wrapped = new Error('no_response');
+    wrapped.cause = injectError;
+    throw wrapped;
+  }
+
+  try {
+    return await attemptSend();
+  } catch (retryError) {
+    const wrapped = new Error('no_response');
+    wrapped.cause = retryError;
+    throw wrapped;
+  }
+}
+
 /* Slovensky komentar: Posle debug log na aktivnu kartu, ak ide o chatgpt.com. */
 async function forwardDebugLogToActiveTab(payload) {
   const activeTab = await getActiveTab();
   if (!activeTab || !activeTab.id || !activeTab.url || !activeTab.url.startsWith('https://chatgpt.com/')) {
     return { forwarded: false, reason: 'no_active_chatgpt' };
   }
-  return new Promise((resolve) => {
-    chrome.tabs.sendMessage(
-      activeTab.id,
-      { type: 'debug_console_log', payload },
-      () => {
-        const runtimeError = chrome.runtime.lastError;
-        if (runtimeError) {
-          resolve({ forwarded: false, reason: runtimeError.message || 'send_failed' });
-          return;
-        }
-        resolve({ forwarded: true, reason: null });
-      }
-    );
-  });
+  try {
+    await sendWithEnsureCS(activeTab.id, { type: 'debug_console_log', payload });
+    return { forwarded: true, reason: null };
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    return { forwarded: false, reason: message };
+  }
 }
 
 /* Slovensky komentar: Odošle ping na obsahový skript a vrati odpoved. */
-function sendPingRequest(tabId, traceId) {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(
-      tabId,
-      {
-        type: 'ping',
-        traceId,
-        want: { url: true, title: true, markers: true }
-      },
-      (response) => {
-        const runtimeError = chrome.runtime.lastError;
-        if (runtimeError) {
-          reject(new Error(runtimeError.message || 'sendMessage failed'));
-          return;
-        }
-        resolve(response || null);
-      }
-    );
+async function sendPingRequest(tabId, traceId) {
+  const response = await sendWithEnsureCS(tabId, {
+    type: 'ping',
+    traceId,
+    want: { url: true, title: true, markers: true }
   });
+  return response || null;
 }
 
 /* Slovensky komentar: Odošle poziadavku na citanie metadata bez zasahu do DOM. */
-function sendProbeRequest(tabId, traceId) {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(
-      tabId,
-      {
-        type: 'probe_metadata',
-        traceId,
-        want: { url: true, title: true, ids: true, counts: true }
-      },
-      (response) => {
-        const runtimeError = chrome.runtime.lastError;
-        if (runtimeError) {
-          reject(new Error(runtimeError.message || 'sendMessage failed'));
-          return;
-        }
-        resolve(response || null);
-      }
-    );
+async function sendProbeRequest(tabId, traceId) {
+  const response = await sendWithEnsureCS(tabId, {
+    type: 'probe_metadata',
+    traceId,
+    want: { url: true, title: true, ids: true, counts: true }
   });
+  return response || null;
 }
 
 /* Slovensky komentar: Odošle poziadavku na zachytenie obsahu bez modifikacie. */
-function sendCaptureRequest(tabId, traceId) {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(
-      tabId,
-      {
-        type: 'capture_preview',
-        traceId
-      },
-      (response) => {
-        const runtimeError = chrome.runtime.lastError;
-        if (runtimeError) {
-          reject(new Error(runtimeError.message || 'sendMessage failed'));
-          return;
-        }
-        resolve(response || null);
-      }
-    );
+async function sendCaptureRequest(tabId, traceId) {
+  const response = await sendWithEnsureCS(tabId, {
+    type: 'capture_preview',
+    traceId
   });
+  return response || null;
 }
 
 /* Slovensky komentar: Vyhodnoti kandidat status z metadata probe. */
@@ -408,20 +414,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
       };
       let logReasonCode = 'no_probe';
-      let cooldownReport = { lastScanAt: null, minutes: null, wouldWait: false, remainingMs: 0 };
+      let cooldownReport = { used: false, remainingMs: 0, minutes: null, lastScanAt: null, wouldWait: false };
       let payload = null;
       let errorMessage = null;
 
       try {
         const settings = await getSettingsFresh();
-        const { lastScanAt } = await readCooldownSnapshot();
-        const cooldownMinutes = settings.SCAN_COOLDOWN_MIN;
-        const cooldownState = shouldCooldown(lastScanAt, cooldownMinutes);
         cooldownReport = {
-          lastScanAt,
-          minutes: cooldownMinutes,
-          wouldWait: cooldownState.cooldown,
-          remainingMs: cooldownState.remainingMs
+          used: false,
+          remainingMs: 0,
+          minutes: Number.isFinite(settings.SCAN_COOLDOWN_MIN)
+            ? settings.SCAN_COOLDOWN_MIN
+            : null,
+          lastScanAt: null,
+          wouldWait: false
         };
 
         const activeTab = await getActiveTab();
@@ -520,8 +526,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           error: fallbackMessage
         };
       } finally {
-        const timestamp = Date.now();
-        await writeCooldownTimestamp(timestamp);
         if (!payload) {
           payload = { ok: false, reasonCode: 'no_probe', decision, cooldown: cooldownReport };
         } else if (!payload.cooldown) {

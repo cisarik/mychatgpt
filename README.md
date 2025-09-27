@@ -79,6 +79,7 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 1. Navigate to [https://chatgpt.com](https://chatgpt.com) in the active browser tab.
 2. Open the extension’s **Debug** page and click **Connectivity test (chatgpt.com)**.
 3. Review the inline history for the most recent responses and cross-check the `scan` scope logs for the summarized ping result.
+4. Use the nearby **Check content script** button for a quick status pulse after SPA navigations—the label flips to “Content script aktívny” when the retry ping succeeds.
 
 ## Metadata probe
 1. Open a conversation on [https://chatgpt.com](https://chatgpt.com) and launch the **Debug** page.
@@ -95,7 +96,12 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 - The background worker exposes **Evaluate heuristics (active tab)** on the debug page to score the active ChatGPT conversation without mutating the DOM or touching IndexedDB.
 - SAFE URL patterns always bypass the heuristic, while candidates require `counts.total ≤ MAX_MESSAGES` and, when available, `counts.user ≤ USER_MESSAGES_MAX`. Unknown totals defer the decision.
 - Reason codes reported to logs/debug history include: `candidate_ok`, `over_max` (including user limit breaches), `heuristics_safe_url`, `counts_unknown`, and `no_probe` when the metadata probe is unavailable.
-- Every evaluation updates `cooldown_v1.lastScanAt`. Auto-scans will respect `SCAN_COOLDOWN_MIN` minutes before re-running, while the manual debug button surfaces whether the cooldown would still delay an automated pass.
+- Auto-scans update `cooldown_v1.lastScanAt` and respect `SCAN_COOLDOWN_MIN` before re-running. Manual evaluations always return `cooldown.used=false`, signalling that cooldown gating is ignored in the debug workflow.
+
+## Troubleshooting
+- When a ChatGPT tab briefly lacks the content script (e.g., after a Next.js route swap), the background worker automatically re-injects `content.js` and retries once. The service worker console logs a single `{ scope: 'content', reasonCode: 'cs_injected_retry' }` line the first time recovery runs.
+- Open DevTools on chatgpt.com and look for `[MyChatGPT] content.js loaded` (plus occasional “content.js active” notices) to confirm the script is live without sending messages.
+- Manual **Evaluate heuristics** calls skip cooldown checks entirely; only auto-scan jobs wait on `cooldown_v1`. The debug panel now renders `cooldown=unused` for those manual runs.
 
 ## Backup write V1
 - The debug page now includes **Backup now (manual)**, which captures the active ChatGPT tab via the existing read-only content script and queues a single write into the `backups` IndexedDB store.

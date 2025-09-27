@@ -189,6 +189,25 @@ function shouldCooldown(lastMs, minutes) {
   return { cooldown: true, remainingMs };
 }
 
+/* Slovensky komentar: Rozpozna chybove hlasky pre chybanuci obsahovy skript. */
+function isNoReceiverError(errorMessage) {
+  if (!errorMessage) {
+    return false;
+  }
+  const messageText = typeof errorMessage === 'string'
+    ? errorMessage
+    : errorMessage && errorMessage.message
+    ? errorMessage.message
+    : String(errorMessage);
+  const lower = messageText.toLowerCase();
+  return [
+    'receiving end does not exist',
+    'the message port closed',
+    'a listener indicated an asynchronous response',
+    'no receiving end'
+  ].some((fragment) => lower.includes(fragment));
+}
+
 /* Slovensky komentar: Nacita nastavenia a vykona automaticke opravy. */
 async function loadSettings() {
   const stored = await chrome.storage.local.get({ [SETTINGS_STORAGE_KEY]: null });
