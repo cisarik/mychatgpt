@@ -128,8 +128,8 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 ## Backup View page
 - Click any question in **Searches** to open `pages/backup_view.html?id=<uuid>` in a regular browser tab. The page mirrors the dark popup styling and focuses the stored prompt as a tab-like primary button.
 - The header button opens a Google query for the captured question. The metadata bar highlights the timestamp, conversation ID, and a truncation badge when the answer exceeded 250 KB.
-- “Render answer (safe)” injects the HTML into a sandboxed iframe with all anchors converted to tab-like buttons that always launch in a new tab (`target="_blank"`, `rel="noopener"`). No scripts are executed inside the preview.
-- Missing or invalid IDs fall back to a friendly error card that links back to the popup Searches tab via `chrome.runtime.getURL("popup/popup.html#searches")`.
+- Saved answers render immediately inside the page (no iframe). A minimal allowlist sanitizer strips scripts and event handlers, and every anchor is restyled as a tab-like button that opens in a hardened new tab (`target="_blank"`, `rel="noopener"`).
+- Missing or invalid IDs surface inline error messages within the answer card.
 
 ## Evaluate & Backup (if candidate)
 - The Debug toolbar now offers **Evaluate & Backup (if candidate)**. It runs the existing heuristics on the active ChatGPT tab, ignoring cooldowns, and immediately triggers the manual backup flow when the conversation qualifies.

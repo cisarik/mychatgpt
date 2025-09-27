@@ -1,103 +1,115 @@
-/* Slovensky komentar: Stránka detailu zálohy načíta záznam podľa ID a umožní bezpečné zobrazenie odpovede. */
-(async function () {
-  const params = new URLSearchParams(window.location.search || '');
-  const backupId = params.get('id');
-  const statusCard = document.getElementById('status-card');
-  const statusTitle = document.getElementById('status-title');
-  const statusText = document.getElementById('status-text');
-  const backLink = document.getElementById('back-link');
-  const contentSection = document.getElementById('backup-content');
-  const queryButton = document.getElementById('query-button');
-  const metaBar = document.getElementById('meta-bar');
-  const questionTextEl = document.getElementById('question-text');
-  const renderButton = document.getElementById('render-answer-btn');
-  const answerContainer = document.getElementById('answer-container');
-  const answerHint = document.getElementById('answer-hint');
+/* Slovensky komentar: Detail zalohy zobrazi ulozenu odpoved priamo na stranke so spevnenymi odkazmi. */
 
-  /* Slovensky komentar: Preklik späť na zoznam záloh. */
-  if (backLink && typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.getURL === 'function') {
-    backLink.href = chrome.runtime.getURL('popup/popup.html#searches');
-  }
+const ALLOWED = {
+  TAGS: new Set([
+    'p',
+    'div',
+    'span',
+    'a',
+    'ul',
+    'ol',
+    'li',
+    'strong',
+    'em',
+    'code',
+    'pre',
+    'blockquote',
+    'img',
+    'br',
+    'hr',
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'table',
+    'thead',
+    'tbody',
+    'tr',
+    'th',
+    'td'
+  ]),
+  ATTR: new Set(['href', 'src', 'alt', 'title'])
+};
 
-  /* Slovensky komentar: Zobrazí chybový stav a skryje obsah. */
-  function showStatus(title, message) {
-    if (statusTitle) {
-      statusTitle.textContent = title;
-    }
-    if (statusText) {
-      statusText.textContent = message;
-    }
-    if (statusCard) {
-      statusCard.hidden = false;
-    }
-    if (contentSection) {
-      contentSection.hidden = true;
-    }
-  }
-
-  /* Slovensky komentar: Vytvorí pilulku pre meta lištu. */
-  function appendMetaPill(text, variant) {
-    if (!metaBar || !text) {
+/* Slovensky komentar: Sanitizuje HTML a odstrani nebezpecne prvky. */
+function sanitizeAndHarden(html) {
+  const doc = new DOMParser().parseFromString(html || '', 'text/html');
+  doc.querySelectorAll('script, style').forEach((node) => node.remove());
+  doc.querySelectorAll('*').forEach((el) => {
+    const tagName = el.tagName.toLowerCase();
+    if (!ALLOWED.TAGS.has(tagName)) {
+      const parent = el.parentNode;
+      if (!parent) {
+        el.remove();
+        return;
+      }
+      while (el.firstChild) {
+        parent.insertBefore(el.firstChild, el);
+      }
+      el.remove();
       return;
     }
-    const pill = document.createElement('span');
-    pill.className = 'meta-pill';
-    if (variant) {
-      pill.classList.add(`meta-pill-${variant}`);
+    [...el.attributes].forEach((attr) => {
+      const name = attr.name.toLowerCase();
+      if (name.startsWith('on') || !ALLOWED.ATTR.has(name)) {
+        el.removeAttribute(attr.name);
+      }
+    });
+    if (tagName === 'a') {
+      const href = el.getAttribute('href') || '';
+      if (/^\s*javascript:/i.test(href) || /^\s*data:/i.test(href)) {
+        el.removeAttribute('href');
+      }
+      el.setAttribute('target', '_blank');
+      el.setAttribute('rel', 'noopener');
+      el.classList.add('tablike', 'answer-link');
+      el.setAttribute('role', 'button');
     }
-    pill.setAttribute('role', 'listitem');
-    pill.textContent = text;
-    metaBar.appendChild(pill);
-  }
+    if (tagName === 'img') {
+      const src = el.getAttribute('src') || '';
+      if (/^\s*(javascript:|data:)/i.test(src)) {
+        el.remove();
+      }
+    }
+  });
+  return doc.body.innerHTML;
+}
 
-  /* Slovensky komentar: Formátovanie časovej známky. */
-  function formatTimestamp(timestamp) {
-    if (!Number.isFinite(timestamp)) {
-      return 'Neznámy čas';
-    }
-    try {
-      return new Date(timestamp).toLocaleString();
-    } catch (_error) {
-      return 'Neznámy čas';
-    }
+/* Slovensky komentar: Vytvori badge pre meta sekciu. */
+function appendMetaPill(container, text, variant) {
+  if (!container || !text) {
+    return;
   }
+  const pill = document.createElement('span');
+  pill.className = 'meta-pill';
+  if (variant) {
+    pill.classList.add(`meta-pill-${variant}`);
+  }
+  pill.setAttribute('role', 'listitem');
+  pill.textContent = text;
+  container.appendChild(pill);
+}
 
-  /* Slovensky komentar: Dekoruje HTML odpovede pre iframe. */
-  function decorateAnswerHtml(rawHtml) {
-    if (typeof rawHtml !== 'string' || !rawHtml.trim()) {
-      return '';
-    }
-    try {
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(rawHtml, 'text/html');
-      const anchors = doc.querySelectorAll('a');
-      anchors.forEach((anchor) => {
-        anchor.setAttribute('target', '_blank');
-        anchor.setAttribute('rel', 'noopener');
-        const existingClass = anchor.getAttribute('class');
-        if (existingClass && existingClass.includes('tablike')) {
-          anchor.setAttribute('class', existingClass);
-        } else if (existingClass) {
-          anchor.setAttribute('class', `${existingClass} tablike`.trim());
-        } else {
-          anchor.setAttribute('class', 'tablike');
-        }
-      });
-      return doc.body.innerHTML;
-    } catch (_error) {
-      return rawHtml;
-    }
+/* Slovensky komentar: Nastavi text v odpovedi pre pripad chyby. */
+function showAnswerMessage(target, message) {
+  if (!target) {
+    return;
   }
+  target.textContent = message;
+}
 
-  /* Slovensky komentar: Poskladá srcdoc s bezpečnými štýlmi. */
-  function buildAnswerSrcdoc(answerHtml) {
-    const styledAnswer = decorateAnswerHtml(answerHtml || '');
-    const tablikeStyles = `:root {\n  color-scheme: dark;\n  --bg: #0b1623;\n  --text: #f5f7fb;\n  --muted: #a8b5cc;\n  --accent: #10a37f;\n  --accent-strong: #15c296;\n  --border: rgba(255, 255, 255, 0.16);\n}\nbody {\n  margin: 0;\n  padding: 18px;\n  background: var(--bg);\n  color: var(--text);\n  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;\n  line-height: 1.6;\n}\np {\n  margin: 0 0 12px;\n}\na,\na.tablike {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 6px;\n  padding: 6px 14px;\n  border-radius: 10px;\n  border: 1px solid var(--border);\n  background: linear-gradient(140deg, rgba(16, 163, 127, 0.16), rgba(21, 194, 150, 0.08));\n  color: var(--accent-strong);\n  font-weight: 600;\n  text-decoration: none;\n  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;\n}\na:hover, a:focus, a.tablike:hover, a.tablike:focus {\n  color: var(--accent);\n  border-color: var(--accent);\n  background: linear-gradient(140deg, rgba(21, 194, 150, 0.24), rgba(16, 163, 127, 0.12));\n}\n`; // Slovensky komentar: Zdieľané tab-like štýly pre odkazy.
-    return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8" /><base target="_blank" rel="noopener" /><style>${tablikeStyles}</style></head><body>${styledAnswer}</body></html>`;
-  }
+(async function initBackupView() {
+  const params = new URLSearchParams(window.location.search || '');
+  const backupId = params.get('id');
+  const queryButton = document.getElementById('queryLaunch');
+  const metaBar = document.getElementById('meta');
+  const answerEl = document.getElementById('answer');
 
   if (!backupId) {
-    showStatus('Záloha sa nenašla', 'Parameter „id“ v URL chýba.');
+    showAnswerMessage(answerEl, 'Záznam sa nenašiel.');
+    await Logger.log('warn', 'ui', 'Backup view missing id parameter');
     return;
   }
 
@@ -106,31 +118,32 @@
     record = await Database.getBackupById(backupId);
   } catch (error) {
     const message = error && error.message ? error.message : 'Načítanie zlyhalo.';
-    await Logger.log('warn', 'db', 'Backup view load failed', { id: backupId, message });
-    showStatus('Záloha sa nenačítala', message);
+    showAnswerMessage(answerEl, message);
+    await Logger.log('error', 'db', 'Backup view load failed', { id: backupId, message });
     return;
   }
 
   if (!record) {
+    showAnswerMessage(answerEl, 'Záloha neexistuje alebo bola odstránená.');
     await Logger.log('info', 'db', 'Backup view missing record', { id: backupId });
-    showStatus('Záloha sa nenašla', 'Záznam neexistuje alebo bol odstránený.');
     return;
   }
 
-  if (statusCard) {
-    statusCard.hidden = true;
-  }
-  if (contentSection) {
-    contentSection.hidden = false;
-  }
-
-  const questionText = record.questionText && typeof record.questionText === 'string' && record.questionText.trim()
-    ? record.questionText.trim()
-    : '(untitled)';
+  const questionRaw = typeof record.questionText === 'string' ? record.questionText.trim() : '';
+  const questionText = questionRaw || '(untitled)';
+  const fallbackDate = () => {
+    try {
+      return new Date(record.timestamp).toLocaleString();
+    } catch (_error) {
+      return 'Neznámy čas';
+    }
+  };
+  const formattedTimestamp = typeof formatDate === 'function' ? formatDate(record.timestamp) : fallbackDate();
 
   if (queryButton) {
     queryButton.textContent = questionText;
-    if (record.questionText && record.questionText.trim()) {
+    const hasQuery = Boolean(questionRaw);
+    if (hasQuery) {
       queryButton.removeAttribute('aria-disabled');
       queryButton.classList.remove('disabled');
       queryButton.addEventListener('click', () => {
@@ -145,48 +158,24 @@
 
   if (metaBar) {
     metaBar.innerHTML = '';
-    appendMetaPill(formatTimestamp(record.timestamp), 'strong');
+    appendMetaPill(metaBar, formattedTimestamp, 'strong');
     if (record.convoId) {
-      appendMetaPill(record.convoId);
+      appendMetaPill(metaBar, record.convoId);
     }
     if (record.answerTruncated) {
-      appendMetaPill('Odpoveď skrátená na 250 KB', 'warn');
+      appendMetaPill(metaBar, '(truncated)', 'warn');
     }
   }
 
-  if (questionTextEl) {
-    questionTextEl.textContent = record.questionText && record.questionText.trim()
-      ? record.questionText.trim()
-      : 'Otázka nebola zachytená.';
-  }
-
-  if (renderButton) {
-    if (record.answerHTML) {
-      renderButton.removeAttribute('aria-disabled');
-      renderButton.classList.remove('disabled');
-      renderButton.addEventListener('click', () => {
-        if (!answerContainer) {
-          return;
-        }
-        answerContainer.innerHTML = '';
-        const frame = document.createElement('iframe');
-        frame.className = 'answer-frame';
-        frame.setAttribute('sandbox', '');
-        frame.setAttribute('referrerpolicy', 'no-referrer');
-        frame.srcdoc = buildAnswerSrcdoc(record.answerHTML);
-        answerContainer.appendChild(frame);
-      });
+  if (record.answerHTML) {
+    const hardened = sanitizeAndHarden(record.answerHTML);
+    if (hardened && answerEl) {
+      answerEl.innerHTML = hardened;
     } else {
-      renderButton.textContent = 'Bez odpovede na renderovanie';
-      renderButton.setAttribute('aria-disabled', 'true');
-      renderButton.classList.add('disabled');
+      showAnswerMessage(answerEl, 'Odpoveď neobsahuje žiadny obsah.');
     }
-  }
-
-  if (answerHint) {
-    answerHint.textContent = record.answerTruncated
-      ? 'Odpoveď bola skrátená na 250 KB a vykresľuje sa v sandboxe.'
-      : 'Odpoveď sa vykreslí v sandboxovom iframe.';
+  } else {
+    showAnswerMessage(answerEl, 'Žiadna odpoveď na zobrazenie.');
   }
 
   await Logger.log('info', 'db', 'Backup view opened', {

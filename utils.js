@@ -174,6 +174,30 @@ function sanitizeSettings(rawSettings) {
   return { settings: result, healedFields: healedList };
 }
 
+/* Slovensky komentar: Naformatuje casovu znacku pre zobrazovanie meta udajov. */
+function formatDate(timestamp) {
+  const numericTs = typeof timestamp === 'string' ? Number(timestamp) : timestamp;
+  if (!Number.isFinite(numericTs)) {
+    return 'Neznámy čas';
+  }
+  try {
+    const formatter = new Intl.DateTimeFormat(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+    return formatter.format(new Date(numericTs));
+  } catch (_error) {
+    try {
+      return new Date(numericTs).toLocaleString();
+    } catch (__error) {
+      return 'Neznámy čas';
+    }
+  }
+}
+
 /* Slovensky komentar: Vypocita, ci este plati cooldown interval. */
 function shouldCooldown(lastMs, minutes) {
   if (!Number.isFinite(lastMs) || !Number.isFinite(minutes) || minutes <= 0) {
@@ -304,3 +328,4 @@ globalTarget.withManualTimeout = withManualTimeout;
 globalTarget.COOLDOWN_STORAGE_KEY = COOLDOWN_STORAGE_KEY;
 globalTarget.SAFE_URL_DEFAULTS = SAFE_URL_DEFAULTS;
 globalTarget.SETTINGS_DEFAULTS = SETTINGS_DEFAULTS;
+globalTarget.formatDate = formatDate;
