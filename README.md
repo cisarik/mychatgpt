@@ -103,7 +103,7 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 
 ## Searches panel
 - The list now uses the first captured user message as the primary, clickable title (falling back to **“(untitled)”**) that opens `pages/backup_view.html?id=<uuid>` in a new tab.
-- Secondary badges highlight the localized timestamp, the `convoId`, and a `(truncated)` badge when the stored answer exceeded the 250 KB cap.
+- The metadata line prints the localized timestamp, conversation ID (or `no-convo`), and a `(truncated)` marker when applicable using the `•` separators shared with the detail view.
 - The “Počet záloh v úložisku” counter reads straight from IndexedDB, and the page listens for background `backups_updated/searches_reload` broadcasts to refresh without a manual reload.
 
 ## Heuristics V1 & Cooldown
@@ -123,12 +123,12 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 - When `CAPTURE_ONLY_CANDIDATES` is enabled (default), manual backups reuse Heuristics V1 to require short conversations; disable the toggle in Settings to allow any chat.
 - `DRY_RUN=true` still performs the capture but skips persistence, surfaces a “Dry run: not persisted” toast, and keeps Searches unchanged.
 - Captured answers are truncated to 250 KB (UTF-8) when necessary and flagged with `answerTruncated=true` so UI cards and logs can call out the reduction.
-- The Searches panel refreshes automatically after writes, rendering question text inline and exposing a sandboxed “Render answer (safe)” iframe to preview HTML without executing scripts.
+- The Searches panel refreshes automatically after writes, rendering question text inline and linking directly to the Backup View page for full, inline HTML display.
 
 ## Backup View page
 - Click any question in **Searches** to open `pages/backup_view.html?id=<uuid>` in a regular browser tab. The page mirrors the dark popup styling and focuses the stored prompt as a tab-like primary button.
-- The header button opens a Google query for the captured question. The metadata bar highlights the timestamp, conversation ID, and a truncation badge when the answer exceeded 250 KB.
-- Saved answers render immediately inside the page (no iframe). A minimal allowlist sanitizer strips scripts and event handlers, and every anchor is restyled as a tab-like button that opens in a hardened new tab (`target="_blank"`, `rel="noopener"`).
+- The header button opens a Google query for the captured question. The metadata text prints the timestamp, conversation ID (or `no-convo`), and the optional `(truncated)` suffix with `•` separators.
+- Saved answers render immediately inside the page (no iframe). Stored HTML is inserted directly; only anchor tags are restyled as tab-like buttons that open in a hardened new tab (`target="_blank"`, `rel="noopener"`).
 - Missing or invalid IDs surface inline error messages within the answer card.
 
 ## Evaluate & Backup (if candidate)

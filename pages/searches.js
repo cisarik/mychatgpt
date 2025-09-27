@@ -36,26 +36,6 @@
     return trimmed.length > 80 ? `${trimmed.slice(0, 77)}…` : trimmed;
   }
 
-  /* Slovensky komentar: Skratenie textu so stredovou elipsou. */
-  function truncate(text, limit = 120) {
-    if (typeof text !== 'string') {
-      return '';
-    }
-    const trimmed = text.trim();
-    if (!trimmed) {
-      return '';
-    }
-    if (trimmed.length <= limit) {
-      return trimmed;
-    }
-    const available = Math.max(limit - 1, 1);
-    const startLength = Math.ceil(available / 2);
-    const endLength = available - startLength;
-    const startPart = trimmed.slice(0, startLength);
-    const endPart = endLength > 0 ? trimmed.slice(-endLength) : '';
-    return `${startPart}…${endPart}`;
-  }
-
   /* Slovensky komentar: Vytvori riadok pre polozku sumarneho prehladu. */
   function buildBulkSummaryItem(entry) {
     if (!entry) {
@@ -197,13 +177,12 @@
     titleLine.className = 'backup-row-title';
     const rawQuestion = backup && typeof backup.questionText === 'string' ? backup.questionText.trim() : '';
     const primaryQuestion = rawQuestion ? rawQuestion : '(untitled)';
-    const displayQuestion = rawQuestion ? truncate(rawQuestion) : '(untitled)';
     const questionLink = document.createElement('a');
     questionLink.className = 'backup-link';
-    questionLink.textContent = displayQuestion;
+    questionLink.textContent = primaryQuestion;
     questionLink.title = primaryQuestion;
     if (backup && backup.id) {
-      const href = chrome.runtime.getURL(`pages/backup_view.html?id=${encodeURIComponent(backup.id)}`);
+      const href = chrome.runtime.getURL('pages/backup_view.html?id=' + backup.id);
       questionLink.href = href;
       questionLink.target = '_blank';
       questionLink.rel = 'noopener';

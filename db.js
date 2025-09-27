@@ -249,4 +249,12 @@ const Database = {
   }
 };
 
+/* Slovensky komentar: Minimalne API pre jednoduche pouzitie v pohladoch. */
+const db = {
+  async getBackupById(id) {
+    return await Database.getBackupById(id);
+  }
+};
+
 dbGlobalTarget.Database = Database;
+dbGlobalTarget.db = db;
