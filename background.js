@@ -6,6 +6,39 @@ const COOLDOWN_KEY = typeof COOLDOWN_STORAGE_KEY !== 'undefined' ? COOLDOWN_STOR
 /* Slovensky komentar: Limit na velkost HTML odpovede pre zalohu. */
 const MAX_ANSWER_BYTES = 250 * 1024;
 
+/* Slovensky komentar: Predvolene nastavenia pre fallback pri nacitani. */
+const SAFE_URL_DEFAULT_CLONE = typeof SAFE_URL_DEFAULTS !== 'undefined' && Array.isArray(SAFE_URL_DEFAULTS)
+  ? () => Array.from(SAFE_URL_DEFAULTS)
+  : () => [];
+const SETTINGS_DEFAULT_SNAPSHOT = typeof SettingsStore === 'object' && typeof SettingsStore.defaults === 'function'
+  ? SettingsStore.defaults()
+  : { SAFE_URL_PATTERNS: SAFE_URL_DEFAULT_CLONE() };
+
+/* Slovensky komentar: Ziska cerstve nastavenia zo storage bez cache. */
+async function getSettingsFresh() {
+  const defaults = typeof SettingsStore === 'object' && typeof SettingsStore.defaults === 'function'
+    ? SettingsStore.defaults()
+    : { ...SETTINGS_DEFAULT_SNAPSHOT, SAFE_URL_PATTERNS: SAFE_URL_DEFAULT_CLONE() };
+  try {
+    const stored = await chrome.storage.local.get('settings_v1');
+    const raw = stored && typeof stored.settings_v1 === 'object' ? stored.settings_v1 : null;
+    if (!raw) {
+      return defaults;
+    }
+    const normalization = typeof normalizeSafeUrlPatterns === 'function'
+      ? normalizeSafeUrlPatterns(raw.SAFE_URL_PATTERNS)
+      : { patterns: Array.isArray(raw.SAFE_URL_PATTERNS) ? raw.SAFE_URL_PATTERNS : [], fixed: false };
+    return {
+      ...defaults,
+      ...raw,
+      SAFE_URL_PATTERNS: normalization.patterns
+    };
+  } catch (error) {
+    console.error('getSettingsFresh failed', error);
+    return defaults;
+  }
+}
+
 /* Slovensky komentar: Spusti zasadenie kategorii a zaznamena trvanie. */
 async function runCategorySeeding(trigger) {
   const startedAt = Date.now();
@@ -332,7 +365,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       let errorMessage = null;
 
       try {
-        const { settings } = await SettingsStore.load();
+        const settings = await getSettingsFresh();
         const { lastScanAt } = await readCooldownSnapshot();
         const cooldownMinutes = settings.SCAN_COOLDOWN_MIN;
         const cooldownState = shouldCooldown(lastScanAt, cooldownMinutes);
@@ -464,7 +497,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'scan_now') {
     (async () => {
       try {
-        const { settings } = await SettingsStore.load();
+        const settings = await getSettingsFresh();
         const result = {
           scanned: 0,
           matched: 0,
@@ -581,7 +614,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       try {
-        const { settings } = await SettingsStore.load();
+        const settings = await getSettingsFresh();
         if (urlMatchesAnyPattern(activeTab.url, settings.SAFE_URL_PATTERNS)) {
           reasonCode = 'probe_safe_url';
           const payload = {
@@ -649,7 +682,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       let reasonCode = 'capture_error';
       try {
-        const { settings } = await SettingsStore.load();
+        const settings = await getSettingsFresh();
         const activeTab = await getActiveTab();
         if (!activeTab || !activeTab.url || !activeTab.url.startsWith('https://chatgpt.com/')) {
           reasonCode = 'capture_no_match';
@@ -740,7 +773,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       let settings = null;
 
       try {
-        ({ settings } = await SettingsStore.load());
+        settings = await getSettingsFresh();
         const activeTab = await getActiveTab();
         if (!activeTab || !activeTab.url || !activeTab.url.startsWith('https://chatgpt.com/')) {
           reasonCode = 'backup_no_match';

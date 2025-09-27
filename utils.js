@@ -5,7 +5,12 @@ const SETTINGS_STORAGE_KEY = 'settings_v1';
 const COOLDOWN_STORAGE_KEY = 'cooldown_v1';
 
 /* Slovensky komentar: Predvolene nastavenia pre funkcionalitu extension. */
-const REQUIRED_SAFE_URL_PATTERN = 'https://chatgpt.com/c/*';
+const SAFE_URL_DEFAULTS = Object.freeze([
+  '/workspaces',
+  '/projects',
+  '/new-project',
+  'https://chatgpt.com/c/*'
+]);
 
 const DEFAULT_SETTINGS = Object.freeze({
   LIST_ONLY: true,
@@ -19,7 +24,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   MIN_AGE_MINUTES: 2,
   DELETE_LIMIT: 10,
   CAPTURE_ONLY_CANDIDATES: true,
-  SAFE_URL_PATTERNS: ['/workspaces', '/projects', '/new-project', REQUIRED_SAFE_URL_PATTERN]
+  SAFE_URL_PATTERNS: Array.from(SAFE_URL_DEFAULTS)
 });
 
 /* Slovensky komentar: Ziska referenciu na globalny objekt pre rozne prostredia. */
@@ -69,7 +74,8 @@ function cloneDefaultSettings() {
 
 /* Slovensky komentar: Sanitizuje ulozene nastavenia a vrati zoznam opravenych poli. */
 function normalizeSafeUrlPatterns(strOrArray) {
-  /* Slovensky komentar: Normalizuje SAFE_URL vzory (napr. '/workspaces', '/c/*', 'https://chatgpt.com/c/*'). */
+  /* Slovensky komentar: Normalizuje SAFE_URL vzory a vrati informaciu o opravach. */
+  const maxLength = 200;
   const rawItems = Array.isArray(strOrArray)
     ? strOrArray
     : typeof strOrArray === 'string'
@@ -77,20 +83,40 @@ function normalizeSafeUrlPatterns(strOrArray) {
     : [];
   const seen = new Set();
   const normalized = [];
+  let fixed = !Array.isArray(strOrArray) && typeof strOrArray !== 'string';
+
   rawItems.forEach((rawLine) => {
     if (typeof rawLine !== 'string') {
+      fixed = true;
       return;
     }
     const trimmed = rawLine.trim();
-    if (!trimmed || trimmed.startsWith('#')) {
+    if (!trimmed) {
+      if (rawLine) {
+        fixed = true;
+      }
       return;
     }
-    if (!seen.has(trimmed)) {
-      seen.add(trimmed);
-      normalized.push(trimmed);
+    if (trimmed.startsWith('#')) {
+      fixed = true;
+      return;
     }
+    if (trimmed.length > maxLength) {
+      fixed = true;
+      return;
+    }
+    if (trimmed !== rawLine) {
+      fixed = true;
+    }
+    if (seen.has(trimmed)) {
+      fixed = true;
+      return;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
   });
-  return normalized;
+
+  return { patterns: normalized, fixed };
 }
 
 function sanitizeSettings(rawSettings) {
@@ -136,60 +162,15 @@ function sanitizeSettings(rawSettings) {
   });
 
   const rawPatterns = rawSettings.SAFE_URL_PATTERNS;
-  if (rawPatterns !== undefined) {
-    const lines = Array.isArray(rawPatterns)
-      ? rawPatterns
-      : typeof rawPatterns === 'string'
-      ? rawPatterns.split(/\r?\n/)
-      : [];
-    const trimmed = [];
-    let flagged = !Array.isArray(rawPatterns);
-    lines.forEach((line) => {
-      if (typeof line !== 'string') {
-        flagged = true;
-        return;
-      }
-      const clean = line.trim();
-      if (!clean) {
-        if (line) {
-          flagged = true;
-        }
-        return;
-      }
-      if (clean.startsWith('#')) {
-        flagged = true;
-        return;
-      }
-      if (clean !== line) {
-        flagged = true;
-      }
-      trimmed.push(clean);
-    });
-    const normalized = normalizeSafeUrlPatterns(trimmed);
-    if (normalized.length) {
-      if (normalized.length !== trimmed.length) {
-        flagged = true;
-      } else {
-        for (let index = 0; index < normalized.length; index += 1) {
-          if (normalized[index] !== trimmed[index]) {
-            flagged = true;
-            break;
-          }
-        }
-      }
-      result.SAFE_URL_PATTERNS = normalized;
-      if (flagged) {
-        healedFields.add('SAFE_URL_PATTERNS');
-      }
-    } else {
+  const normalizedResult = normalizeSafeUrlPatterns(rawPatterns);
+  const hasSource = rawPatterns !== undefined;
+  if (normalizedResult.patterns.length) {
+    result.SAFE_URL_PATTERNS = normalizedResult.patterns;
+    if (!hasSource || normalizedResult.fixed) {
       healedFields.add('SAFE_URL_PATTERNS');
     }
   } else {
-    healedFields.add('SAFE_URL_PATTERNS');
-  }
-
-  if (!result.SAFE_URL_PATTERNS.length) {
-    result.SAFE_URL_PATTERNS = [...defaults.SAFE_URL_PATTERNS];
+    result.SAFE_URL_PATTERNS = Array.from(defaults.SAFE_URL_PATTERNS);
     healedFields.add('SAFE_URL_PATTERNS');
   }
 
@@ -217,42 +198,19 @@ async function loadSettings() {
   const stored = await chrome.storage.local.get({ [SETTINGS_STORAGE_KEY]: null });
   const raw = stored[SETTINGS_STORAGE_KEY];
   const { settings, healedFields } = sanitizeSettings(raw);
-  let nextSettings = settings;
-  const normalized = normalizeSafeUrlPatterns(nextSettings.SAFE_URL_PATTERNS);
-  let mutated = false;
-  let addedRequiredPattern = false;
-  if (!normalized.includes(REQUIRED_SAFE_URL_PATTERN)) {
-    mutated = true;
-    addedRequiredPattern = true;
-    nextSettings = {
-      ...nextSettings,
-      SAFE_URL_PATTERNS: [...normalized, REQUIRED_SAFE_URL_PATTERN]
-    };
-  } else if (normalized.length !== nextSettings.SAFE_URL_PATTERNS.length) {
-    mutated = true;
-    nextSettings = {
-      ...nextSettings,
-      SAFE_URL_PATTERNS: normalized
-    };
-  }
-  if (!raw || healedFields.length || mutated) {
-    await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: nextSettings });
-  }
-  if (mutated && !healedFields.includes('SAFE_URL_PATTERNS')) {
+  const normalized = normalizeSafeUrlPatterns(settings.SAFE_URL_PATTERNS);
+  const nextSettings = {
+    ...settings,
+    SAFE_URL_PATTERNS: normalized.patterns
+  };
+  const shouldPersist = !raw || healedFields.length > 0 || normalized.fixed;
+  if (normalized.fixed && !healedFields.includes('SAFE_URL_PATTERNS')) {
     healedFields.push('SAFE_URL_PATTERNS');
   }
-  if (mutated) {
-    try {
-      await Logger.log('info', 'settings', 'SAFE_URL patterns migrated', {
-        scope: 'settings',
-        before: settings.SAFE_URL_PATTERNS,
-        after: nextSettings.SAFE_URL_PATTERNS
-      });
-    } catch (_logError) {
-      /* Slovensky komentar: Ignoruje neuspesne logovanie migracie. */
-    }
+  if (shouldPersist) {
+    await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: nextSettings });
   }
-  return { settings: nextSettings, healedFields, meta: { addedRequiredPattern } };
+  return { settings: nextSettings, healedFields, meta: { normalizedSafePatterns: normalized.fixed } };
 }
 
 /* Slovensky komentar: Ulozi nastavenia po sanitizacii a vrati pripadne opravy. */
@@ -290,7 +248,8 @@ function urlMatchesAnyPattern(url, patterns) {
   try {
     const parsed = new URL(url);
     const pathname = parsed.pathname || '/';
-    const normalized = normalizeSafeUrlPatterns(patterns);
+    const normalizedResult = normalizeSafeUrlPatterns(patterns);
+    const normalized = normalizedResult.patterns;
     if (!normalized.length) {
       return false;
     }
@@ -324,3 +283,4 @@ globalTarget.urlMatchesAnyPattern = urlMatchesAnyPattern;
 globalTarget.normalizeSafeUrlPatterns = normalizeSafeUrlPatterns;
 globalTarget.shouldCooldown = shouldCooldown;
 globalTarget.COOLDOWN_STORAGE_KEY = COOLDOWN_STORAGE_KEY;
+globalTarget.SAFE_URL_DEFAULTS = SAFE_URL_DEFAULTS;

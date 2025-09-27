@@ -52,6 +52,11 @@ Settings persist under `chrome.storage.local` key `settings_v1`. The settings pa
 - Lines starting with `#` are treated as comments and skipped. Duplicates are removed automatically.
 - The defaults ship with `/workspaces`, `/projects`, `/new-project`, and `https://chatgpt.com/c/*`.
 
+### SAFE URL patterns (storage)
+- `settings_v1.SAFE_URL_PATTERNS` in `chrome.storage.local` je jediným zdrojom pravdy.
+- Textarea na stránke **Settings** priamo číta aj ukladá tieto hodnoty po normalizácii.
+- Service worker pred každou stráženou akciou načíta čerstvé nastavenia zo storage, takže sa neopiera o cache ani lokálne fallbacky.
+
 The IndexedDB store `categories` seeds the following categories on first run: `Programovanie`, `Kryptomeny`, `HW`, `Zdravie`. The background worker repeats the seed check on startup and during installation, logging the outcome.
 
 ## Auto-scan feed stub
