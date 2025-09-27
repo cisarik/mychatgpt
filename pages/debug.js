@@ -23,13 +23,38 @@
   const evalBackupHistory = document.getElementById('eval-backup-history');
 
   /* Slovensky komentar: Zobrazi kratku toast spravu v debug nadpise. */
-  function showDebugToast(message) {
+  function showDebugToast(message, options = {}) {
     if (!debugToastContainer || !message) {
       return;
     }
     const toast = document.createElement('div');
     toast.className = 'toast';
-    toast.textContent = message;
+
+    const textSpan = document.createElement('span');
+    textSpan.textContent = message;
+    toast.appendChild(textSpan);
+
+    const actionLabel = options && typeof options.actionLabel === 'string' ? options.actionLabel : null;
+    const onAction = options && typeof options.onAction === 'function' ? options.onAction : null;
+    if (actionLabel && onAction) {
+      const actionButton = document.createElement('button');
+      actionButton.type = 'button';
+      actionButton.className = 'toast-action';
+      actionButton.textContent = actionLabel;
+      actionButton.addEventListener('click', async () => {
+        try {
+          onAction();
+        } catch (error) {
+          if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+            await Logger.log('warn', 'debug', 'Toast action handler failed', {
+              message: error && error.message
+            });
+          }
+        }
+      });
+      toast.appendChild(actionButton);
+    }
+
     debugToastContainer.prepend(toast);
     while (debugToastContainer.childElementCount > 2) {
       debugToastContainer.removeChild(debugToastContainer.lastElementChild);
@@ -93,7 +118,9 @@
     }
     const block = document.createElement('div');
     block.className = 'log-entry';
-    const dryRun = summary && Array.isArray(summary.wouldWrite);
+    const dryRun = summary && typeof summary === 'object'
+      ? Boolean(summary.dryRun || Array.isArray(summary.wouldWrite))
+      : false;
     const payload = summary && typeof summary === 'object'
       ? {
           timestamp: summary.timestamp || null,
@@ -102,7 +129,7 @@
             ? summary.stats.candidates
             : 0,
           written: Array.isArray(summary.written) ? summary.written.length : 0,
-          wouldWrite: dryRun ? (summary.wouldWrite ? summary.wouldWrite.length : 0) : 0,
+          wouldWrite: dryRun ? (summary && Array.isArray(summary.wouldWrite) ? summary.wouldWrite.length : 0) : 0,
           skipped: Array.isArray(summary.skipped) ? summary.skipped.length : 0,
           dryRun
         }
@@ -153,7 +180,11 @@
   /* Slovensky komentar: Naformatuje sumar bulk backupu pre toast. */
   function summarizeBulkToast(summary) {
     if (!summary || typeof summary !== 'object') {
-      return 'Bulk backup completed.';
+      return {
+        message: 'Bulk backup completed.',
+        dryRun: false,
+        writtenCount: 0
+      };
     }
     const scanned = Number.isFinite(summary.scannedTabs) ? summary.scannedTabs : 0;
     const candidates = summary.stats && Number.isFinite(summary.stats.candidates)
@@ -162,11 +193,22 @@
     const writtenCount = Array.isArray(summary.written) ? summary.written.length : 0;
     const wouldWriteCount = Array.isArray(summary.wouldWrite) ? summary.wouldWrite.length : 0;
     const skippedCount = Array.isArray(summary.skipped) ? summary.skipped.length : 0;
-    const dryRun = Array.isArray(summary.wouldWrite);
+    const dryRun = Boolean(summary.dryRun || Array.isArray(summary.wouldWrite));
+    const prefix = dryRun ? 'Dry run—nothing persisted. ' : '';
     const writtenPart = dryRun
-      ? `${writtenCount} written / ${wouldWriteCount} wouldWrite`
+      ? '0 written'
       : `${writtenCount} written`;
-    return `${scanned} scanned · ${candidates} candidates · ${writtenPart} · ${skippedCount} skipped`;
+    const wouldWritePart = dryRun ? ` · ${wouldWriteCount} wouldWrite` : '';
+    const message = `${prefix}${scanned} scanned · ${candidates} candidates · ${writtenPart}${wouldWritePart} · ${skippedCount} skipped`;
+    return {
+      message,
+      dryRun,
+      writtenCount,
+      wouldWriteCount,
+      skippedCount,
+      scanned,
+      candidates
+    };
   }
 
   /* Slovensky komentar: Vyziada bulk backup na pozadi. */
@@ -585,18 +627,27 @@
       try {
         const response = await requestBulkBackupOpenTabs();
         if (response && response.ok) {
-          showDebugToast(summarizeBulkToast(response.summary));
           const summary = response.summary || {};
-          const dryRun = summary && Array.isArray(summary.wouldWrite);
+          const toastMeta = summarizeBulkToast(summary);
+          const toastOptions = !toastMeta.dryRun && toastMeta.writtenCount > 0
+            ? {
+                actionLabel: 'Open list',
+                onAction: () => {
+                  if (typeof window !== 'undefined') {
+                    window.location.hash = '#searches';
+                  }
+                }
+              }
+            : undefined;
+          showDebugToast(toastMeta.message, toastOptions);
+          const dryRun = toastMeta.dryRun;
           const meta = {
             reasonCode: dryRun ? 'bulk_backup_dry_run' : 'bulk_backup_ok',
-            scannedTabs: Number.isFinite(summary.scannedTabs) ? summary.scannedTabs : 0,
-            candidates: summary.stats && Number.isFinite(summary.stats.candidates)
-              ? summary.stats.candidates
-              : 0,
-            written: Array.isArray(summary.written) ? summary.written.length : 0,
-            wouldWrite: dryRun ? (summary.wouldWrite ? summary.wouldWrite.length : 0) : 0,
-            skipped: Array.isArray(summary.skipped) ? summary.skipped.length : 0
+            scannedTabs: toastMeta.scanned,
+            candidates: toastMeta.candidates,
+            written: toastMeta.writtenCount,
+            wouldWrite: toastMeta.dryRun ? toastMeta.wouldWriteCount : 0,
+            skipped: toastMeta.skippedCount
           };
           await Logger.log('info', 'debug', 'Bulk backup over open tabs finished', meta);
         } else {
@@ -809,6 +860,9 @@
   chrome.runtime.onMessage.addListener((message) => {
     if (message && message.type === 'bulk_backup_summary') {
       appendBulkOpenTabsHistory(message.summary);
+    }
+    if (message && message.type === 'backups_updated' && message.reason === 'bulk_backup') {
+      showDebugToast('Stored backups refreshed.');
     }
   });
 

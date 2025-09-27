@@ -97,9 +97,14 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 - SAFE URL patterns are enforced up front; matching tabs land in the `safe_url` bucket without probing or capturing content.
 - Heuristics V1 always applies (short chats only). Tabs missing counts contribute to `counts_unknown`, while over-limit conversations increment `over_max`.
 - Each successful candidate requires a `convoId`; duplicates are skipped via `Database.getBackupByConvoId` so existing backups stay untouched.
-- When `DRY_RUN=true`, the summary returns a `wouldWrite` list, leaves IndexedDB unchanged, and the Searches list does not refresh.
-- With `DRY_RUN=false`, truncated answers (≤250 KB) are persisted via `Database.saveBackup`, the Searches panel refreshes immediately, and history cards surface the candidate counts.
+- When `DRY_RUN=true`, the summary returns a `wouldWrite` list, surfaces a **“Dry run—nothing persisted”** toast, and leaves IndexedDB unchanged so the Searches list stays as-is.
+- With `DRY_RUN=false`, truncated answers (≤250 KB) are persisted via `Database.saveBackup`, the Searches panel refreshes immediately, and history cards surface the candidate counts alongside an “Open list” shortcut in the toast when new rows land.
 - Check the background Service worker console (`Inspect views`) for `scope:"db"` entries labelled `bulk_backup_ok`, `bulk_backup_dry_run`, or `bulk_backup_error` to audit each run.
+
+## Searches panel
+- The list now uses the first captured user message as the primary, clickable title (falling back to **“(untitled)”**) that opens `pages/backup_view.html?id=<uuid>` in a new tab.
+- Secondary badges highlight the localized timestamp, the `convoId`, and a `(truncated)` badge when the stored answer exceeded the 250 KB cap.
+- The “Počet záloh v úložisku” counter reads straight from IndexedDB, and the page listens for background `backups_updated/searches_reload` broadcasts to refresh without a manual reload.
 
 ## Heuristics V1 & Cooldown
 - The background worker exposes **Evaluate heuristics (active tab)** on the debug page to score the active ChatGPT conversation without mutating the DOM or touching IndexedDB.

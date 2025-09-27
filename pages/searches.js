@@ -1,5 +1,6 @@
 /* Slovensky komentar: Stranka so zalohami zobrazi prazdny stav a pocet zaznamov. */
 (async function () {
+  const globalTarget = typeof window !== 'undefined' ? window : self;
   const backupsCount = document.getElementById('backups-count');
   const backupsList = document.getElementById('backups-list');
   const emptySection = document.querySelector('.empty-state');
@@ -33,6 +34,26 @@
     }
     const trimmed = url.trim();
     return trimmed.length > 80 ? `${trimmed.slice(0, 77)}…` : trimmed;
+  }
+
+  /* Slovensky komentar: Skratenie textu so stredovou elipsou. */
+  function truncate(text, limit = 120) {
+    if (typeof text !== 'string') {
+      return '';
+    }
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return '';
+    }
+    if (trimmed.length <= limit) {
+      return trimmed;
+    }
+    const available = Math.max(limit - 1, 1);
+    const startLength = Math.ceil(available / 2);
+    const endLength = available - startLength;
+    const startPart = trimmed.slice(0, startLength);
+    const endPart = endLength > 0 ? trimmed.slice(-endLength) : '';
+    return `${startPart}…${endPart}`;
   }
 
   /* Slovensky komentar: Vytvori riadok pre polozku sumarneho prehladu. */
@@ -81,7 +102,7 @@
       return;
     }
 
-    const dryRun = Array.isArray(summary.wouldWrite);
+    const dryRun = Boolean(summary.dryRun || Array.isArray(summary.wouldWrite));
     const scanned = Number.isFinite(summary.scannedTabs) ? summary.scannedTabs : 0;
     const candidates = summary.stats && Number.isFinite(summary.stats.candidates)
       ? summary.stats.candidates
@@ -136,24 +157,6 @@
     }
   }
 
-  /* Slovensky komentar: Vyberie titulok alebo fallback z textu otazky. */
-  function deriveTitle(backup) {
-    if (!backup) {
-      return 'Bez názvu';
-    }
-    if (backup.title && typeof backup.title === 'string' && backup.title.trim()) {
-      return backup.title.trim();
-    }
-    if (backup.questionText && typeof backup.questionText === 'string' && backup.questionText.trim()) {
-      const trimmed = backup.questionText.trim();
-      return trimmed.length > 80 ? `${trimmed.slice(0, 77)}…` : trimmed;
-    }
-    if (backup.convoId && typeof backup.convoId === 'string' && backup.convoId.trim()) {
-      return backup.convoId.trim();
-    }
-    return 'Bez názvu';
-  }
-
   /* Slovensky komentar: Formatovanie casovej peciatky. */
   function formatTimestamp(timestamp) {
     if (!Number.isFinite(timestamp)) {
@@ -192,13 +195,13 @@
 
     const titleLine = document.createElement('div');
     titleLine.className = 'backup-row-title';
-    const primaryQuestion = backup && typeof backup.questionText === 'string' && backup.questionText.trim()
-      ? backup.questionText.trim()
-      : '(untitled)';
+    const rawQuestion = backup && typeof backup.questionText === 'string' ? backup.questionText.trim() : '';
+    const primaryQuestion = rawQuestion ? rawQuestion : '(untitled)';
+    const displayQuestion = rawQuestion ? truncate(rawQuestion) : '(untitled)';
     const questionLink = document.createElement('a');
     questionLink.className = 'backup-link';
-    questionLink.textContent = primaryQuestion;
-    questionLink.title = deriveTitle(backup);
+    questionLink.textContent = displayQuestion;
+    questionLink.title = primaryQuestion;
     if (backup && backup.id) {
       const href = chrome.runtime.getURL(`pages/backup_view.html?id=${encodeURIComponent(backup.id)}`);
       questionLink.href = href;
@@ -226,7 +229,7 @@
     if (backup && backup.answerTruncated) {
       const truncatedSpan = document.createElement('span');
       truncatedSpan.className = 'meta-pill meta-pill-warn';
-      truncatedSpan.textContent = 'Odpoveď skrátená na 250 KB';
+      truncatedSpan.textContent = '(truncated)';
       metaLine.appendChild(truncatedSpan);
     }
 
@@ -313,7 +316,7 @@
   }
 
   /* Slovensky komentar: Obnovi statistiku a zoznam. */
-  async function refreshBackups() {
+  async function loadAndRenderRecent() {
     try {
       const db = await Database.initDB();
       let total = 0;
@@ -362,8 +365,15 @@
   }
 
   chrome.runtime.onMessage.addListener((message) => {
-    if (message && message.type === 'backups_updated') {
-      refreshBackups();
+    if (message && (message.type === 'backups_updated' || message.type === 'searches_reload')) {
+      loadAndRenderRecent().catch(async (error) => {
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'db', 'Failed to reload backups after message', {
+            message: error && error.message,
+            trigger: message.type
+          });
+        }
+      });
     }
     if (message && message.type === 'bulk_backup_summary') {
       renderBulkSummary(message.summary);
@@ -371,5 +381,13 @@
   });
 
   await loadBulkSummaryFromStorage();
-  await refreshBackups();
+  await loadAndRenderRecent();
+
+  if (globalTarget && typeof globalTarget === 'object') {
+    const api = globalTarget.SearchesPage || {};
+    globalTarget.SearchesPage = {
+      ...api,
+      loadAndRenderRecent
+    };
+  }
 })();

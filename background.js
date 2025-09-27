@@ -1256,6 +1256,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         tabs = await queryChatgptTabs();
         summary.scannedTabs = tabs.length;
         const dryRun = Boolean(settings && settings.DRY_RUN);
+        summary.dryRun = dryRun;
 
         for (const tab of tabs) {
           const tabId = tab && typeof tab.id === 'number' ? tab.id : null;
@@ -1412,6 +1413,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           summary.wouldWrite = wouldWrite;
         }
 
+        const responseReason = dryRun ? 'bulk_backup_dry_run' : 'bulk_backup_ok';
+        summary.reasonCode = responseReason;
+
         const payloadForStorage = { ...summary };
         if (!dryRun) {
           delete payloadForStorage.wouldWrite;
@@ -1425,17 +1429,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
         }
 
-        reasonCode = dryRun ? 'bulk_backup_dry_run' : 'bulk_backup_ok';
+        reasonCode = responseReason;
         await Logger.log('info', 'db', 'Bulk backup run finished', {
           reasonCode,
           scannedTabs: summary.scannedTabs,
           written: summary.written.length,
           wouldWrite: dryRun ? wouldWrite.length : 0,
           skipped: summary.skipped.length,
-          stats: summary.stats
+          stats: summary.stats,
+          dryRun
         });
 
-        sendResponse({ ok: true, summary });
+        sendResponse({ ok: true, summary, dryRun, reasonCode: responseReason });
 
         try {
           chrome.runtime.sendMessage({ type: 'bulk_backup_summary', summary });

@@ -105,20 +105,25 @@ const Database = {
   /* Slovensky komentar: Ulozi zaznam o zalohe do IndexedDB. */
   saveBackup: async (record) => {
     try {
+      const sanitizedRecord = { ...record };
+      const questionTextValid = typeof sanitizedRecord.questionText === 'string'
+        ? sanitizedRecord.questionText.trim()
+        : '';
+      sanitizedRecord.questionText = questionTextValid ? questionTextValid : '(untitled)';
       const db = await Database.initDB();
       const transaction = db.transaction([STORE_BACKUPS], 'readwrite');
       const store = transaction.objectStore(STORE_BACKUPS);
-      store.put(record);
+      store.put(sanitizedRecord);
       await new Promise((resolve, reject) => {
         transaction.oncomplete = resolve;
         transaction.onerror = () => reject(transaction.error);
         transaction.onabort = () => reject(transaction.error);
       });
       await Logger.log('info', 'db', 'Backup persisted', {
-        id: record && record.id ? record.id : null,
-        timestamp: record && record.timestamp ? record.timestamp : null
+        id: sanitizedRecord && sanitizedRecord.id ? sanitizedRecord.id : null,
+        timestamp: sanitizedRecord && sanitizedRecord.timestamp ? sanitizedRecord.timestamp : null
       });
-      return record && record.id ? record.id : null;
+      return sanitizedRecord && sanitizedRecord.id ? sanitizedRecord.id : null;
     } catch (error) {
       await Logger.log('error', 'db', 'Backup persist failed', { message: error && error.message });
       throw error;
