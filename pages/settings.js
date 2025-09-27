@@ -176,7 +176,6 @@
     Object.entries(FIELDS).forEach(([key, def]) => {
       const element = document.querySelector(def.sel);
       if (!element) {
-        console.warn('Missing field', key);
         return;
       }
       switch (def.type) {
@@ -209,8 +208,9 @@
           break;
         case 'int':
           {
-            const numeric = Math.floor(Number(element.value));
-            output[key] = Number.isFinite(numeric) && numeric >= 1 ? numeric : 1;
+            const rawNumber = Number(element.value);
+            const safeNumber = Math.max(1, Number.isFinite(rawNumber) ? rawNumber : 1);
+            output[key] = Math.floor(safeNumber);
           }
           break;
         case 'multiline':
@@ -268,7 +268,7 @@
       next.SAFE_URL_PATTERNS = Array.isArray(next.SAFE_URL_PATTERNS) ? next.SAFE_URL_PATTERNS : [];
       await chrome.storage.local.set({ [SETTINGS_KEY]: next });
       const changes = diffSettings(previous, next);
-      await logEvent('info', 'Settings saved', { diff: changes, before: previous, after: next });
+      await logEvent('info', 'Settings saved', { scope: 'settings', diff: changes, before: previous, after: next });
       toast('Uložené');
       setStatus('Nastavenia uložené.');
       renderHealedHints([]);
@@ -291,8 +291,8 @@
       await chrome.storage.local.set({ [SETTINGS_KEY]: defaults });
       const next = await loadSettingsFresh();
       const changes = diffSettings(previous, next);
-      await logEvent('info', 'Settings reset to defaults', { diff: changes, before: previous, after: next });
-      toast('Nastavenia obnovené na defaulty');
+      await logEvent('info', 'Settings reset to defaults', { scope: 'settings', diff: changes, before: previous, after: next });
+      toast('Obnovené na defaulty');
       setStatus('Predvolené hodnoty boli obnovené.');
       renderHealedHints([]);
       renderSettings(next);

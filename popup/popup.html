@@ -122,6 +122,20 @@
                 <span class="heal-hint" data-field="AUTO_SCAN" hidden>(opravené)</span>
               </span>
             </label>
+            <label class="setting-row">
+              <span class="label-text">Zobraziť odznak kandidáta</span>
+              <span class="setting-control">
+                <input type="checkbox" id="SHOW_CANDIDATE_BADGE" name="SHOW_CANDIDATE_BADGE" />
+                <span class="heal-hint" data-field="SHOW_CANDIDATE_BADGE" hidden>(opravené)</span>
+              </span>
+            </label>
+            <label class="setting-row">
+              <span class="label-text">Len kandidáti pri zachytení</span>
+              <span class="setting-control">
+                <input type="checkbox" id="CAPTURE_ONLY_CANDIDATES" name="CAPTURE_ONLY_CANDIDATES" />
+                <span class="heal-hint" data-field="CAPTURE_ONLY_CANDIDATES" hidden>(opravené)</span>
+              </span>
+            </label>
           </section>
 
           <section class="panel settings-card">
@@ -145,6 +159,20 @@
               <span class="setting-control">
                 <input type="number" id="SCAN_COOLDOWN_MIN" name="SCAN_COOLDOWN_MIN" min="1" />
                 <span class="heal-hint" data-field="SCAN_COOLDOWN_MIN" hidden>(opravené)</span>
+              </span>
+            </label>
+            <label class="setting-row">
+              <span class="label-text">Minimálny vek záznamu (min)</span>
+              <span class="setting-control">
+                <input type="number" id="MIN_AGE_MINUTES" name="MIN_AGE_MINUTES" min="1" />
+                <span class="heal-hint" data-field="MIN_AGE_MINUTES" hidden>(opravené)</span>
+              </span>
+            </label>
+            <label class="setting-row">
+              <span class="label-text">Limit mazania</span>
+              <span class="setting-control">
+                <input type="number" id="DELETE_LIMIT" name="DELETE_LIMIT" min="1" />
+                <span class="heal-hint" data-field="DELETE_LIMIT" hidden>(opravené)</span>
               </span>
             </label>
           </section>

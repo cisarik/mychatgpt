@@ -30,18 +30,23 @@ Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use DevToo
 - If the popup opens unusually narrow, reload the extension, ensure no custom CSS overrides are injected, and verify operating system scaling settings.
 - Use the popup’s DevTools to inspect the computed sizes on `html`, `body`, and `.popup-root` if issues persist.
 
-## Settings & Categories
+## Settings keys
 | Key | Default | Description |
 | --- | --- | --- |
 | `LIST_ONLY` | `true` | Limits the extension to listing actions without edits. |
 | `DRY_RUN` | `true` | Produces simulated results without writes. |
-| `CAPTURE_ONLY_CANDIDATES` | `true` | Restricts manual backups to short candidate chats. |
 | `CONFIRM_BEFORE_DELETE` | `true` | Prompts before any destructive action. |
 | `AUTO_SCAN` | `false` | Enables background scanning when supported. |
+| `SHOW_CANDIDATE_BADGE` | `true` | Displays the candidate badge beside eligible conversations. |
+| `CAPTURE_ONLY_CANDIDATES` | `true` | Restricts manual backups to short candidate chats. |
 | `MAX_MESSAGES` | `2` | Maximum total messages captured per conversation. |
 | `USER_MESSAGES_MAX` | `2` | Maximum user-authored messages retained. |
 | `SCAN_COOLDOWN_MIN` | `5` | Minimum minutes between automated heuristics scans. |
+| `MIN_AGE_MINUTES` | `2` | Minimum age (in minutes) a conversation must reach before deletion. |
+| `DELETE_LIMIT` | `10` | Upper bound for deletes within a single batch. |
 | `SAFE_URL_PATTERNS` | `['/workspaces','/projects','/new-project','https://chatgpt.com/c/*']` | Allowed path/full URL patterns for scanning. |
+
+Every input in the Settings UI uses an `id` and `name` attribute that exactly matches its key in `settings_v1`.
 
 Settings persist under `chrome.storage.local` key `settings_v1`. The settings page automatically validates loaded values and heals any missing/invalid fields back to defaults, marking corrected inputs with a subtle “(opravené)” hint. Use the **Resetovať na defaulty** button to repopulate the form with the defaults before saving.
 
