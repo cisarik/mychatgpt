@@ -270,6 +270,23 @@
           </section>
 
           <section class="debug-section">
+            <div class="section-heading">
+              <h3>Backup &amp; Delete</h3>
+              <span class="badge">Active tab</span>
+            </div>
+            <p class="section-note">Zálohuje aktuálny chat a následne sa pokúsi o jeho zmazanie.</p>
+            <button
+              id="backup-delete-active-btn"
+              class="button-sub"
+              type="button"
+              aria-label="Backup and delete the active chat"
+            >
+              Backup &amp; Delete (active tab)
+            </button>
+            <div id="backup-delete-history" class="history-feed" aria-live="polite"></div>
+          </section>
+
+          <section class="debug-section">
             <h3>Capture preview</h3>
             <p class="section-note">Captured previews will appear here when the feature is available.</p>
             <div id="capture-preview" class="capture-preview" aria-live="polite"></div>

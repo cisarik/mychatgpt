@@ -233,6 +233,21 @@ body {
   color: var(--muted);
 }
 
+.history-feed {
+  display: grid;
+  gap: 6px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', ui-monospace, monospace;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.history-feed .history-entry {
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+}
+
 .toast-stack {
   display: grid;
   gap: 8px;
