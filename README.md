@@ -102,9 +102,10 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 - Check the background Service worker console (`Inspect views`) for `scope:"db"` entries labelled `bulk_backup_ok`, `bulk_backup_dry_run`, or `bulk_backup_error` to audit each run.
 
 ## Searches panel
-- The list now uses the first captured user message as the primary, clickable title (falling back to **“(untitled)”**) that opens `pages/backup_view.html?id=<uuid>` in a new tab.
-- The metadata line prints the localized timestamp and adds a `(truncated)` badge when applicable, keeping conversation IDs out of the UI.
-- The “Počet záloh v úložisku” counter reads straight from IndexedDB, and the page listens for background `backups_updated/searches_reload` broadcasts to refresh without a manual reload.
+- The panel keeps a single primary button — **Backup candidates (open tabs)** — above a compact list of stored prompts.
+- Each row shows the captured question (falling back to **“(untitled)”**) linking to `pages/backup_view.html?id=<uuid>` in a new tab, plus a localized timestamp and optional `(truncated)` badge.
+- Tapping the `(×)` button requests deletion; `LIST_ONLY=true` blocks the action with a toast, and `CONFIRM_BEFORE_DELETE=true` surfaces a native confirmation dialog before calling the background worker.
+- The page reloads automatically after backups or deletions via the existing `backups_updated` broadcast, so the list stays in sync without manual refreshes.
 
 ## Heuristics V1 & Cooldown
 - The background worker exposes **Evaluate heuristics (active tab)** on the debug page to score the active ChatGPT conversation without mutating the DOM or touching IndexedDB.

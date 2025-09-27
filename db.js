@@ -239,6 +239,27 @@ const Database = {
       throw error;
     }
   },
+  /* Slovensky komentar: Vymaze zalohu z uloziska. */
+  deleteBackup: async (id) => {
+    if (!id) {
+      return false;
+    }
+    try {
+      const db = await Database.initDB();
+      const transaction = db.transaction([STORE_BACKUPS], 'readwrite');
+      const store = transaction.objectStore(STORE_BACKUPS);
+      store.delete(id);
+      await new Promise((resolve, reject) => {
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+      return true;
+    } catch (error) {
+      await Logger.log('error', 'db', 'Backup delete failed', { message: error && error.message, id });
+      throw error;
+    }
+  },
   constants: {
     name: DB_NAME,
     version: DB_VERSION,

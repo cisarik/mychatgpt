@@ -1,359 +1,294 @@
-/* Slovensky komentar: Stranka so zalohami zobrazi prazdny stav a pocet zaznamov. */
+/* Slovensky komentar: Minimalisticke zobrazenie a mazanie zaloz. */
 (async function () {
   const globalTarget = typeof window !== 'undefined' ? window : self;
-  const backupsCount = document.getElementById('backups-count');
-  const backupsList = document.getElementById('backups-list');
-  const emptySection = document.querySelector('.empty-state');
-  const bulkSummarySection = document.getElementById('bulk-summary');
-  const bulkSummaryToggle = document.getElementById('bulk-summary-toggle');
-  const bulkSummaryList = document.getElementById('bulk-summary-list');
-  const bulkSummaryMeta = document.getElementById('bulk-summary-meta');
-  const bulkSummaryEmpty = document.getElementById('bulk-summary-empty');
-  let bulkSummaryExpanded = false;
+  const listHost = document.getElementById('backups-list');
+  const toastHost = document.getElementById('searches-toast');
+  const bulkButton = document.getElementById('bulk-open-tabs-btn');
 
-  if (!backupsCount || !backupsList) {
+  if (!listHost) {
     return;
   }
 
-  /* Slovensky komentar: Prepne viditelnost detailov sumarnej karty. */
-  function toggleBulkSummary(explicitState) {
-    if (!bulkSummaryToggle || !bulkSummaryList) {
+  const defaultSettings = typeof cloneDefaultSettings === 'function'
+    ? cloneDefaultSettings()
+    : {
+        LIST_ONLY: true,
+        CONFIRM_BEFORE_DELETE: true
+      };
+
+  let settingsSnapshot = { ...defaultSettings };
+  let isBulkRunning = false;
+
+  /* Slovensky komentar: Kratke toast upozornenie. */
+  function showToast(message) {
+    if (!toastHost || !message) {
       return;
     }
-    const nextState = typeof explicitState === 'boolean' ? explicitState : !bulkSummaryExpanded;
-    bulkSummaryExpanded = nextState;
-    bulkSummaryList.hidden = !bulkSummaryExpanded;
-    bulkSummaryToggle.setAttribute('aria-expanded', String(bulkSummaryExpanded));
-    bulkSummaryToggle.textContent = bulkSummaryExpanded ? 'Hide details' : 'Show details';
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.textContent = message;
+    toastHost.appendChild(toast);
+    setTimeout(() => {
+      if (toast.parentElement === toastHost) {
+        toastHost.removeChild(toast);
+      }
+    }, 4000);
   }
 
-  /* Slovensky komentar: Orezanie URL pre zobrazenie. */
-  function truncateUrl(url) {
-    if (!url || typeof url !== 'string') {
-      return '(unknown)';
+  /* Slovensky komentar: Prelozi chybovy kod mazania na text. */
+  function resolveDeleteReason(reason) {
+    switch (reason) {
+      case 'list_only':
+        return 'Mazanie je zakázané nastavením „List only“.';
+      case 'need_confirm':
+        return 'Mazanie vyžaduje potvrdenie.';
+      default:
+        return 'Mazanie zlyhalo.';
     }
-    const trimmed = url.trim();
-    return trimmed.length > 80 ? `${trimmed.slice(0, 77)}…` : trimmed;
   }
 
-  /* Slovensky komentar: Vytvori riadok pre polozku sumarneho prehladu. */
-  function buildBulkSummaryItem(entry) {
-    if (!entry) {
-      return null;
+  /* Slovensky komentar: Nastavi vizualne spustenie mazania na riadku. */
+  function setRowLoading(rowEl, loading) {
+    if (!rowEl) {
+      return;
     }
-    const wrapper = document.createElement('div');
-    wrapper.className = 'bulk-summary-item';
-    wrapper.setAttribute('role', 'listitem');
-
-    const urlSpan = document.createElement('span');
-    urlSpan.textContent = truncateUrl(entry.url);
-    wrapper.appendChild(urlSpan);
-
-    const badge = document.createElement('span');
-    badge.className = 'badge';
-    badge.textContent = entry.convoId ? entry.convoId : '∅';
-    wrapper.appendChild(badge);
-
-    const metrics = document.createElement('span');
-    metrics.className = 'bulk-summary-metrics';
-    const qLen = Number.isFinite(entry.qLen) ? entry.qLen : 0;
-    const aLen = Number.isFinite(entry.aLen) ? entry.aLen : 0;
-    const truncated = entry.truncated ? ' · truncated' : '';
-    metrics.textContent = ` · q=${qLen} · aBytes=${aLen}${truncated}`;
-    wrapper.appendChild(metrics);
-
-    return wrapper;
+    rowEl.classList.toggle('is-loading', Boolean(loading));
+    const deleteButton = rowEl.querySelector('.row-del');
+    if (deleteButton) {
+      deleteButton.disabled = Boolean(loading);
+      deleteButton.setAttribute('aria-busy', loading ? 'true' : 'false');
+    }
   }
 
-  /* Slovensky komentar: Zobrazi kartu so sumarom bulk backupu. */
-  function renderBulkSummary(summary) {
-    if (!bulkSummarySection || !bulkSummaryMeta || !bulkSummaryEmpty || !bulkSummaryList || !bulkSummaryToggle) {
-      return;
+  /* Slovensky komentar: Ziska cerstve nastavenia zo storage. */
+  async function refreshSettings() {
+    try {
+      const stored = await chrome.storage.local.get({ [SETTINGS_STORAGE_KEY]: null });
+      const raw = stored ? stored[SETTINGS_STORAGE_KEY] : null;
+      if (typeof sanitizeSettings === 'function') {
+        const { settings } = sanitizeSettings(raw);
+        settingsSnapshot = { ...defaultSettings, ...settings };
+      } else if (raw && typeof raw === 'object') {
+        settingsSnapshot = {
+          ...defaultSettings,
+          LIST_ONLY: typeof raw.LIST_ONLY === 'boolean' ? raw.LIST_ONLY : defaultSettings.LIST_ONLY,
+          CONFIRM_BEFORE_DELETE:
+            typeof raw.CONFIRM_BEFORE_DELETE === 'boolean'
+              ? raw.CONFIRM_BEFORE_DELETE
+              : defaultSettings.CONFIRM_BEFORE_DELETE
+        };
+      } else {
+        settingsSnapshot = { ...defaultSettings };
+      }
+    } catch (_error) {
+      settingsSnapshot = { ...defaultSettings };
     }
+  }
 
-    if (!summary || typeof summary !== 'object') {
-      bulkSummaryMeta.textContent = 'Bulk backup not executed yet.';
-      bulkSummaryEmpty.textContent = 'No candidates were stored yet.';
-      bulkSummaryEmpty.style.display = '';
-      bulkSummaryList.innerHTML = '';
-      bulkSummaryList.hidden = true;
-      bulkSummaryToggle.disabled = true;
-      toggleBulkSummary(false);
-      return;
-    }
-
-    const dryRun = Boolean(summary.dryRun || Array.isArray(summary.wouldWrite));
-    const scanned = Number.isFinite(summary.scannedTabs) ? summary.scannedTabs : 0;
-    const candidates = summary.stats && Number.isFinite(summary.stats.candidates)
-      ? summary.stats.candidates
-      : 0;
-    const writtenCount = Array.isArray(summary.written) ? summary.written.length : 0;
-    const wouldWriteCount = Array.isArray(summary.wouldWrite) ? summary.wouldWrite.length : 0;
-    const skippedCount = Array.isArray(summary.skipped) ? summary.skipped.length : 0;
-    const whenText = Number.isFinite(summary.timestamp)
-      ? new Date(summary.timestamp).toLocaleString()
-      : 'Unknown time';
-    const writtenPart = dryRun
-      ? `${writtenCount} written / ${wouldWriteCount} wouldWrite`
-      : `${writtenCount} written`;
-
-    bulkSummaryMeta.textContent = `${whenText} · ${scanned} scanned · ${candidates} candidates · ${writtenPart} · ${skippedCount} skipped`;
-
-    const itemsSource = dryRun && wouldWriteCount ? summary.wouldWrite : summary.written;
-    bulkSummaryList.innerHTML = '';
-
-    if (!Array.isArray(itemsSource) || itemsSource.length === 0) {
-      bulkSummaryEmpty.textContent = dryRun
-        ? 'Dry run: nothing persisted.'
-        : 'No new backups were written.';
-      bulkSummaryEmpty.style.display = '';
-      bulkSummaryList.hidden = true;
-      bulkSummaryToggle.disabled = true;
-      toggleBulkSummary(false);
-      return;
-    }
-
-    bulkSummaryEmpty.style.display = 'none';
-    const limited = itemsSource.slice(0, 10);
-    limited.forEach((entry) => {
-      const item = buildBulkSummaryItem(entry);
-      if (item) {
-        bulkSummaryList.appendChild(item);
+  /* Slovensky komentar: Promise wrapper pre sendMessage. */
+  function sendMessage(payload) {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage(payload, (response) => {
+          const runtimeError = chrome.runtime.lastError;
+          if (runtimeError) {
+            reject(new Error(runtimeError.message || 'Message failed'));
+            return;
+          }
+          resolve(response);
+        });
+      } catch (error) {
+        reject(error);
       }
     });
-    bulkSummaryToggle.disabled = false;
-    toggleBulkSummary(false);
   }
 
-  /* Slovensky komentar: Nacita sumar z local storage. */
-  async function loadBulkSummaryFromStorage() {
-    try {
-      const stored = await chrome.storage.local.get({ last_bulk_backup: null });
-      renderBulkSummary(stored.last_bulk_backup);
-    } catch (error) {
-      await Logger.log('warn', 'db', 'Failed to load bulk summary', {
-        message: error && error.message
-      });
-    }
-  }
-
-  /* Slovensky komentar: Formatovanie casovej peciatky. */
-  function formatTimestamp(timestamp) {
-    if (!Number.isFinite(timestamp)) {
-      return 'Neznámy čas';
+  /* Slovensky komentar: Naformatuje casovy udaj na lokalny text. */
+  function formatTimestamp(value) {
+    if (typeof formatDate === 'function') {
+      return formatDate(value);
     }
     try {
-      return new Date(timestamp).toLocaleString();
+      return new Date(value).toLocaleString();
     } catch (_error) {
       return 'Neznámy čas';
     }
   }
 
-  /* Slovensky komentar: Zobrazi alebo skryje prazdny stav. */
-  function toggleEmptyState(show) {
-    if (!emptySection) {
+  /* Slovensky komentar: Spracuje klik na mazanie. */
+  async function handleDelete(backup, rowEl) {
+    if (!backup || !backup.id) {
       return;
     }
-    emptySection.style.display = show ? '' : 'none';
-  }
-
-  /* Slovensky komentar: Vytvori iframe so sandboxom pre odpoved. */
-  function createAnswerFrame(answerHTML) {
-    const frame = document.createElement('iframe');
-    frame.className = 'backup-answer-frame';
-    frame.setAttribute('sandbox', '');
-    frame.setAttribute('referrerpolicy', 'no-referrer');
-    frame.srcdoc = answerHTML || '';
-    return frame;
-  }
-
-  /* Slovensky komentar: Pripravi radek so zakladnymi udajmi a detailnym nahliadnutim. */
-  function buildBackupRow(backup) {
-    const row = document.createElement('article');
-    row.className = 'backup-row';
-    row.setAttribute('role', 'listitem');
-
-    const titleLine = document.createElement('div');
-    titleLine.className = 'backup-row-title';
-    const rawQuestion = backup && typeof backup.questionText === 'string' ? backup.questionText.trim() : '';
-    const primaryQuestion = rawQuestion ? rawQuestion : '(untitled)';
-    const questionLink = document.createElement('a');
-    questionLink.className = 'backup-link';
-    questionLink.textContent = primaryQuestion;
-    questionLink.title = primaryQuestion;
-    if (backup && backup.id) {
-      const href = chrome.runtime.getURL('pages/backup_view.html?id=' + backup.id);
-      questionLink.href = href;
-      questionLink.target = '_blank';
-      questionLink.rel = 'noopener';
-    } else {
-      questionLink.href = '#';
-      questionLink.setAttribute('aria-disabled', 'true');
-      questionLink.classList.add('is-disabled');
+    await refreshSettings();
+    if (settingsSnapshot.LIST_ONLY) {
+      showToast(resolveDeleteReason('list_only'));
+      return;
     }
-    titleLine.appendChild(questionLink);
-
-    const metaLine = document.createElement('div');
-    metaLine.className = 'backup-row-meta';
-    const timestampSpan = document.createElement('span');
-    timestampSpan.textContent = formatTimestamp(backup.timestamp);
-    timestampSpan.className = 'meta-pill';
-    metaLine.appendChild(timestampSpan);
-    if (backup && backup.answerTruncated) {
-      const truncatedSpan = document.createElement('span');
-      truncatedSpan.className = 'meta-pill meta-pill-warn';
-      truncatedSpan.textContent = '(truncated)';
-      metaLine.appendChild(truncatedSpan);
-    }
-
-    const toggleButton = document.createElement('button');
-    toggleButton.type = 'button';
-    toggleButton.className = 'backup-toggle';
-    toggleButton.textContent = 'Zobraziť detail';
-
-    const preview = document.createElement('div');
-    preview.className = 'backup-preview';
-    preview.hidden = true;
-
-    const questionBlock = document.createElement('p');
-    questionBlock.className = 'backup-question';
-    questionBlock.textContent = backup && backup.questionText
-      ? backup.questionText
-      : 'Otázka nebola zachytená.';
-
-    const renderButton = document.createElement('button');
-    renderButton.type = 'button';
-    renderButton.className = 'backup-render';
-    renderButton.textContent = 'Render answer (safe)';
-    if (!backup || !backup.answerHTML) {
-      renderButton.disabled = true;
-      renderButton.textContent = 'Bez odpovede na renderovanie';
-    }
-
-    const answerWrapper = document.createElement('div');
-    answerWrapper.className = 'backup-answer-wrapper';
-
-    renderButton.addEventListener('click', () => {
-      if (!backup || !backup.answerHTML) {
+    if (settingsSnapshot.CONFIRM_BEFORE_DELETE) {
+      const confirmed = globalTarget.confirm('Naozaj vymazať zálohu?');
+      if (!confirmed) {
         return;
       }
-      answerWrapper.innerHTML = '';
-      const frame = createAnswerFrame(backup.answerHTML);
-      answerWrapper.appendChild(frame);
+    }
+
+    setRowLoading(rowEl, true);
+    try {
+      const response = await sendMessage({ type: 'delete_backup', id: backup.id, confirm: true });
+      if (!response || response.ok !== true) {
+        const reason = response && response.reason ? response.reason : 'error';
+        showToast(resolveDeleteReason(reason));
+        return;
+      }
+      await loadAndRenderRecent();
+    } catch (_error) {
+      showToast(resolveDeleteReason('error'));
+    } finally {
+      setRowLoading(rowEl, false);
+    }
+  }
+
+  /* Slovensky komentar: Vytvori riadok zo zaznamu zalohy. */
+  function renderRow(backup) {
+    const row = document.createElement('li');
+    row.className = 'row';
+    row.dataset.backupId = backup.id || '';
+
+    const title = document.createElement('a');
+    title.className = 'row-title';
+    const rawTitle = backup && typeof backup.questionText === 'string' ? backup.questionText.trim() : '';
+    title.textContent = rawTitle || '(untitled)';
+    title.title = rawTitle || '(untitled)';
+    if (backup && backup.id) {
+      title.href = chrome.runtime.getURL(`pages/backup_view.html?id=${backup.id}`);
+      title.target = '_blank';
+      title.rel = 'noopener';
+    } else {
+      title.href = '#';
+    }
+
+    const delButton = document.createElement('button');
+    delButton.type = 'button';
+    delButton.className = 'row-del';
+    delButton.title = 'Delete backup';
+    delButton.setAttribute('aria-label', 'Delete backup');
+    delButton.textContent = '×';
+    delButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      handleDelete(backup, row).catch(() => {
+        // Slovensky komentar: Chyba je uz osetrena toastom.
+      });
     });
 
-    preview.appendChild(questionBlock);
-    preview.appendChild(renderButton);
-    preview.appendChild(answerWrapper);
+    const meta = document.createElement('div');
+    meta.className = 'row-meta';
 
-    toggleButton.addEventListener('click', () => {
-      const willShow = preview.hidden;
-      preview.hidden = !willShow;
-      toggleButton.textContent = willShow ? 'Skryť detail' : 'Zobraziť detail';
-    });
+    const timeEl = document.createElement('time');
+    timeEl.className = 'row-time';
+    const timestamp = backup && Number.isFinite(backup.timestamp) ? backup.timestamp : null;
+    if (timestamp) {
+      try {
+        timeEl.dateTime = new Date(timestamp).toISOString();
+      } catch (_error) {
+        // Slovensky komentar: ISO format nemusí byť dostupný pri zlom vstupe.
+      }
+    }
+    timeEl.textContent = formatTimestamp(timestamp);
+    meta.appendChild(timeEl);
 
-    row.appendChild(titleLine);
-    row.appendChild(metaLine);
-    row.appendChild(toggleButton);
-    row.appendChild(preview);
+    if (backup && backup.answerTruncated) {
+      const badge = document.createElement('span');
+      badge.className = 'row-badge';
+      badge.textContent = '(truncated)';
+      meta.appendChild(badge);
+    }
+
+    row.appendChild(title);
+    row.appendChild(delButton);
+    row.appendChild(meta);
+
     return row;
   }
 
-  /* Slovensky komentar: Vykresli zoznam zaloz. */
+  /* Slovensky komentar: Zobrazi najnovsie zaznamy. */
   function renderBackups(backups) {
-    backupsList.innerHTML = '';
+    listHost.innerHTML = '';
     if (!Array.isArray(backups) || backups.length === 0) {
-      toggleEmptyState(true);
-      const empty = document.createElement('div');
-      empty.className = 'backups-empty';
-      empty.textContent = 'Zatiaľ neboli vytvorené žiadne zálohy.';
-      backupsList.appendChild(empty);
       return;
     }
-    toggleEmptyState(false);
     backups.forEach((backup) => {
-      const row = buildBackupRow(backup);
-      backupsList.appendChild(row);
+      const row = renderRow(backup);
+      listHost.appendChild(row);
     });
   }
 
-  /* Slovensky komentar: Ziska pocet zaloz pre vypis. */
-  async function readTotalCount(db) {
-    const transaction = db.transaction([Database.constants.stores.backups], 'readonly');
-    const store = transaction.objectStore(Database.constants.stores.backups);
-    const countRequest = store.count();
-    return await new Promise((resolve, reject) => {
-      countRequest.onsuccess = () => resolve(countRequest.result);
-      countRequest.onerror = () => reject(countRequest.error);
-    });
-  }
-
-  /* Slovensky komentar: Obnovi statistiku a zoznam. */
+  /* Slovensky komentar: Nacita najnovsie zaznamy z IndexedDB. */
   async function loadAndRenderRecent() {
     try {
-      const db = await Database.initDB();
-      let total = 0;
-      try {
-        total = await readTotalCount(db);
-        backupsCount.textContent = `Počet záloh v úložisku: ${total}`;
-      } catch (countError) {
-        backupsCount.textContent = 'Nepodarilo sa načítať počet záloh.';
-        await Logger.log('warn', 'db', 'Failed to count backups', {
-          message: countError && countError.message
-        });
-      }
-
-      let recent = [];
-      try {
-        recent = await Database.getRecentBackups(10);
-      } catch (recentError) {
-        await Logger.log('warn', 'db', 'Failed to load recent backups', {
-          message: recentError && recentError.message
-        });
-      }
-
-      renderBackups(recent);
-      await Logger.log('info', 'db', 'Backups refreshed on searches page', {
-        total,
-        rendered: recent.length
-      });
+      const items = await Database.getRecentBackups(20);
+      renderBackups(items);
     } catch (error) {
-      backupsCount.textContent = 'Nepodarilo sa načítať počet záloh.';
-      toggleEmptyState(true);
-      backupsList.innerHTML = '';
-      const empty = document.createElement('div');
-      empty.className = 'backups-empty';
-      empty.textContent = 'Zatiaľ neboli vytvorené žiadne zálohy.';
-      backupsList.appendChild(empty);
-      await Logger.log('error', 'db', 'Failed to initialize backups view', {
+      await Logger.log('error', 'db', 'Failed to load recent backups on searches page', {
         message: error && error.message
       });
+      listHost.innerHTML = '';
     }
   }
 
-  if (bulkSummaryToggle) {
-    bulkSummaryToggle.addEventListener('click', () => {
-      toggleBulkSummary();
-    });
+  /* Slovensky komentar: Obsluha kliknutia na bulk backup. */
+  async function handleBulkBackupClick() {
+    if (!bulkButton) {
+      return;
+    }
+    if (isBulkRunning) {
+      return;
+    }
+    isBulkRunning = true;
+    bulkButton.disabled = true;
+    try {
+      const response = await sendMessage({ type: 'bulk_backup_open_tabs' });
+      if (!response || response.ok !== true) {
+        const msg = response && response.error ? response.error : 'Bulk backup zlyhal.';
+        showToast(msg);
+      } else {
+        showToast('Bulk backup spustený.');
+      }
+    } catch (error) {
+      showToast((error && error.message) || 'Bulk backup zlyhal.');
+    } finally {
+      isBulkRunning = false;
+      bulkButton.disabled = false;
+    }
   }
 
   chrome.runtime.onMessage.addListener((message) => {
-    if (message && (message.type === 'backups_updated' || message.type === 'searches_reload')) {
+    if (message && message.type === 'backups_updated') {
       loadAndRenderRecent().catch(async (error) => {
-        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
-          await Logger.log('warn', 'db', 'Failed to reload backups after message', {
-            message: error && error.message,
-            trigger: message.type
-          });
-        }
+        await Logger.log('warn', 'db', 'Backups reload failed after broadcast', {
+          message: error && error.message
+        });
       });
     }
     if (message && message.type === 'bulk_backup_summary') {
-      renderBulkSummary(message.summary);
+      showToast('Bulk backup dokončený.');
+      loadAndRenderRecent().catch(async (error) => {
+        await Logger.log('warn', 'db', 'Backups reload failed after summary', {
+          message: error && error.message
+        });
+      });
     }
   });
 
-  await loadBulkSummaryFromStorage();
+  if (bulkButton) {
+    bulkButton.addEventListener('click', () => {
+      handleBulkBackupClick().catch(() => {
+        // Slovensky komentar: Chyba je signalizovana toastom.
+      });
+    });
+  }
+
+  await refreshSettings();
   await loadAndRenderRecent();
 
   if (globalTarget && typeof globalTarget === 'object') {

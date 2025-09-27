@@ -9,40 +9,13 @@
 </head>
 <body>
   <main class="page searches-page">
-    <header class="page-intro">
-      <h1>Zálohy konverzácií</h1>
-      <p class="text-muted">Spravujte bezpečné exporty rozhovorov zo služby ChatGPT.</p>
-    </header>
-
-    <section class="page-section panel empty-state" aria-live="polite">
-      <h2>Žiadne zálohy zatiaľ neexistujú</h2>
-      <p id="empty-message">Kliknite na „Backup now (manual)“ na debug stránke alebo počkajte na automatické behy.</p>
+    <section class="searches-actions">
+      <button id="bulk-open-tabs-btn" class="button-primary" type="button">
+        Backup candidates (open tabs)
+      </button>
+      <div id="searches-toast" class="toast-stack" role="status" aria-live="polite"></div>
     </section>
-
-    <section class="page-section panel stats">
-      <h2>Stav úložiska</h2>
-      <p id="backups-count" class="stat-value">Načítavam počet záloh…</p>
-    </section>
-
-    <section id="bulk-summary" class="page-section panel" aria-live="polite">
-      <div class="panel-heading">
-        <h2>Last bulk backup</h2>
-        <button id="bulk-summary-toggle" type="button" class="button-sub" aria-expanded="false">
-          Show details
-        </button>
-      </div>
-      <p id="bulk-summary-meta" class="text-muted">Bulk backup not executed yet.</p>
-      <div id="bulk-summary-empty" class="backups-empty">No candidates were stored yet.</div>
-      <div id="bulk-summary-list" class="backups-list" role="list" hidden></div>
-    </section>
-
-    <section class="page-section panel">
-      <div class="panel-heading">
-        <h2>Prehľad posledných záloh</h2>
-        <span class="badge">Max 10 položiek</span>
-      </div>
-      <div id="backups-list" class="backups-list" role="list"></div>
-    </section>
+    <ul id="backups-list" class="searches-list" aria-live="polite"></ul>
   </main>
   <script src="../utils.js"></script>
   <script src="searches.js"></script>

@@ -1230,6 +1230,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
+  if (message && message.type === 'delete_backup') {
+    (async () => {
+      const id = message.id;
+      if (!id) {
+        sendResponse({ ok: false, reason: 'error', error: 'missing_id' });
+        return;
+      }
+
+      let settings = null;
+      try {
+        settings = await getSettingsFresh();
+      } catch (settingsError) {
+        await Logger.log('warn', 'settings', 'Delete backup settings load failed', {
+          message: settingsError && settingsError.message
+        });
+      }
+
+      const listOnly = Boolean(settings && settings.LIST_ONLY);
+      if (listOnly) {
+        sendResponse({ ok: false, reason: 'list_only' });
+        return;
+      }
+
+      const confirmRequired = Boolean(settings && settings.CONFIRM_BEFORE_DELETE);
+      if (confirmRequired && !message.confirm) {
+        sendResponse({ ok: false, reason: 'need_confirm' });
+        return;
+      }
+
+      try {
+        await Database.deleteBackup(id);
+        await Logger.log('info', 'db', 'Backup deleted', {
+          reasonCode: 'backup_deleted',
+          id
+        });
+        try {
+          chrome.runtime.sendMessage({ type: 'backups_updated', reason: 'delete', id });
+        } catch (_broadcastError) {
+          // Slovensky komentar: Ak nie je posluchac, chyba sa ignoruje.
+        }
+        sendResponse({ ok: true });
+      } catch (error) {
+        await Logger.log('error', 'db', 'Delete backup failed', {
+          reasonCode: 'delete_failed',
+          id,
+          message: error && error.message
+        });
+        sendResponse({ ok: false, reason: 'error', error: error && error.message });
+      }
+    })();
+    return true;
+  }
   if (message && message.type === 'bulk_backup_open_tabs') {
     (async () => {
       const summary = {
