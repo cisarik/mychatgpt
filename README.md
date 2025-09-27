@@ -45,6 +45,12 @@ Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use DevToo
 
 Settings persist under `chrome.storage.local` key `settings_v1`. The settings page automatically validates loaded values and heals any missing/invalid fields back to defaults, marking corrected inputs with a subtle “(opravené)” hint. Use the **Resetovať na defaulty** button to repopulate the form with the defaults before saving.
 
+### Ako funguje Settings formulár
+- UI používa mapu `kľúč ↔ selektor`, takže `loadSettingsFresh()` načíta aktuálne `settings_v1`, mergne ich s defaultmi a priamo pre-rendruje vstupy cez `renderSettings()`.
+- Tlačidlo **Uložiť** zavolá `readFormValues()` → `saveSettings(next)`, ktoré uloží merge, zaloguje diff a hneď znovu vykreslí formulár bez potreby reloadu.
+- **Resetovať na defaulty** prepíše `settings_v1` na `SETTINGS_DEFAULTS` a následne zavolá `renderSettings()` na idempotentné vyplnenie čistými hodnotami.
+- Textarea pre SAFE URL pracuje len s `settings_v1.SAFE_URL_PATTERNS`, takže storage ostáva jediným zdrojom pravdy aj pri manuálnych úpravách.
+
 ### Safe URL patterns
 - Each non-empty line accepts either:
   - A leading-slash substring (e.g., `/workspaces`) matched against the ChatGPT tab’s `URL.pathname`.

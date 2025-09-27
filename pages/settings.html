@@ -17,69 +17,90 @@
     <form id="settings-form" class="settings-form">
       <section class="page-section panel settings-card">
         <h2>Režimy</h2>
-        <label class="setting-row">
+        <label class="setting-row" for="LIST_ONLY">
           <span class="label-text">List only</span>
           <span class="setting-control">
             <input type="checkbox" id="LIST_ONLY" name="LIST_ONLY" />
             <span class="heal-hint" data-field="LIST_ONLY" hidden>(opravené)</span>
           </span>
         </label>
-        <label class="setting-row">
+        <label class="setting-row" for="DRY_RUN">
           <span class="label-text">Dry run</span>
           <span class="setting-control">
             <input type="checkbox" id="DRY_RUN" name="DRY_RUN" />
             <span class="heal-hint" data-field="DRY_RUN" hidden>(opravené)</span>
           </span>
         </label>
-        <label class="setting-row">
+        <label class="setting-row" for="CAPTURE_ONLY_CANDIDATES">
           <span class="label-text">Iba krátke konverzácie</span>
           <span class="setting-control">
             <input type="checkbox" id="CAPTURE_ONLY_CANDIDATES" name="CAPTURE_ONLY_CANDIDATES" />
             <span class="heal-hint" data-field="CAPTURE_ONLY_CANDIDATES" hidden>(opravené)</span>
           </span>
         </label>
-        <label class="setting-row">
+        <label class="setting-row" for="CONFIRM_BEFORE_DELETE">
           <span class="label-text">Potvrdenie pred zmazaním</span>
           <span class="setting-control">
             <input type="checkbox" id="CONFIRM_BEFORE_DELETE" name="CONFIRM_BEFORE_DELETE" />
             <span class="heal-hint" data-field="CONFIRM_BEFORE_DELETE" hidden>(opravené)</span>
           </span>
         </label>
-        <label class="setting-row">
+        <label class="setting-row" for="AUTO_SCAN">
           <span class="label-text">Automatický scan</span>
           <span class="setting-control">
             <input type="checkbox" id="AUTO_SCAN" name="AUTO_SCAN" />
             <span class="heal-hint" data-field="AUTO_SCAN" hidden>(opravené)</span>
           </span>
         </label>
+        <label class="setting-row" for="SHOW_CANDIDATE_BADGE">
+          <span class="label-text">Zobrazovať badge kandidáta</span>
+          <span class="setting-control">
+            <input type="checkbox" id="SHOW_CANDIDATE_BADGE" name="SHOW_CANDIDATE_BADGE" />
+            <span class="heal-hint" data-field="SHOW_CANDIDATE_BADGE" hidden>(opravené)</span>
+          </span>
+        </label>
       </section>
       <section class="page-section panel settings-card">
         <h2>Limity</h2>
-        <label class="setting-row">
+        <label class="setting-row" for="MAX_MESSAGES">
           <span class="label-text">Max správy</span>
           <span class="setting-control">
             <input type="number" id="MAX_MESSAGES" name="MAX_MESSAGES" min="1" />
             <span class="heal-hint" data-field="MAX_MESSAGES" hidden>(opravené)</span>
           </span>
         </label>
-        <label class="setting-row">
+        <label class="setting-row" for="USER_MESSAGES_MAX">
           <span class="label-text">Max používateľské správy</span>
           <span class="setting-control">
             <input type="number" id="USER_MESSAGES_MAX" name="USER_MESSAGES_MAX" min="1" />
             <span class="heal-hint" data-field="USER_MESSAGES_MAX" hidden>(opravené)</span>
           </span>
         </label>
-        <label class="setting-row">
+        <label class="setting-row" for="SCAN_COOLDOWN_MIN">
           <span class="label-text">Cooldown auto-skenu (min)</span>
           <span class="setting-control">
             <input type="number" id="SCAN_COOLDOWN_MIN" name="SCAN_COOLDOWN_MIN" min="1" />
             <span class="heal-hint" data-field="SCAN_COOLDOWN_MIN" hidden>(opravené)</span>
           </span>
         </label>
+        <label class="setting-row" for="MIN_AGE_MINUTES">
+          <span class="label-text">Min. vek konverzácie (min)</span>
+          <span class="setting-control">
+            <input type="number" id="MIN_AGE_MINUTES" name="MIN_AGE_MINUTES" min="1" />
+            <span class="heal-hint" data-field="MIN_AGE_MINUTES" hidden>(opravené)</span>
+          </span>
+        </label>
+        <label class="setting-row" for="DELETE_LIMIT">
+          <span class="label-text">Limit mazania na cyklus</span>
+          <span class="setting-control">
+            <input type="number" id="DELETE_LIMIT" name="DELETE_LIMIT" min="1" />
+            <span class="heal-hint" data-field="DELETE_LIMIT" hidden>(opravené)</span>
+          </span>
+        </label>
       </section>
       <section class="page-section panel settings-card">
         <h2>Bezpečné URL</h2>
-        <label class="setting-column">
+        <label class="setting-column" for="SAFE_URL_PATTERNS">
           <span class="label-text">Bezpečné URL – vzory (jeden na riadok)</span>
           <textarea id="SAFE_URL_PATTERNS" name="SAFE_URL_PATTERNS" rows="6"></textarea>
           <span class="heal-hint" data-field="SAFE_URL_PATTERNS" hidden>(opravené)</span>

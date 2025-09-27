@@ -6,33 +6,81 @@ const COOLDOWN_KEY = typeof COOLDOWN_STORAGE_KEY !== 'undefined' ? COOLDOWN_STOR
 /* Slovensky komentar: Limit na velkost HTML odpovede pre zalohu. */
 const MAX_ANSWER_BYTES = 250 * 1024;
 
-/* Slovensky komentar: Predvolene nastavenia pre fallback pri nacitani. */
-const SAFE_URL_DEFAULT_CLONE = typeof SAFE_URL_DEFAULTS !== 'undefined' && Array.isArray(SAFE_URL_DEFAULTS)
-  ? () => Array.from(SAFE_URL_DEFAULTS)
-  : () => [];
-const SETTINGS_DEFAULT_SNAPSHOT = typeof SettingsStore === 'object' && typeof SettingsStore.defaults === 'function'
-  ? SettingsStore.defaults()
-  : { SAFE_URL_PATTERNS: SAFE_URL_DEFAULT_CLONE() };
+/* Slovensky komentar: Vrati hlboku kopiu predvolenych nastaveni. */
+function createDefaultSettingsSnapshot() {
+  const base = typeof SETTINGS_DEFAULTS === 'object' && SETTINGS_DEFAULTS
+    ? SETTINGS_DEFAULTS
+    : {
+        LIST_ONLY: true,
+        DRY_RUN: true,
+        CONFIRM_BEFORE_DELETE: true,
+        AUTO_SCAN: false,
+        SHOW_CANDIDATE_BADGE: true,
+        MAX_MESSAGES: 2,
+        USER_MESSAGES_MAX: 2,
+        SCAN_COOLDOWN_MIN: 5,
+        MIN_AGE_MINUTES: 2,
+        DELETE_LIMIT: 10,
+        CAPTURE_ONLY_CANDIDATES: true,
+        SAFE_URL_PATTERNS: [
+          '/workspaces',
+          '/projects',
+          '/new-project',
+          'https://chatgpt.com/c/*'
+        ]
+      };
+  const safePatterns = Array.isArray(base.SAFE_URL_PATTERNS) ? base.SAFE_URL_PATTERNS : [];
+  return {
+    ...base,
+    SAFE_URL_PATTERNS: [...safePatterns]
+  };
+}
 
 /* Slovensky komentar: Ziska cerstve nastavenia zo storage bez cache. */
 async function getSettingsFresh() {
-  const defaults = typeof SettingsStore === 'object' && typeof SettingsStore.defaults === 'function'
-    ? SettingsStore.defaults()
-    : { ...SETTINGS_DEFAULT_SNAPSHOT, SAFE_URL_PATTERNS: SAFE_URL_DEFAULT_CLONE() };
+  const defaults = createDefaultSettingsSnapshot();
   try {
     const stored = await chrome.storage.local.get('settings_v1');
     const raw = stored && typeof stored.settings_v1 === 'object' ? stored.settings_v1 : null;
     if (!raw) {
       return defaults;
     }
-    const normalization = typeof normalizeSafeUrlPatterns === 'function'
-      ? normalizeSafeUrlPatterns(raw.SAFE_URL_PATTERNS)
-      : { patterns: Array.isArray(raw.SAFE_URL_PATTERNS) ? raw.SAFE_URL_PATTERNS : [], fixed: false };
-    return {
+    if (typeof SettingsStore === 'object' && typeof SettingsStore.sanitize === 'function') {
+      const { settings } = SettingsStore.sanitize(raw);
+      const sanitized = {
+        ...defaults,
+        ...settings
+      };
+      const normalizedPatterns = typeof normalizeSafeUrlPatterns === 'function'
+        ? normalizeSafeUrlPatterns(settings.SAFE_URL_PATTERNS)
+        : sanitized.SAFE_URL_PATTERNS;
+      sanitized.SAFE_URL_PATTERNS = Array.isArray(normalizedPatterns) && normalizedPatterns.length
+        ? normalizedPatterns
+        : [...defaults.SAFE_URL_PATTERNS];
+      return sanitized;
+    }
+    const merged = {
       ...defaults,
-      ...raw,
-      SAFE_URL_PATTERNS: normalization.patterns
+      ...raw
     };
+    ['LIST_ONLY', 'DRY_RUN', 'CONFIRM_BEFORE_DELETE', 'AUTO_SCAN', 'SHOW_CANDIDATE_BADGE', 'CAPTURE_ONLY_CANDIDATES'].forEach((key) => {
+      if (typeof raw[key] === 'boolean') {
+        merged[key] = raw[key];
+      } else {
+        merged[key] = defaults[key];
+      }
+    });
+    ['MAX_MESSAGES', 'USER_MESSAGES_MAX', 'SCAN_COOLDOWN_MIN', 'MIN_AGE_MINUTES', 'DELETE_LIMIT'].forEach((key) => {
+      const value = Number(raw[key]);
+      merged[key] = Number.isFinite(value) && value >= 1 ? Math.floor(value) : defaults[key];
+    });
+    const normalizedPatterns = typeof normalizeSafeUrlPatterns === 'function'
+      ? normalizeSafeUrlPatterns(raw.SAFE_URL_PATTERNS ?? merged.SAFE_URL_PATTERNS)
+      : merged.SAFE_URL_PATTERNS;
+    merged.SAFE_URL_PATTERNS = Array.isArray(normalizedPatterns) && normalizedPatterns.length
+      ? normalizedPatterns
+      : [...defaults.SAFE_URL_PATTERNS];
+    return merged;
   } catch (error) {
     console.error('getSettingsFresh failed', error);
     return defaults;
