@@ -1,5 +1,11 @@
 /* Slovensky komentar: Debug stranka ponuka manualne akcie bez ziveho streamu logov. */
-(async function () {
+async function initDebugPage() {
+  const backupDeleteButton = document.getElementById('backup-delete-active-btn');
+  if (!backupDeleteButton) {
+    console.warn('Debug: backup-delete button missing');
+    return;
+  }
+  const backupDeleteHistory = document.getElementById('backup-delete-history');
   const testLogButton = document.getElementById('test-log-btn');
   const autoscanButton = document.getElementById('autoscan-feed-btn');
   const scanResultContainer = document.getElementById('scan-result');
@@ -16,8 +22,6 @@
   const backupModeLabel = document.getElementById('backup-mode-label');
   const backupToastContainer = document.getElementById('backup-toast');
   const backupHistoryContainer = document.getElementById('backup-history');
-  const backupDeleteButton = document.getElementById('backup-delete-active-btn');
-  const backupDeleteHistory = document.getElementById('backup-delete-history');
   const debugToastContainer = document.getElementById('debug-toast');
   const bulkOpenTabsButton = document.getElementById('bulk-open-tabs-btn');
   const bulkOpenTabsHistory = document.getElementById('bulk-open-tabs-history');
@@ -74,33 +78,29 @@
       ? new Date(entry.timestamp)
       : new Date();
     const timestamp = Number.isFinite(timestampValue.getTime())
-      ? timestampValue.toLocaleTimeString()
+      ? timestampValue.toLocaleTimeString([], { hour12: false })
       : '';
-    const status = entry?.ok
-      ? entry.didDelete
-        ? 'deleted'
-        : 'completed'
-      : 'failed';
-    const reason = entry?.reasonCode || 'unknown';
-    const candidate = entry?.candidate === true ? 'yes' : entry?.candidate === false ? 'no' : 'unknown';
-    const dryRun = entry?.dryRun ? 'dry-run' : 'live';
-    const recordId = entry?.backup && entry.backup.recordId ? entry.backup.recordId : null;
+    const result = entry?.ok === true ? 'ok' : 'fail';
+    const reason = typeof entry?.reasonCode === 'string' && entry.reasonCode ? entry.reasonCode : 'unknown';
+    const candidate = entry?.candidate === true ? 'true' : entry?.candidate === false ? 'false' : 'null';
+    const dryRun = entry?.dryRun === true ? 'true' : entry?.dryRun === false ? 'false' : 'null';
     const steps = entry?.ui && entry.ui.steps
       ? entry.ui.steps
       : { menu: false, item: false, confirm: false };
-    const stepLabel = `steps=menu:${steps.menu ? '1' : '0'}/item:${steps.item ? '1' : '0'}/confirm:${steps.confirm ? '1' : '0'}`;
+    const recordId = entry?.backup && (entry.backup.recordId || entry.backup.id)
+      ? entry.backup.recordId || entry.backup.id
+      : null;
+    const stepLabel = `steps=menu:${steps.menu ? '1' : '0'}|item:${steps.item ? '1' : '0'}|confirm:${steps.confirm ? '1' : '0'}`;
     const parts = [];
     if (timestamp) {
       parts.push(`[${timestamp}]`);
     }
-    parts.push(`status=${status}`);
+    parts.push(`result=${result}`);
     parts.push(`reason=${reason}`);
     parts.push(`candidate=${candidate}`);
-    parts.push(dryRun);
-    if (recordId) {
-      parts.push(`id=${recordId}`);
-    }
+    parts.push(`dryRun=${dryRun}`);
     parts.push(stepLabel);
+    parts.push(`id=${recordId ? recordId : 'null'}`);
     return parts.join(' ');
   }
 
@@ -110,10 +110,10 @@
       return;
     }
     const block = document.createElement('div');
-    block.className = 'toast';
+    block.className = 'history-entry';
     block.textContent = formatBackupDeleteHistory(entry || {});
     backupDeleteHistory.prepend(block);
-    while (backupDeleteHistory.childElementCount > 6) {
+    while (backupDeleteHistory.childElementCount > 10) {
       backupDeleteHistory.removeChild(backupDeleteHistory.lastElementChild);
     }
   }
@@ -121,42 +121,52 @@
   /* Slovensky komentar: Vrati toast spravu podla vysledku backup-delete. */
   function getBackupDeleteToastMessage(summary) {
     if (!summary) {
-      return 'Backup & delete failed.';
+      return 'Failed: unknown';
     }
-    if (summary.ok) {
-      if (summary.didDelete) {
-        return 'Backup & delete: done.';
-      }
-      if (summary.reasonCode === 'dry_run' || summary.dryRun) {
-        return 'Dry run—backup only.';
-      }
-      if (summary.reasonCode === 'blocked_by_list_only') {
-        return 'Read-only mode: nothing deleted.';
-      }
-      return summary.message || 'Backup-delete completed.';
+    if (summary.ok && summary.didDelete) {
+      return 'Backup & delete: done.';
     }
-    switch (summary.reasonCode) {
-      case 'blocked_by_list_only':
-        return 'Read-only mode: nothing deleted.';
-      case 'dry_run':
-        return 'Dry run—backup only.';
-      case 'not_candidate':
-        return 'Chat skipped—heuristics blocked deletion.';
-      case 'not_chatgpt':
-        return 'Active tab is not chatgpt.com.';
-      case 'no_active_tab':
-        return 'No active tab available.';
-      case 'menu_not_found':
-        return 'Menu button not found.';
-      case 'delete_item_not_found':
-        return 'Delete item not found.';
-      case 'confirm_dialog_not_found':
-        return 'Confirm button not found.';
-      case 'ui_click_failed':
-        return 'Delete clicks failed.';
-      default:
-        return summary.message || 'Backup & delete failed.';
+    if (summary.ok && summary.reasonCode === 'dry_run') {
+      return 'Dry run—backup only.';
     }
+    if (summary.reasonCode === 'blocked_by_list_only') {
+      return 'Read-only: nothing deleted.';
+    }
+    const code = typeof summary.reasonCode === 'string' && summary.reasonCode ? summary.reasonCode : 'unknown';
+    return `Failed: ${code}`;
+  }
+
+  /* Slovensky komentar: Normalizuje odozvu pre historicku stopu. */
+  function normalizeBackupDeleteSummary(raw) {
+    const candidate = typeof raw?.candidate === 'boolean' ? raw.candidate : null;
+    const dryRun = raw?.dryRun === true ? true : raw?.dryRun === false ? false : null;
+    const steps = {
+      menu: Boolean(raw?.ui?.steps?.menu),
+      item: Boolean(raw?.ui?.steps?.item),
+      confirm: Boolean(raw?.ui?.steps?.confirm)
+    };
+    const recordId = raw?.backup && typeof raw.backup === 'object'
+      ? raw.backup.recordId || raw.backup.id || (raw.backup.record && raw.backup.record.id) || null
+      : null;
+    const backup = raw?.backup && typeof raw.backup === 'object'
+      ? { ...raw.backup, recordId }
+      : { recordId };
+    const backupDryRun = typeof backup?.dryRun === 'boolean' ? backup.dryRun : null;
+    const effectiveDryRun = dryRun !== null ? dryRun : backupDryRun;
+    return {
+      ok: raw?.ok === true,
+      didDelete: raw?.didDelete === true,
+      reasonCode: typeof raw?.reasonCode === 'string' && raw.reasonCode ? raw.reasonCode : 'unknown',
+      candidate,
+      dryRun: effectiveDryRun,
+      backup,
+      ui: {
+        ok: raw?.ui?.ok === true,
+        reason: typeof raw?.ui?.reason === 'string' ? raw.ui.reason : undefined,
+        steps
+      },
+      timestamp: Number.isFinite(raw?.timestamp) ? raw.timestamp : Date.now()
+    };
   }
 
   /* Slovensky komentar: Extrahuje surovu chybovu spravu pre toast. */
@@ -964,62 +974,67 @@
     });
   }
 
-  if (backupDeleteButton) {
-    backupDeleteButton.addEventListener('click', async () => {
-      const originalLabel = backupDeleteButton.textContent;
-      backupDeleteButton.disabled = true;
-      backupDeleteButton.textContent = 'Working…';
+  backupDeleteButton.addEventListener('click', async () => {
+    const originalLabel = backupDeleteButton.textContent;
+    backupDeleteButton.disabled = true;
+    backupDeleteButton.textContent = 'Working…';
 
-      let confirmRequired = true;
-      try {
-        const { settings } = await SettingsStore.load();
-        confirmRequired = Boolean(settings.CONFIRM_BEFORE_DELETE);
-      } catch (error) {
-        await Logger.log('warn', 'debug', 'Backup-delete confirm guard unavailable', {
-          message: error && error.message
-        });
-      }
+    let confirmRequired = true;
+    try {
+      const { settings } = await SettingsStore.load();
+      confirmRequired = Boolean(settings.CONFIRM_BEFORE_DELETE);
+    } catch (error) {
+      await Logger.log('warn', 'debug', 'Backup-delete confirm guard unavailable', {
+        message: error && error.message
+      });
+    }
 
-      if (confirmRequired) {
-        const confirmed = window.confirm('Naozaj: zálohovať a zmazať aktívny chat?');
-        if (!confirmed) {
-          showDebugToast('Cancelled');
-          backupDeleteButton.disabled = false;
-          backupDeleteButton.textContent = originalLabel;
-          return;
-        }
-      }
-
-      try {
-        const response = await requestBackupDeleteActive();
-        const entry = {
-          ...response,
-          candidate: typeof response?.candidate === 'boolean' ? response.candidate : null
-        };
-        appendBackupDeleteHistoryEntry(entry);
-        const toastMessage = getBackupDeleteToastMessage(response);
-        if (toastMessage) {
-          showDebugToast(toastMessage);
-        }
-        await Logger.log(response?.ok ? 'info' : 'warn', 'debug', 'Backup-delete summary (debug page)', {
-          reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
-          didDelete: Boolean(response && response.didDelete),
-          dryRun: Boolean(response && response.dryRun),
-          candidate: Boolean(response && response.candidate)
-        });
-      } catch (error) {
-        const message = extractErrorMessage(error, 'Runtime error');
-        appendBackupDeleteHistoryEntry({ ok: false, reasonCode: 'runtime_error', message, dryRun: false, candidate: null });
-        showDebugToast(message);
-        await Logger.log('error', 'debug', 'Backup-delete threw error (debug page)', {
-          message
-        });
-      } finally {
+    if (confirmRequired) {
+      const confirmed = window.confirm('Naozaj zálohovať a zmazať aktívny chat?');
+      if (!confirmed) {
+        showDebugToast('Cancelled');
         backupDeleteButton.disabled = false;
         backupDeleteButton.textContent = originalLabel;
+        return;
       }
-    });
-  }
+    }
+
+    try {
+      const response = await requestBackupDeleteActive();
+      const summary = normalizeBackupDeleteSummary(response || { ok: false, reasonCode: 'no_response' });
+      appendBackupDeleteHistoryEntry(summary);
+      const toastMessage = getBackupDeleteToastMessage(summary);
+      if (toastMessage) {
+        showDebugToast(toastMessage);
+      }
+      await Logger.log(summary.ok ? 'info' : 'warn', 'debug', 'Backup-delete summary (debug page)', {
+        reasonCode: summary.reasonCode,
+        didDelete: summary.didDelete,
+        dryRun: summary.dryRun,
+        candidate: summary.candidate
+      });
+    } catch (error) {
+      const message = extractErrorMessage(error, 'Runtime error');
+      const failure = normalizeBackupDeleteSummary({
+        ok: false,
+        didDelete: false,
+        reasonCode: 'runtime_error',
+        dryRun: null,
+        candidate: null,
+        timestamp: Date.now(),
+        ui: { steps: { menu: false, item: false, confirm: false } },
+        backup: {}
+      });
+      appendBackupDeleteHistoryEntry(failure);
+      showDebugToast('Failed: runtime_error');
+      await Logger.log('error', 'debug', 'Backup-delete threw error (debug page)', {
+        message
+      });
+    } finally {
+      backupDeleteButton.disabled = false;
+      backupDeleteButton.textContent = originalLabel;
+    }
+  });
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message && message.type === 'bulk_backup_summary') {
@@ -1043,4 +1058,10 @@
 
   await refreshBackupModeLabel();
   await Logger.log('info', 'db', 'Debug page opened');
-})();
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initDebugPage, { once: true });
+} else {
+  initDebugPage();
+}

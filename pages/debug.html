@@ -34,7 +34,6 @@
         <button id="probe-btn">Probe metadata (read-only)</button>
         <button id="heuristics-btn">Evaluate heuristics (active tab)</button>
         <button id="eval-backup-btn" class="button-sub">Evaluate &amp; Backup (if candidate)</button>
-        <button id="backup-delete-active-btn" class="button-sub">Backup &amp; Delete (active tab)</button>
         <button id="autoscan-feed-btn">Auto-scan feed (stub)</button>
         <button id="capture-btn">Capture preview (read-only)</button>
         <button id="backup-btn" class="button-sub">
@@ -43,6 +42,10 @@
         </button>
         <button id="bulk-open-tabs-btn" class="button-sub">Backup candidates (open tabs)</button>
       </div>
+      <div class="row">
+        <button id="backup-delete-active-btn" class="button-sub">Backup &amp; Delete (active tab)</button>
+      </div>
+      <div id="backup-delete-history" class="history-feed" aria-live="polite"></div>
     </section>
 
     <div id="debug-toast" class="toast-stack" role="status" aria-live="polite"></div>
@@ -60,8 +63,6 @@
       <div id="heuristics-results" class="toast-stack" role="status" aria-live="polite"></div>
       <h2 class="section-title">Evaluate &amp; Backup history</h2>
       <div id="eval-backup-history" class="toast-stack" role="status" aria-live="polite"></div>
-      <h2 class="section-title">Backup &amp; Delete (active tab)</h2>
-      <div id="backup-delete-history" class="toast-stack" role="status" aria-live="polite"></div>
       <h2 class="section-title">Bulk backup (open tabs)</h2>
       <div id="bulk-open-tabs-history" class="toast-stack" role="status" aria-live="polite"></div>
       <h2 class="section-title">Manual backup status</h2>

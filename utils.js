@@ -30,6 +30,15 @@ const SETTINGS_DEFAULTS = Object.freeze({
 /* Slovensky komentar: Ziska referenciu na globalny objekt pre rozne prostredia. */
 const globalTarget = typeof self !== 'undefined' ? self : window;
 
+/* Slovensky komentar: Asynchronne pocka stanoveny pocet milisekund. */
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+
+/* Slovensky komentar: Normalizuje textovy obsah uzla na male pismena. */
+const normText = (node) => {
+  const raw = node && typeof node.textContent === 'string' ? node.textContent : '';
+  return String(raw).trim().toLowerCase();
+};
+
 /* Slovensky komentar: Bezpecne nacita logy zo storage. */
 async function readLogs() {
   try {
@@ -349,7 +358,14 @@ globalTarget.isNoReceiverError = isNoReceiverError;
 globalTarget.withManualTimeout = withManualTimeout;
 globalTarget.safeQueryAll = safeQueryAll;
 globalTarget.normalizeNodeText = normalizeNodeText;
+globalTarget.wait = wait;
+globalTarget.normText = normText;
 globalTarget.COOLDOWN_STORAGE_KEY = COOLDOWN_STORAGE_KEY;
 globalTarget.SAFE_URL_DEFAULTS = SAFE_URL_DEFAULTS;
 globalTarget.SETTINGS_DEFAULTS = SETTINGS_DEFAULTS;
 globalTarget.formatDate = formatDate;
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports.wait = wait;
+  module.exports.normText = normText;
+}

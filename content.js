@@ -220,6 +220,19 @@ const normalizeNodeText = typeof window !== 'undefined' && typeof window.normali
       return raw.trim().toLowerCase();
     };
 
+/* Slovensky komentar: Poskytne spolocne cakanie pre interakcie. */
+const waitHelper = typeof window !== 'undefined' && typeof window.wait === 'function'
+  ? window.wait
+  : (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/* Slovensky komentar: Normalizuje text cez globalny helper. */
+function readNormalized(node) {
+  if (typeof window !== 'undefined' && typeof window.normText === 'function') {
+    return window.normText(node);
+  }
+  return normalizeNodeText(node);
+}
+
 /* Slovensky komentar: Overi, ci je element interaktivny a nie je zakazany. */
 function isNodeEnabled(node) {
   if (!node) {
@@ -250,7 +263,7 @@ async function clickAndWait(sel, { textEquals = null, timeoutMs = 1500 } = {}) {
           return null;
         }
         if (expectedText) {
-          const match = candidates.find((node) => normalizeNodeText(node) === expectedText);
+          const match = candidates.find((node) => readNormalized(node) === expectedText);
           if (match) {
             return match;
           }
@@ -265,7 +278,7 @@ async function clickAndWait(sel, { textEquals = null, timeoutMs = 1500 } = {}) {
     if (element) {
       break;
     }
-    await new Promise((resolve) => setTimeout(resolve, 70));
+    await waitHelper(70);
   }
 
   if (!element) {
@@ -286,7 +299,7 @@ async function clickAndWait(sel, { textEquals = null, timeoutMs = 1500 } = {}) {
     return { ok: false, element, error: clickError };
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 120));
+  await waitHelper(120);
   return { ok: true, element };
 }
 
@@ -299,14 +312,7 @@ function findMoreActionsButton() {
     'button[aria-label="More"]'
   ];
   for (const selector of selectors) {
-    const candidates = safeQueryAll(selector).filter((node) => isNodeEnabled(node));
-    if (candidates.length) {
-      return candidates[0];
-    }
-  }
-  const optionalSelectors = ['button:has(svg[aria-label="More"])'];
-  for (const selector of optionalSelectors) {
-    const candidates = safeQueryAll(selector).filter((node) => isNodeEnabled(node));
+    const candidates = safeQueryAll(`${selector}:not([disabled])`).filter((node) => isNodeEnabled(node));
     if (candidates.length) {
       return candidates[0];
     }
@@ -322,21 +328,24 @@ function findDeleteMenuItem() {
     if (!isNodeEnabled(node)) {
       continue;
     }
-    if (normalizeNodeText(node) === targetText) {
+    if (readNormalized(node) === targetText) {
       return node;
     }
   }
 
-  const menus = safeQueryAll('[role="menu"]');
-  for (const menu of menus) {
-    const interactive = Array.from(menu.querySelectorAll('button, div, a'));
-    for (const node of interactive) {
-      if (!isNodeEnabled(node)) {
-        continue;
-      }
-      const normalized = normalizeNodeText(node);
-      if (normalized === targetText || normalized.includes(targetText)) {
-        return node;
+  const menuSelectors = ['[role="menu"]', '[data-popover-root]'];
+  for (const selector of menuSelectors) {
+    const scopes = safeQueryAll(selector);
+    for (const scope of scopes) {
+      const interactive = Array.from(scope.querySelectorAll('button, div, a'));
+      for (const node of interactive) {
+        if (!isNodeEnabled(node)) {
+          continue;
+        }
+        const normalized = readNormalized(node);
+        if (normalized === targetText || normalized.includes(targetText)) {
+          return node;
+        }
       }
     }
   }
@@ -346,7 +355,7 @@ function findDeleteMenuItem() {
     if (!isNodeEnabled(node)) {
       continue;
     }
-    const normalized = normalizeNodeText(node);
+    const normalized = readNormalized(node);
     if (normalized === targetText || normalized.includes(targetText)) {
       return node;
     }
@@ -358,23 +367,23 @@ function findDeleteMenuItem() {
 function findDeleteConfirmButton() {
   const dialogs = safeQueryAll('[role="dialog"], [role="alertdialog"]');
   for (const dialog of dialogs) {
-    const buttons = Array.from(dialog.querySelectorAll('[role="button"], button'));
+    const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]'));
     for (const node of buttons) {
       if (!isNodeEnabled(node)) {
         continue;
       }
-      if (normalizeNodeText(node).includes('delete')) {
+      if (readNormalized(node).includes('delete')) {
         return node;
       }
     }
   }
 
-  const fallbackButtons = safeQueryAll('button');
+  const fallbackButtons = safeQueryAll('button, [role="button"]');
   for (const node of fallbackButtons) {
     if (!isNodeEnabled(node)) {
       continue;
     }
-    if (normalizeNodeText(node).includes('delete')) {
+    if (readNormalized(node).includes('delete')) {
       return node;
     }
   }

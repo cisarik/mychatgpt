@@ -1233,43 +1233,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'backup_and_delete_active') {
     (async () => {
       const traceId = `backup-delete:${Date.now()}`;
+      const stepsTemplate = { menu: false, item: false, confirm: false };
+      let logLevel = 'info';
+      let activeTab = null;
       const summary = {
         ok: false,
-        reasonCode: 'ui_click_failed',
-        dryRun: false,
         didDelete: false,
+        reasonCode: 'runtime_error',
         candidate: false,
-        evaluation: null,
-        backup: null,
-        ui: null,
+        dryRun: null,
+        backup: { ok: false, recordId: null, reasonCode: null },
+        ui: { ok: false, reason: undefined, steps: { ...stepsTemplate } },
         timestamp: Date.now()
       };
-      let logLevel = 'info';
-      let logSteps = null;
-      let logId = null;
-      let logUrl = null;
-      let logTitle = null;
-      const baseSteps = { menu: false, item: false, confirm: false };
-      let finalized = false;
 
-      const finalizeAndSend = async () => {
-        if (finalized) {
-          return;
-        }
-        finalized = true;
+      const finalize = async () => {
         summary.timestamp = Date.now();
-        const logPayload = {
-          reasonCode: summary.reasonCode,
+        const stepsMeta = summary.ui && summary.ui.steps ? summary.ui.steps : { ...stepsTemplate };
+        const logMeta = {
           didDelete: summary.didDelete,
           dryRun: summary.dryRun,
-          candidate: summary.candidate,
-          steps: logSteps,
-          id: logId,
-          url: logUrl,
-          title: logTitle
+          url: activeTab && activeTab.url ? activeTab.url : null,
+          title: activeTab && activeTab.title ? activeTab.title : null,
+          steps: stepsMeta,
+          recordId: summary.backup && summary.backup.recordId ? summary.backup.recordId : null,
+          candidate: summary.candidate
         };
         try {
-          await Logger.log(logLevel, 'ui', 'Backup-delete active tab summary', logPayload);
+          await Logger.log(logLevel, 'ui', summary.reasonCode, logMeta);
         } catch (logError) {
           console.warn('backup_and_delete_active log failed', logError);
         }
@@ -1277,31 +1268,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       };
 
       try {
-        const activeTab = await getActiveTab();
+        activeTab = await getActiveTab();
         if (!activeTab) {
           summary.reasonCode = 'no_active_tab';
+          summary.ui.reason = 'no_active_tab';
+          summary.dryRun = false;
           logLevel = 'warn';
-          const stepsSnapshot = { ...baseSteps };
-          summary.ui = { ok: false, reason: 'no_active_tab', steps: stepsSnapshot, ts: Date.now() };
-          logSteps = stepsSnapshot;
-          await finalizeAndSend();
           return;
         }
 
-        logUrl = activeTab.url || null;
-        logTitle = activeTab.title || null;
-
         if (!activeTab.url || !activeTab.url.startsWith('https://chatgpt.com/')) {
           summary.reasonCode = 'not_chatgpt';
+          summary.ui.reason = 'not_chatgpt';
+          summary.dryRun = false;
           logLevel = 'warn';
-          const stepsSnapshot = { ...baseSteps };
-          summary.ui = { ok: false, reason: 'not_chatgpt', steps: stepsSnapshot, ts: Date.now() };
-          logSteps = stepsSnapshot;
-          await finalizeAndSend();
           return;
         }
 
         const settings = await getSettingsFresh();
+        const settingsDryRun = typeof settings?.DRY_RUN === 'boolean' ? settings.DRY_RUN : null;
+        summary.dryRun = settingsDryRun;
 
         let probePayload = null;
         try {
@@ -1311,95 +1297,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const evaluation = evaluateCandidateFromProbe(probePayload, settings);
-        summary.evaluation = evaluation;
         summary.candidate = Boolean(evaluation && evaluation.ok);
 
-        if (!evaluation.ok) {
+        if (!evaluation || !evaluation.ok) {
           summary.reasonCode = 'not_candidate';
+          summary.ui.reason = 'not_candidate';
           logLevel = 'info';
-          const stepsSnapshot = { ...baseSteps };
-          summary.ui = { ok: false, reason: 'not_candidate', steps: stepsSnapshot, ts: Date.now() };
-          logSteps = stepsSnapshot;
-          await finalizeAndSend();
           return;
         }
 
-        const captureResult = await (async () => {
-          try {
-            return await captureAndPersistBackup(activeTab, settings, traceId, {
-              fallbackConvoId: evaluation.convoId || null
-            });
-          } catch (captureError) {
-            console.warn('captureAndPersistBackup failed', captureError);
-            return null;
-          }
-        })();
+        const captureResult = await captureAndPersistBackup(activeTab, settings, traceId, {
+          fallbackConvoId: evaluation.convoId || null
+        });
 
         if (!captureResult) {
-          summary.backup = {
-            ok: false,
-            reasonCode: 'backup_capture_error',
-            dryRun: Boolean(settings && settings.DRY_RUN),
-            recordId: null
-          };
-          summary.dryRun = Boolean(settings && settings.DRY_RUN);
-          summary.reasonCode = 'ui_click_failed';
+          summary.backup = { ok: false, recordId: null, reasonCode: 'backup_capture_error' };
+          summary.reasonCode = 'backup_capture_error';
           logLevel = 'error';
-          const stepsSnapshot = { ...baseSteps };
-          summary.ui = { ok: false, reason: 'ui_click_failed', steps: stepsSnapshot, ts: Date.now() };
-          logSteps = stepsSnapshot;
-          await finalizeAndSend();
           return;
         }
 
         const backupRecordId = captureResult.record && captureResult.record.id
           ? captureResult.record.id
-          : captureResult.logMeta && captureResult.logMeta.duplicateId
-          ? captureResult.logMeta.duplicateId
+          : captureResult.logMeta && (captureResult.logMeta.id || captureResult.logMeta.duplicateId)
+          ? captureResult.logMeta.id || captureResult.logMeta.duplicateId
           : null;
         const backupOk = Boolean(captureResult.ok || captureResult.reasonCode === 'backup_duplicate');
         summary.backup = {
           ok: backupOk,
-          reasonCode: captureResult.reasonCode,
-          dryRun: Boolean(captureResult.dryRun),
-          recordId: backupRecordId
+          recordId: backupRecordId,
+          reasonCode: captureResult.reasonCode || null
         };
-        summary.dryRun = Boolean(captureResult.dryRun);
-        if (backupRecordId) {
-          logId = backupRecordId;
+        if (typeof captureResult.dryRun === 'boolean') {
+          summary.dryRun = captureResult.dryRun;
         }
 
         if (!backupOk) {
-          summary.reasonCode = 'ui_click_failed';
+          summary.reasonCode = captureResult.reasonCode || 'backup_capture_error';
           logLevel = 'error';
-          const stepsSnapshot = { ...baseSteps };
-          summary.ui = { ok: false, reason: 'ui_click_failed', steps: stepsSnapshot, ts: Date.now() };
-          logSteps = stepsSnapshot;
-          await finalizeAndSend();
           return;
         }
 
-        if (summary.dryRun) {
+        if (summary.dryRun === true || settingsDryRun === true) {
           summary.ok = true;
-          summary.reasonCode = 'dry_run';
           summary.didDelete = false;
+          summary.reasonCode = 'dry_run';
+          summary.dryRun = true;
+          summary.ui.reason = 'dry_run';
           logLevel = 'info';
-          const stepsSnapshot = { ...baseSteps };
-          summary.ui = { ok: false, reason: 'dry_run', steps: stepsSnapshot, ts: Date.now() };
-          logSteps = stepsSnapshot;
-          await finalizeAndSend();
           return;
         }
 
         if (settings && settings.LIST_ONLY) {
           summary.ok = true;
-          summary.reasonCode = 'blocked_by_list_only';
           summary.didDelete = false;
+          summary.reasonCode = 'blocked_by_list_only';
+          summary.ui.reason = 'blocked_by_list_only';
           logLevel = 'info';
-          const stepsSnapshot = { ...baseSteps };
-          summary.ui = { ok: false, reason: 'blocked_by_list_only', steps: stepsSnapshot, ts: Date.now() };
-          logSteps = stepsSnapshot;
-          await finalizeAndSend();
           return;
         }
 
@@ -1412,92 +1366,56 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         if (!uiResponse) {
           summary.reasonCode = 'ui_click_failed';
+          summary.ui.reason = 'ui_click_failed';
           logLevel = 'error';
-          const stepsSnapshot = { ...baseSteps };
-          summary.ui = { ok: false, reason: 'ui_click_failed', steps: stepsSnapshot, ts: Date.now() };
-          logSteps = stepsSnapshot;
-          await finalizeAndSend();
           return;
         }
 
-        const normalizedSteps = {
+        const steps = {
           menu: Boolean(uiResponse.steps && uiResponse.steps.menu),
           item: Boolean(uiResponse.steps && uiResponse.steps.item),
           confirm: Boolean(uiResponse.steps && uiResponse.steps.confirm)
         };
-        logSteps = normalizedSteps;
+        summary.ui.steps = steps;
+        summary.ui.ok = Boolean(uiResponse.ok);
 
-        const allowedReasons = new Set([
-          'ui_delete_ok',
-          'dry_run',
-          'blocked_by_list_only',
-          'not_candidate',
-          'not_chatgpt',
-          'no_active_tab',
-          'menu_not_found',
-          'delete_item_not_found',
-          'confirm_dialog_not_found',
-          'ui_click_failed'
-        ]);
-        const reasonRaw = uiResponse.reason || (uiResponse.ok ? 'ui_delete_ok' : 'ui_click_failed');
-        const normalizedReason = allowedReasons.has(reasonRaw)
-          ? reasonRaw
+        const uiReasonRaw = typeof uiResponse.reason === 'string'
+          ? uiResponse.reason
+          : uiResponse.ok
+          ? 'ui_delete_ok'
+          : 'ui_click_failed';
+        const uiReason = ['menu_not_found', 'delete_item_not_found', 'confirm_dialog_not_found', 'ui_click_failed', 'ui_delete_ok'].includes(uiReasonRaw)
+          ? uiReasonRaw
           : uiResponse.ok
           ? 'ui_delete_ok'
           : 'ui_click_failed';
 
-        summary.ui = {
-          ok: Boolean(uiResponse.ok),
-          reason: normalizedReason,
-          steps: normalizedSteps,
-          ts: Number.isFinite(uiResponse.ts) ? uiResponse.ts : Date.now()
-        };
+        summary.ui.reason = uiReason;
+        summary.didDelete = summary.ui.ok;
+        summary.ok = summary.ui.ok;
+        summary.reasonCode = summary.ui.ok ? 'ui_delete_ok' : uiReason;
 
-        if (summary.ui.ok) {
-          summary.ok = true;
-          summary.reasonCode = 'ui_delete_ok';
-          summary.didDelete = true;
+        if (summary.ok) {
           logLevel = 'info';
+        } else if (uiReason === 'menu_not_found' || uiReason === 'delete_item_not_found' || uiReason === 'confirm_dialog_not_found') {
+          logLevel = 'warn';
         } else {
-          summary.ok = false;
-          summary.didDelete = false;
-          if (
-            normalizedReason === 'menu_not_found'
-            || normalizedReason === 'delete_item_not_found'
-            || normalizedReason === 'confirm_dialog_not_found'
-          ) {
-            summary.reasonCode = normalizedReason;
-            logLevel = 'warn';
-          } else {
-            summary.reasonCode = 'ui_click_failed';
-            logLevel = 'error';
-          }
+          logLevel = 'error';
         }
       } catch (error) {
         console.error('backup_and_delete_active crashed', error);
         summary.ok = false;
-        const allowed = [
-          'no_active_tab',
-          'not_chatgpt',
-          'not_candidate',
-          'dry_run',
-          'blocked_by_list_only',
-          'ui_delete_ok',
-          'menu_not_found',
-          'delete_item_not_found',
-          'confirm_dialog_not_found',
-          'ui_click_failed'
-        ];
-        if (!allowed.includes(summary.reasonCode)) {
+        if (summary.reasonCode === 'runtime_error') {
           summary.reasonCode = 'ui_click_failed';
         }
         logLevel = 'error';
       } finally {
-        await finalizeAndSend();
+        await finalize();
       }
     })();
     return true;
   }
+
   if (message && message.type === 'delete_backup') {
     (async () => {
       const id = message.id;

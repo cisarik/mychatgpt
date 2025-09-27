@@ -138,8 +138,11 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 - The background worker reuses truncation and duplicate checks (via `Database.getBackupByConvoId`) so existing backups remain untouched.
 
 ## Backup & Delete (active tab)
-- The Debug toolbar exposes **Backup & Delete (active tab)** under Evaluate & Backup. The background worker probes the active `https://chatgpt.com/c/<uuid>` tab and skips UI touches with reason `not_candidate` when heuristics reject the chat.
-- Guards: `CONFIRM_BEFORE_DELETE` surfaces `confirm('Naozaj: zálohovať a zmazať aktívny chat?')` before messaging the worker, `DRY_RUN=true` finishes with reason `dry_run` after saving/reusing the backup, and `LIST_ONLY=true` returns `blocked_by_list_only` without attempting the kebab menu.
-- Expected results: successful deletions report `ui_delete_ok`, dry runs toast “Dry run—backup only.”, and list-only mode shows “Read-only mode: nothing deleted.” Debug history lines capture the status, reason code, candidate flag, dry-run state, optional backup id, and menu/item/confirm step flags.
-- Troubleshooting selectors: the content script searches `button[aria-label="More actions"]`, `button[aria-haspopup="menu"]`, and related fallbacks; failures surface `menu_not_found`, `delete_item_not_found`, or `confirm_dialog_not_found` both in the toast and history so you know which selector to adjust.
-- Logs: inspect the Service worker via **chrome://extensions → Inspect views** for the single summary line and open the active ChatGPT tab’s DevTools to review the UI click trace when investigating `ui_click_failed` errors.
+- Workflow: open **Debug**, click **Backup & Delete (active tab)**, approve the native confirm (if enabled), then watch the background worker reuse heuristics, capture the current chat, and drive the ChatGPT kebab menu → **Delete** → confirm button flow. A toast reports the outcome and the **history-feed** line records `[HH:MM:SS] result=<ok|fail> reason=<code> candidate=<true/false/null> dryRun=<true/false/null> steps=menu:x|item:y|confirm:z id=<recordId?>`.
+- Guards:
+  - `CONFIRM_BEFORE_DELETE=true` prompts `confirm('Naozaj zálohovať a zmazať aktívny chat?')` before any work.
+  - `DRY_RUN=true` captures the chat but stops after backup persistence, returning reason `dry_run` with `didDelete=false`.
+  - `LIST_ONLY=true` returns `blocked_by_list_only` immediately after the capture so no UI clicks run.
+- Common reason codes: `ui_delete_ok`, `dry_run`, `blocked_by_list_only`, `not_candidate`, `not_chatgpt`, `no_active_tab`, `backup_capture_error`, `menu_not_found`, `delete_item_not_found`, `confirm_dialog_not_found`, and the fallback `ui_click_failed` for other UI dispatch issues.
+- Troubleshooting: if ChatGPT shifts its markup, update the selector set (`button[aria-label="More actions"]`, `button[aria-haspopup="menu"]`, `button[aria-label="Options"]`, `button[aria-label="More"]`, plus the menu/delete fallbacks) inside `content.js`. UI misses show up in the toast/history so you can adjust the v1 selector bundle quickly.
+- Logs: the background worker writes a single `scope:"ui"` entry per run with `reasonCode`, `didDelete`, `dryRun`, `steps`, `recordId`, and the tab URL/title. Inspect it via **chrome://extensions → Service worker → Inspect views** while debugging.
