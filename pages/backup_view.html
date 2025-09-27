@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MyChatGPT Backup View</title>
+  <link rel="stylesheet" href="../styles.css" />
+  <link rel="stylesheet" href="backup_view.css" />
+</head>
+<body>
+  <main class="page backup-view-page">
+    <header class="page-intro">
+      <h1>Backup detail</h1>
+      <p class="text-muted">Preskúmajte uloženú otázku a odpoveď v bezpečnom sandboxe.</p>
+    </header>
+
+    <section id="status-card" class="page-section panel" aria-live="polite">
+      <h2 id="status-title">Načítavam zálohu…</h2>
+      <p id="status-text" class="text-muted">Prosím, počkajte.</p>
+      <a id="back-link" class="tablike" href="#">Späť na zoznam</a>
+    </section>
+
+    <section id="backup-content" class="page-section panel" hidden>
+      <div class="backup-view-header">
+        <button id="query-button" type="button" class="tablike">(untitled)</button>
+        <div id="meta-bar" class="backup-meta" role="list"></div>
+      </div>
+
+      <div class="question-section">
+        <h2>Otázka</h2>
+        <p id="question-text" class="question-copy"></p>
+      </div>
+
+      <div class="answer-section">
+        <div class="answer-heading">
+          <h2>Answer preview</h2>
+          <button id="render-answer-btn" type="button" class="tablike">Render answer (safe)</button>
+        </div>
+        <p id="answer-hint" class="text-muted">Obsah sa vykreslí v sandboxovom iframe.</p>
+        <div id="answer-container" class="answer-container" aria-live="polite"></div>
+      </div>
+    </section>
+  </main>
+  <script src="../utils.js"></script>
+  <script src="../db.js"></script>
+  <script src="backup_view.js"></script>
+</body>
+</html>

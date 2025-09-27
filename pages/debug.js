@@ -19,6 +19,8 @@
   const debugToastContainer = document.getElementById('debug-toast');
   const bulkOpenTabsButton = document.getElementById('bulk-open-tabs-btn');
   const bulkOpenTabsHistory = document.getElementById('bulk-open-tabs-history');
+  const evalBackupButton = document.getElementById('eval-backup-btn');
+  const evalBackupHistory = document.getElementById('eval-backup-history');
 
   /* Slovensky komentar: Zobrazi kratku toast spravu v debug nadpise. */
   function showDebugToast(message) {
@@ -109,6 +111,42 @@
     bulkOpenTabsHistory.prepend(block);
     while (bulkOpenTabsHistory.childElementCount > 10) {
       bulkOpenTabsHistory.removeChild(bulkOpenTabsHistory.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Pridá krátky záznam o Evaluate & Backup akcii. */
+  function appendEvalBackupHistory(entry) {
+    if (!evalBackupHistory) {
+      return;
+    }
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    const now = new Date();
+    const timestamp = Number.isFinite(now.getTime()) ? now.toLocaleTimeString() : '';
+    const reasons = Array.isArray(entry && entry.reasonCodes) && entry.reasonCodes.length
+      ? entry.reasonCodes.join(',')
+      : '∅';
+    const status = entry && entry.didBackup
+      ? entry.dryRun
+        ? 'dry-run'
+        : 'stored'
+      : 'no-op';
+    const parts = [];
+    if (timestamp) {
+      parts.push(timestamp);
+    }
+    parts.push(status);
+    parts.push(`reasons=${reasons}`);
+    if (entry && entry.id) {
+      parts.push(`id=${entry.id}`);
+    }
+    if (entry && entry.message) {
+      parts.push(entry.message);
+    }
+    toast.textContent = parts.join(' · ');
+    evalBackupHistory.prepend(toast);
+    while (evalBackupHistory.childElementCount > 6) {
+      evalBackupHistory.removeChild(evalBackupHistory.lastElementChild);
     }
   }
 
@@ -645,6 +683,20 @@
     });
   }
 
+  /* Slovensky komentar: Vyžiada Evaluate & Backup správu. */
+  function requestEvalAndBackup() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'eval_and_backup' }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(runtimeError);
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
   if (backupButton) {
     backupButton.addEventListener('click', async () => {
       const labelSpan = backupButton.querySelector('span');
@@ -688,6 +740,68 @@
           backupButton.textContent = originalLabel;
         }
         await refreshBackupModeLabel();
+      }
+    });
+  }
+
+  if (evalBackupButton) {
+    evalBackupButton.addEventListener('click', async () => {
+      const originalLabel = evalBackupButton.textContent;
+      evalBackupButton.disabled = true;
+      evalBackupButton.textContent = 'Evaluating…';
+      try {
+        const response = await requestEvalAndBackup();
+        const reasons = Array.isArray(response && response.reasonCodes) ? response.reasonCodes : [];
+        let toastMessage = '';
+        if (response && response.ok) {
+          if (response.didBackup) {
+            toastMessage = response.dryRun
+              ? 'Dry run: backup would be written.'
+              : 'Backup stored for candidate chat.';
+          } else {
+            toastMessage = reasons.length
+              ? `No backup executed (reasons: ${reasons.join(', ')}).`
+              : 'No backup executed.';
+          }
+          showDebugToast(toastMessage);
+          await Logger.log('info', 'debug', 'Evaluate & backup summary', {
+            ok: true,
+            didBackup: Boolean(response.didBackup),
+            dryRun: Boolean(response.dryRun),
+            id: response.id || null,
+            reasonCodes: reasons
+          });
+        } else {
+          toastMessage = extractErrorMessage(response && (response.message || response.error));
+          showDebugToast(toastMessage);
+          await Logger.log('warn', 'debug', 'Evaluate & backup blocked', {
+            ok: false,
+            reasonCodes: reasons,
+            message: toastMessage
+          });
+        }
+        appendEvalBackupHistory({
+          didBackup: Boolean(response && response.didBackup),
+          dryRun: Boolean(response && response.dryRun),
+          id: response && response.id ? response.id : null,
+          reasonCodes: reasons,
+          message: response && response.message ? response.message : undefined
+        });
+      } catch (error) {
+        const message = extractErrorMessage(error);
+        showDebugToast(message);
+        appendEvalBackupHistory({
+          didBackup: false,
+          dryRun: false,
+          reasonCodes: ['error'],
+          message
+        });
+        await Logger.log('error', 'debug', 'Evaluate & backup threw error', {
+          message
+        });
+      } finally {
+        evalBackupButton.disabled = false;
+        evalBackupButton.textContent = originalLabel;
       }
     });
   }

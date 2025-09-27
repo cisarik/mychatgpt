@@ -151,6 +151,39 @@ button:disabled {
   border-color: var(--border);
 }
 
+.tablike {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: linear-gradient(140deg, rgba(16, 163, 127, 0.16), rgba(21, 194, 150, 0.08));
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.tablike:hover,
+.tablike:focus {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  background: linear-gradient(140deg, rgba(21, 194, 150, 0.24), rgba(16, 163, 127, 0.12));
+  text-decoration: none;
+}
+
+.tablike[aria-disabled='true'],
+.tablike.disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  background: var(--panel-2);
+  border-color: var(--border);
+  color: var(--muted);
+  text-decoration: none;
+}
+
 input,
  textarea,
  select {

@@ -1,0 +1,90 @@
+/* Slovensky komentar: Vizual pre samostatnú stránku detailu zálohy. */
+
+.backup-view-page {
+  gap: 24px;
+}
+
+.backup-view-header {
+  display: grid;
+  gap: 16px;
+}
+
+.backup-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.meta-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
+.meta-pill-strong {
+  color: var(--accent);
+  background: rgba(16, 163, 127, 0.16);
+}
+
+.meta-pill-warn {
+  color: var(--warn);
+  background: rgba(250, 204, 21, 0.14);
+}
+
+.question-section,
+.answer-section {
+  display: grid;
+  gap: 12px;
+}
+
+.question-copy {
+  font-size: 1.05rem;
+  color: var(--text);
+}
+
+.answer-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.answer-container {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel-2);
+  min-height: 240px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+
+.answer-container iframe {
+  width: 100%;
+  min-height: 360px;
+  border: 0;
+  background: transparent;
+}
+
+#status-card {
+  display: grid;
+  gap: 12px;
+}
+
+#status-card .tablike {
+  justify-self: flex-start;
+}
+
+@media (min-width: 720px) {
+  .backup-view-header {
+    grid-template-columns: auto 1fr;
+    align-items: center;
+  }
+}

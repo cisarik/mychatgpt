@@ -160,6 +160,41 @@ const Database = {
       throw error;
     }
   },
+  /* Slovensky komentar: Načíta zálohu podľa identifikátora. */
+  getBackupById: async (id) => {
+    if (!id) {
+      return null;
+    }
+    try {
+      const db = await Database.initDB();
+      return await new Promise((resolve, reject) => {
+        try {
+          const transaction = db.transaction([STORE_BACKUPS], 'readonly');
+          const store = transaction.objectStore(STORE_BACKUPS);
+          const request = store.get(id);
+
+          request.onsuccess = () => {
+            resolve(request.result || null);
+          };
+          request.onerror = () => {
+            reject(request.error);
+          };
+
+          transaction.onerror = () => {
+            reject(transaction.error);
+          };
+          transaction.onabort = () => {
+            reject(transaction.error);
+          };
+        } catch (innerError) {
+          reject(innerError);
+        }
+      });
+    } catch (error) {
+      await Logger.log('error', 'db', 'Lookup by id failed', { message: error && error.message });
+      throw error;
+    }
+  },
   /* Slovensky komentar: Ziska najnovsie zalohy obmedzene limitom. */
   getRecentBackups: async (limit = 10) => {
     const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 100) : 10;

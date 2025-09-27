@@ -192,15 +192,40 @@
 
     const titleLine = document.createElement('div');
     titleLine.className = 'backup-row-title';
-    titleLine.textContent = deriveTitle(backup);
+    const primaryQuestion = backup && typeof backup.questionText === 'string' && backup.questionText.trim()
+      ? backup.questionText.trim()
+      : '(untitled)';
+    const questionLink = document.createElement('a');
+    questionLink.className = 'backup-link';
+    questionLink.textContent = primaryQuestion;
+    questionLink.title = deriveTitle(backup);
+    if (backup && backup.id) {
+      const href = chrome.runtime.getURL(`pages/backup_view.html?id=${encodeURIComponent(backup.id)}`);
+      questionLink.href = href;
+      questionLink.target = '_blank';
+      questionLink.rel = 'noopener';
+    } else {
+      questionLink.href = '#';
+      questionLink.setAttribute('aria-disabled', 'true');
+      questionLink.classList.add('is-disabled');
+    }
+    titleLine.appendChild(questionLink);
 
     const metaLine = document.createElement('div');
     metaLine.className = 'backup-row-meta';
     const timestampSpan = document.createElement('span');
     timestampSpan.textContent = formatTimestamp(backup.timestamp);
+    timestampSpan.className = 'meta-pill';
     metaLine.appendChild(timestampSpan);
+    if (backup && backup.convoId) {
+      const convoSpan = document.createElement('span');
+      convoSpan.className = 'meta-pill';
+      convoSpan.textContent = backup.convoId;
+      metaLine.appendChild(convoSpan);
+    }
     if (backup && backup.answerTruncated) {
       const truncatedSpan = document.createElement('span');
+      truncatedSpan.className = 'meta-pill meta-pill-warn';
       truncatedSpan.textContent = 'Odpoveď skrátená na 250 KB';
       metaLine.appendChild(truncatedSpan);
     }
