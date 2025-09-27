@@ -191,6 +191,146 @@ function captureLatestConversationPair() {
   };
 }
 
+/* Slovensky komentar: Bezpecne vrati pole kandidatov podla selektora (ignoruje syntakticke chyby). */
+function safeQueryAll(selector) {
+  if (typeof selector !== 'string' || !selector) {
+    return [];
+  }
+  try {
+    return Array.from(document.querySelectorAll(selector));
+  } catch (_error) {
+    return [];
+  }
+}
+
+/* Slovensky komentar: Normalizuje text elementu na porovnavanie. */
+function normalizeNodeText(node) {
+  if (!node) {
+    return '';
+  }
+  const raw = typeof node.innerText === 'string' && node.innerText.trim()
+    ? node.innerText
+    : typeof node.textContent === 'string'
+    ? node.textContent
+    : '';
+  return raw.trim().toLowerCase();
+}
+
+/* Slovensky komentar: Klikne na element po jeho ziskani s opakovanim. */
+async function clickAndWait(sel, { textEquals = null, timeoutMs = 1500 } = {}) {
+  const start = Date.now();
+  const expectedText = typeof textEquals === 'string' ? textEquals.trim().toLowerCase() : null;
+  const isElementNode = sel && typeof sel === 'object' && typeof sel.nodeType === 'number';
+  const getter = typeof sel === 'function'
+    ? sel
+    : isElementNode
+    ? () => sel
+    : () => {
+        const candidates = safeQueryAll(sel);
+        if (!candidates.length) {
+          return null;
+        }
+        if (expectedText) {
+          const match = candidates.find((node) => normalizeNodeText(node) === expectedText);
+          if (match) {
+            return match;
+          }
+          return null;
+        }
+        return candidates[0];
+      };
+
+  let element = null;
+  while (Date.now() - start < timeoutMs) {
+    element = getter();
+    if (element) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 70));
+  }
+
+  if (!element) {
+    return { ok: false, element: null };
+  }
+
+  try {
+    if (typeof element.scrollIntoView === 'function') {
+      element.scrollIntoView({ block: 'center' });
+    }
+  } catch (_scrollError) {
+    // Slovensky komentar: Scroll zlyhanie ignorujeme.
+  }
+
+  try {
+    element.click();
+  } catch (clickError) {
+    return { ok: false, element, error: clickError };
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  return { ok: true, element };
+}
+
+/* Slovensky komentar: Najde tlacidlo pre kebab menu dostupne vo view. */
+function findMoreActionsButton() {
+  const selectors = [
+    'button[aria-label="More actions"]',
+    'button[aria-haspopup="menu"][aria-label*="More"]',
+    'button[aria-label="Options"]',
+    'button:has(svg[aria-label="More"])'
+  ];
+  for (const selector of selectors) {
+    const candidates = safeQueryAll(selector).filter((node) => node && typeof node.disabled !== 'boolean' ? true : !node.disabled);
+    if (candidates.length) {
+      return candidates[0];
+    }
+  }
+  return null;
+}
+
+/* Slovensky komentar: Najde polozku Delete v otvorenom menu. */
+function findDeleteMenuItem() {
+  const targetText = 'delete';
+  const roleMatches = safeQueryAll('[role="menuitem"]');
+  for (const node of roleMatches) {
+    if (normalizeNodeText(node) === targetText) {
+      return node;
+    }
+  }
+
+  const menus = safeQueryAll('[role="menu"]');
+  for (const menu of menus) {
+    const interactive = Array.from(menu.querySelectorAll('button, div, a'));
+    for (const node of interactive) {
+      if (normalizeNodeText(node) === targetText || normalizeNodeText(node).includes(targetText)) {
+        return node;
+      }
+    }
+  }
+
+  const fallback = safeQueryAll('button, div, a');
+  for (const node of fallback) {
+    if (normalizeNodeText(node) === targetText || normalizeNodeText(node).includes(targetText)) {
+      return node;
+    }
+  }
+  return null;
+}
+
+/* Slovensky komentar: Najde tlacidlo Delete v potvrzovacom dialogu. */
+function findDeleteConfirmButton() {
+  const dialogs = safeQueryAll('[role="dialog"], [role="alertdialog"]');
+  for (const dialog of dialogs) {
+    const buttons = Array.from(dialog.querySelectorAll('[role="button"], button'));
+    for (const node of buttons) {
+      if (normalizeNodeText(node).includes('delete')) {
+        return node;
+      }
+    }
+  }
+  return null;
+}
+
 /* Slovensky komentar: Obsahovy skript reaguje na ping a metadata bez zmeny DOM. */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message) {
@@ -285,6 +425,48 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     }
     return undefined;
+  }
+
+  if (message.type === 'ui_delete_active') {
+    (async () => {
+      const steps = { menu: false, item: false, confirm: false };
+      try {
+        const menuButton = findMoreActionsButton();
+        if (!menuButton) {
+          sendResponse({ ok: false, reason: 'menu_not_found', steps, ts: Date.now() });
+          return;
+        }
+
+        const menuClick = await clickAndWait(() => menuButton, { timeoutMs: 1000 });
+        if (!menuClick.ok) {
+          sendResponse({ ok: false, reason: 'ui_click_failed', steps, ts: Date.now() });
+          return;
+        }
+        steps.menu = true;
+
+        const itemResult = await clickAndWait(() => findDeleteMenuItem(), { timeoutMs: 2000 });
+        if (!itemResult.ok) {
+          const reason = itemResult.element ? 'ui_click_failed' : 'delete_item_not_found';
+          sendResponse({ ok: false, reason, steps, ts: Date.now() });
+          return;
+        }
+        steps.item = true;
+
+        const confirmResult = await clickAndWait(() => findDeleteConfirmButton(), { timeoutMs: 2500 });
+        if (!confirmResult.ok) {
+          const reason = confirmResult.element ? 'ui_click_failed' : 'confirm_dialog_not_found';
+          sendResponse({ ok: false, reason, steps, ts: Date.now() });
+          return;
+        }
+        steps.confirm = true;
+
+        sendResponse({ ok: true, reason: 'ui_delete_ok', steps, ts: Date.now() });
+      } catch (error) {
+        const messageText = error && error.message ? error.message : String(error);
+        sendResponse({ ok: false, reason: 'ui_click_failed', steps, error: messageText, ts: Date.now() });
+      }
+    })();
+    return true;
   }
 
   return undefined;

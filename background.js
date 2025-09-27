@@ -1230,6 +1230,255 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
+  if (message && message.type === 'backup_and_delete_active') {
+    (async () => {
+      const traceId = `backup-delete:${Date.now()}`;
+      const responsePayload = {
+        ok: false,
+        reasonCode: 'unknown',
+        dryRun: false,
+        didDelete: false,
+        candidate: false,
+        evaluation: null,
+        backup: null,
+        ui: null,
+        message: null,
+        timestamp: Date.now(),
+        settings: null
+      };
+      let logLevel = 'info';
+      let logMeta = {
+        traceId,
+        reasonCode: 'unknown',
+        dryRun: null,
+        didDelete: false,
+        candidate: false,
+        convoId: null,
+        url: null,
+        title: null,
+        counts: null,
+        steps: null,
+        message: null
+      };
+
+      try {
+        const activeTab = await getActiveTab();
+        if (!activeTab) {
+          responsePayload.reasonCode = 'no_active_tab';
+          responsePayload.message = 'No active tab available.';
+          responsePayload.ok = false;
+          logMeta.reasonCode = 'no_active_tab';
+          logLevel = 'warn';
+          return;
+        }
+
+        logMeta.url = activeTab.url || null;
+        logMeta.title = activeTab.title || null;
+
+        if (!activeTab.url || !activeTab.url.startsWith('https://chatgpt.com/')) {
+          responsePayload.reasonCode = 'not_chatgpt';
+          responsePayload.message = 'Active tab is not chatgpt.com.';
+          responsePayload.ok = false;
+          logMeta.reasonCode = 'not_chatgpt';
+          logLevel = 'warn';
+          return;
+        }
+
+        const settings = await getSettingsFresh();
+        responsePayload.settings = {
+          LIST_ONLY: Boolean(settings && settings.LIST_ONLY),
+          DRY_RUN: Boolean(settings && settings.DRY_RUN),
+          CONFIRM_BEFORE_DELETE: Boolean(settings && settings.CONFIRM_BEFORE_DELETE)
+        };
+
+        let probePayload = null;
+        try {
+          probePayload = await sendProbeRequest(activeTab.id, traceId);
+        } catch (probeError) {
+          probePayload = null;
+          responsePayload.message = probeError && probeError.message ? probeError.message : String(probeError);
+        }
+
+        if (!probePayload || !probePayload.ok) {
+          responsePayload.reasonCode = 'not_candidate';
+          responsePayload.ok = false;
+          logMeta.reasonCode = 'not_candidate';
+          logLevel = 'info';
+          if (!responsePayload.message) {
+            responsePayload.message = 'Metadata probe unavailable.';
+          }
+          return;
+        }
+
+        const evaluation = evaluateCandidateFromProbe(probePayload, settings);
+        responsePayload.evaluation = evaluation;
+        responsePayload.candidate = Boolean(evaluation && evaluation.ok);
+        logMeta.candidate = Boolean(evaluation && evaluation.ok);
+        logMeta.counts = evaluation && evaluation.counts ? evaluation.counts : null;
+        logMeta.convoId = evaluation && evaluation.convoId ? evaluation.convoId : null;
+
+        if (!evaluation.ok) {
+          responsePayload.reasonCode = 'not_candidate';
+          responsePayload.ok = false;
+          responsePayload.message = 'Conversation not eligible for deletion.';
+          logMeta.reasonCode = 'not_candidate';
+          logLevel = 'info';
+          return;
+        }
+
+        const captureResult = await captureAndPersistBackup(activeTab, settings, traceId, {
+          fallbackConvoId: evaluation.convoId || null
+        });
+        const captureRecordId = captureResult && captureResult.record ? captureResult.record.id : null;
+        responsePayload.backup = {
+          ok: Boolean(captureResult && captureResult.ok),
+          reasonCode: captureResult ? captureResult.reasonCode : null,
+          dryRun: Boolean(captureResult && captureResult.dryRun),
+          recordId: captureRecordId
+        };
+        responsePayload.dryRun = Boolean(captureResult && captureResult.dryRun);
+        if (captureResult && captureResult.record && captureResult.record.convoId && !logMeta.convoId) {
+          logMeta.convoId = captureResult.record.convoId;
+        }
+
+        if (!captureResult || (!captureResult.ok && captureResult.reasonCode !== 'backup_duplicate')) {
+          responsePayload.reasonCode = 'ui_click_failed';
+          responsePayload.ok = false;
+          responsePayload.message = captureResult && captureResult.message ? captureResult.message : 'Backup failed.';
+          logMeta.reasonCode = 'ui_click_failed';
+          logMeta.message = responsePayload.message;
+          logLevel = 'error';
+          return;
+        }
+
+        if (captureResult && captureResult.reasonCode === 'backup_duplicate' && !responsePayload.message) {
+          responsePayload.message = 'Existing backup reused.';
+        }
+
+        if (captureResult && captureResult.dryRun) {
+          responsePayload.ok = true;
+          responsePayload.reasonCode = 'dry_run';
+          responsePayload.didDelete = false;
+          responsePayload.ui = {
+            ok: false,
+            reason: 'dry_run',
+            steps: { menu: false, item: false, confirm: false }
+          };
+          logMeta.reasonCode = 'dry_run';
+          logMeta.dryRun = true;
+          logLevel = 'info';
+          return;
+        }
+
+        logMeta.dryRun = false;
+
+        if (settings && settings.LIST_ONLY) {
+          responsePayload.ok = true;
+          responsePayload.reasonCode = 'blocked_by_list_only';
+          responsePayload.didDelete = false;
+          responsePayload.message = responsePayload.message || 'LIST_ONLY guard prevents deletion.';
+          responsePayload.ui = {
+            ok: false,
+            reason: 'blocked_by_list_only',
+            steps: { menu: false, item: false, confirm: false }
+          };
+          logMeta.reasonCode = 'blocked_by_list_only';
+          logLevel = 'info';
+          return;
+        }
+
+        let uiResponse = null;
+        try {
+          uiResponse = await sendWithEnsureCS(activeTab.id, { type: 'ui_delete_active' }, { timeoutMs: 2500 });
+        } catch (uiError) {
+          const messageText = uiError && uiError.message ? uiError.message : String(uiError);
+          responsePayload.reasonCode = 'ui_click_failed';
+          responsePayload.ok = false;
+          responsePayload.message = messageText;
+          responsePayload.ui = {
+            ok: false,
+            reason: 'ui_click_failed',
+            steps: null,
+            error: messageText
+          };
+          logMeta.reasonCode = 'ui_click_failed';
+          logMeta.message = messageText;
+          logLevel = 'error';
+          return;
+        }
+
+        if (!uiResponse) {
+          responsePayload.reasonCode = 'ui_click_failed';
+          responsePayload.ok = false;
+          responsePayload.message = 'UI response missing.';
+          responsePayload.ui = {
+            ok: false,
+            reason: 'ui_click_failed',
+            steps: null
+          };
+          logMeta.reasonCode = 'ui_click_failed';
+          logMeta.message = 'UI response missing.';
+          logLevel = 'error';
+          return;
+        }
+
+        const uiReason = uiResponse.reason || (uiResponse.ok ? 'ui_delete_ok' : 'ui_click_failed');
+        responsePayload.ui = {
+          ok: Boolean(uiResponse.ok),
+          reason: uiReason,
+          steps: uiResponse.steps || null,
+          ts: uiResponse.ts || Date.now()
+        };
+        logMeta.steps = uiResponse.steps || null;
+
+        if (uiResponse.ok) {
+          responsePayload.ok = true;
+          responsePayload.reasonCode = 'ui_delete_ok';
+          responsePayload.didDelete = true;
+          responsePayload.message = responsePayload.message || 'Chat deleted via UI.';
+          logMeta.reasonCode = 'ui_delete_ok';
+        } else {
+          responsePayload.ok = false;
+          responsePayload.reasonCode = uiReason;
+          responsePayload.didDelete = false;
+          responsePayload.message = uiResponse.message || 'UI delete failed.';
+          logMeta.reasonCode = uiReason;
+          logMeta.message = responsePayload.message;
+          logLevel = uiReason === 'ui_click_failed' ? 'error' : 'warn';
+        }
+      } catch (error) {
+        const messageText = error && error.message ? error.message : String(error);
+        responsePayload.ok = false;
+        if (!responsePayload.reasonCode || responsePayload.reasonCode === 'unknown') {
+          responsePayload.reasonCode = 'ui_click_failed';
+        }
+        responsePayload.message = responsePayload.message || messageText;
+        logMeta.reasonCode = responsePayload.reasonCode;
+        logMeta.message = messageText;
+        logLevel = 'error';
+      } finally {
+        responsePayload.timestamp = Date.now();
+        if (typeof logMeta.dryRun !== 'boolean') {
+          logMeta.dryRun = Boolean(responsePayload.dryRun);
+        }
+        logMeta.didDelete = Boolean(responsePayload.didDelete);
+        logMeta.candidate = Boolean(responsePayload.candidate);
+        try {
+          await Logger.log(logLevel, 'ui', 'Backup-delete active tab summary', {
+            ...logMeta,
+            reasonCode: responsePayload.reasonCode,
+            dryRun: Boolean(responsePayload.dryRun),
+            didDelete: Boolean(responsePayload.didDelete),
+            candidate: Boolean(responsePayload.candidate)
+          });
+        } catch (logError) {
+          console.warn('backup_and_delete_active log failed', logError);
+        }
+        sendResponse(responsePayload);
+      }
+    })();
+    return true;
+  }
   if (message && message.type === 'delete_backup') {
     (async () => {
       const id = message.id;

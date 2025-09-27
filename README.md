@@ -136,3 +136,9 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 - The Debug toolbar now offers **Evaluate & Backup (if candidate)**. It runs the existing heuristics on the active ChatGPT tab, ignoring cooldowns, and immediately triggers the manual backup flow when the conversation qualifies.
 - SAFE URL patterns still short-circuit the action, and `DRY_RUN` keeps writes simulated while logging the intended result. Dedicated history and toast updates summarize `reasonCodes`, conversation IDs, and whether the backup was persisted.
 - The background worker reuses truncation and duplicate checks (via `Database.getBackupByConvoId`) so existing backups remain untouched.
+
+## Backup & Delete (active tab)
+- The Debug page adds **Backup & Delete (active tab)** directly beneath Evaluate & Backup. It first verifies the active `chatgpt.com/c/<uuid>` tab with Heuristics V1; long threads or missing metadata exit early with reason `not_candidate` and no UI touches.
+- When `DRY_RUN=true`, the capture still executes but the action ends with reason `dry_run`, skipping the kebab menu entirely. Likewise, `LIST_ONLY=true` halts after a successful backup reuse/save and reports `blocked_by_list_only`.
+- `CONFIRM_BEFORE_DELETE=true` triggers a native `confirm('Naozaj: zálohovať a zmazať aktívny chat?')` prompt in the Debug page before the background worker runs. Canceling leaves history notes without messaging the worker.
+- UI removal relies on selector set v1 (`button[aria-label="More actions"]`, `button[aria-haspopup="menu"]`, etc.). If menu, item, or dialog clicks fail, the debug history lists `menu_not_found`, `delete_item_not_found`, or `confirm_dialog_not_found`. Update those selectors when ChatGPT ships new markup.
