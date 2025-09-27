@@ -119,28 +119,25 @@
     const timestamp = Number.isFinite(timestampValue.getTime())
       ? timestampValue.toLocaleTimeString([], { hour12: false })
       : '';
-    const result = entry?.ok === true ? 'ok' : 'fail';
-    const reason = typeof entry?.reasonCode === 'string' && entry.reasonCode ? entry.reasonCode : 'unknown';
-    const candidate = entry?.candidate === true ? 'true' : entry?.candidate === false ? 'false' : 'null';
-    const dryRun = entry?.dryRun === true ? 'true' : entry?.dryRun === false ? 'false' : 'null';
-    const steps = entry?.ui && entry.ui.steps
-      ? entry.ui.steps
-      : { menu: false, item: false, confirm: false };
+    const steps = {
+      menu: Boolean(entry?.ui?.steps?.menu),
+      item: Boolean(entry?.ui?.steps?.item),
+      confirm: Boolean(entry?.ui?.steps?.confirm)
+    };
     const recordId = entry?.backup && (entry.backup.recordId || entry.backup.id)
       ? entry.backup.recordId || entry.backup.id
       : null;
-    const stepLabel = `steps=menu:${steps.menu ? '1' : '0'}|item:${steps.item ? '1' : '0'}|confirm:${steps.confirm ? '1' : '0'}`;
-    const parts = [];
-    if (timestamp) {
-      parts.push(`[${timestamp}]`);
-    }
-    parts.push(`result=${result}`);
-    parts.push(`reason=${reason}`);
-    parts.push(`candidate=${candidate}`);
-    parts.push(`dryRun=${dryRun}`);
-    parts.push(stepLabel);
-    parts.push(`id=${recordId ? recordId : 'null'}`);
-    return parts.join(' ');
+    const payload = {
+      ok: entry?.ok === true,
+      didDelete: entry?.didDelete === true,
+      reasonCode: typeof entry?.reasonCode === 'string' && entry.reasonCode ? entry.reasonCode : 'unknown',
+      candidate: typeof entry?.candidate === 'boolean' ? entry.candidate : null,
+      dryRun: entry?.dryRun === true ? true : entry?.dryRun === false ? false : null,
+      backup: { recordId },
+      ui: { steps }
+    };
+    const formatted = JSON.stringify(payload);
+    return timestamp ? `[${timestamp}] ${formatted}` : formatted;
   }
 
   /* Slovensky komentar: Prida zaznam o backup-delete akcii. */
@@ -166,17 +163,19 @@
     if (!summary) {
       return 'Failed: unknown';
     }
+    const recordId = summary?.backup && summary.backup.recordId ? summary.backup.recordId : null;
+    const recordHint = recordId ? ` (id=${recordId})` : '';
     if (summary.ok && summary.didDelete) {
-      return 'Backup & delete: done.';
+      return `Backup & delete: done${recordHint}.`;
     }
     if (summary.ok && summary.reasonCode === 'dry_run') {
-      return 'Dry run—backup only.';
+      return `Dry run—backup only${recordHint}.`;
     }
     if (summary.reasonCode === 'blocked_by_list_only') {
-      return 'Read-only: nothing deleted.';
+      return `Read-only: nothing deleted${recordHint}.`;
     }
     const code = typeof summary.reasonCode === 'string' && summary.reasonCode ? summary.reasonCode : 'unknown';
-    return `Failed: ${code}`;
+    return `Failed: ${code}${recordHint}`;
   }
 
   /* Slovensky komentar: Normalizuje odozvu pre historicku stopu. */
@@ -192,8 +191,8 @@
       ? raw.backup.recordId || raw.backup.id || (raw.backup.record && raw.backup.record.id) || null
       : null;
     const backup = raw?.backup && typeof raw.backup === 'object'
-      ? { ...raw.backup, recordId }
-      : { recordId };
+      ? { ...raw.backup, recordId, reasonCode: raw.backup.reasonCode || null }
+      : { recordId, reasonCode: null };
     const backupDryRun = typeof backup?.dryRun === 'boolean' ? backup.dryRun : null;
     const effectiveDryRun = dryRun !== null ? dryRun : backupDryRun;
     return {
@@ -524,6 +523,37 @@
     });
   }
 
+  /* Slovensky komentar: Pre mapovanie surovych chyb na reason kody. */
+  function mapBackupDeleteErrorReason(message) {
+    if (!message) {
+      return 'unexpected_response';
+    }
+    const normalized = String(message).toLowerCase();
+    if (normalized.includes('timeout')) {
+      return 'timeout';
+    }
+    if (normalized.includes('receiving end does not exist') || normalized.includes('no receiving end')) {
+      return 'no_active_tab';
+    }
+    if (normalized.includes('no active tab')
+      || normalized.includes('tab not found')
+      || normalized.includes('no tab with id')
+      || normalized.includes('no window with id')) {
+      return 'no_active_tab';
+    }
+    if (normalized.includes('service worker') || normalized.includes('connection')) {
+      return 'no_service_worker';
+    }
+    if (normalized.includes('not_chatgpt')) {
+      return 'not_chatgpt';
+    }
+    if (normalized.includes('message port closed before a response was received')
+      || normalized.includes('message channel closed before a response was received')) {
+      return 'no_response';
+    }
+    return 'unexpected_response';
+  }
+
   /* Slovensky komentar: Vyziada stub pozadovku na autoscan. */
   function requestAutoscanStub() {
     return new Promise((resolve, reject) => {
@@ -651,14 +681,35 @@
   }
 
   /* Slovensky komentar: Vyziada backup-delete spravu z backgroundu. */
-  function requestBackupDeleteActive() {
+  function requestBackupDeleteActive({ confirmed = false, timeoutMs = 5000 } = {}) {
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ type: 'backup_and_delete_active', confirm: true }, (response) => {
+      const payload = { type: 'backup_and_delete_active' };
+      if (typeof confirmed === 'boolean') {
+        payload.confirm = confirmed;
+      }
+      let settled = false;
+      const safeTimeout = Number.isFinite(timeoutMs) && timeoutMs >= 1000 ? timeoutMs : 5000;
+      const timeoutId = globalTarget.setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(new Error('timeout'));
+      }, safeTimeout);
+      rememberTimeout(timeoutId);
+      chrome.runtime.sendMessage(payload, (response) => {
+        if (settled) {
+          return;
+        }
         const runtimeError = chrome.runtime.lastError;
         if (runtimeError) {
+          settled = true;
+          globalTarget.clearTimeout(timeoutId);
           reject(runtimeError);
           return;
         }
+        settled = true;
+        globalTarget.clearTimeout(timeoutId);
         resolve(response);
       });
     });
@@ -1186,6 +1237,7 @@
     const originalLabel = button.textContent;
     button.disabled = true;
     button.textContent = 'Working…';
+    button.setAttribute('aria-busy', 'true');
 
     let confirmRequired = true;
     try {
@@ -1199,6 +1251,7 @@
       }
     }
 
+    let confirmed = true;
     if (confirmRequired) {
       const confirmFn = typeof globalTarget.confirm === 'function'
         ? globalTarget.confirm.bind(globalTarget)
@@ -1206,19 +1259,38 @@
           ? confirm
           : null;
       if (confirmFn) {
-        const confirmed = confirmFn('Naozaj zálohovať a zmazať aktívny chat?');
-        if (!confirmed) {
+        const confirmMessage = 'Naozaj zálohovať a zmazať aktívny chat?';
+        const accepted = confirmFn(confirmMessage);
+        if (!accepted) {
           showDebugToast('Cancelled');
           button.disabled = false;
           button.textContent = originalLabel;
+          button.removeAttribute('aria-busy');
           return;
+        }
+      } else if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        try {
+          await Logger.log('warn', 'debug', 'Confirm dialog unavailable for backup-delete', {
+            reason: 'confirm_missing'
+          });
+        } catch (_logError) {
+          // Slovensky komentar: Ignoruje sa neuspesne zalogovanie upozornenia.
         }
       }
     }
 
     try {
-      const response = await requestBackupDeleteActive();
-      const summary = normalizeBackupDeleteSummary(response || { ok: false, reasonCode: 'no_response' });
+      const response = await requestBackupDeleteActive({ confirmed, timeoutMs: 6000 });
+      const safeSource = response && typeof response === 'object'
+        ? { ...response }
+        : { ok: false, reasonCode: response === undefined ? 'no_response' : 'unexpected_response', ui: { steps: {} } };
+      if (safeSource && typeof safeSource === 'object' && !safeSource.reasonCode && typeof safeSource.reason === 'string') {
+        safeSource.reasonCode = safeSource.reason;
+      }
+      if (!safeSource.ui || typeof safeSource.ui !== 'object') {
+        safeSource.ui = { steps: {} };
+      }
+      const summary = normalizeBackupDeleteSummary(safeSource);
       appendBackupDeleteHistoryEntry(summary);
       const toastMessage = getBackupDeleteToastMessage(summary);
       if (toastMessage) {
@@ -1229,31 +1301,35 @@
           reasonCode: summary.reasonCode,
           didDelete: summary.didDelete,
           dryRun: summary.dryRun,
-          candidate: summary.candidate
+          candidate: summary.candidate,
+          recordId: summary.backup && summary.backup.recordId ? summary.backup.recordId : null
         });
       }
     } catch (error) {
       const message = extractErrorMessage(error, 'Runtime error');
+      const failureReason = mapBackupDeleteErrorReason(message);
       const failure = normalizeBackupDeleteSummary({
         ok: false,
         didDelete: false,
-        reasonCode: 'runtime_error',
+        reasonCode: failureReason,
         dryRun: null,
         candidate: null,
         timestamp: Date.now(),
-        ui: { steps: { menu: false, item: false, confirm: false } },
-        backup: {}
+        ui: { steps: { menu: false, item: false, confirm: false }, reason: failureReason },
+        backup: { recordId: null }
       });
       appendBackupDeleteHistoryEntry(failure);
-      showDebugToast('Failed: runtime_error');
+      showDebugToast(`Failed: ${failureReason}`);
       if (typeof Logger === 'object' && typeof Logger.log === 'function') {
         await Logger.log('error', 'debug', 'Backup-delete threw error (debug panel)', {
-          message
+          message,
+          reasonCode: failureReason
         });
       }
     } finally {
       button.disabled = false;
       button.textContent = originalLabel;
+      button.removeAttribute('aria-busy');
     }
   }
 
