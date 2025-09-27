@@ -10,9 +10,10 @@ This repository contains a minimal Manifest V3 Chrome/Brave extension scaffold f
 ## Verify logging
 1. Open the extension popup from the toolbar.
 2. Navigate to the **Debug** tab and click **Test log**.
-3. Open the dedicated debug page and use **Refresh** to confirm the new entry.
+3. Visit `chrome://extensions`, locate MyChatGPT, and use **Service worker → Inspect views** to review background logs in DevTools.
+4. Alternatively, open a `https://chatgpt.com` tab, launch DevTools (`Ctrl/Cmd + Shift + I`), and inspect the Console for content-script output.
 
-Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use the **Export debug** button on the debug page to download the latest records.
+Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use DevTools consoles to stream live entries instead of the in-page log list.
 
 ## Popup navigation
 - The popup now keeps Searches, Settings, and Debug content on a single surface with in-place tab switching.
@@ -41,16 +42,23 @@ Logs are stored in `chrome.storage.local` under the key `debug_logs`. Use the **
 | `MAX_MESSAGES` | `2` | Maximum total messages captured per conversation. |
 | `USER_MESSAGES_MAX` | `2` | Maximum user-authored messages retained. |
 | `SCAN_COOLDOWN_MIN` | `5` | Minimum minutes between automated heuristics scans. |
-| `SAFE_URL_PATTERNS` | `['/workspaces','/projects','/new-project']` | Allowed path patterns for scanning. |
+| `SAFE_URL_PATTERNS` | `['/workspaces','/projects','/new-project','https://chatgpt.com/c/*']` | Allowed path/full URL patterns for scanning. |
 
 Settings persist under `chrome.storage.local` key `settings_v1`. The settings page automatically validates loaded values and heals any missing/invalid fields back to defaults, marking corrected inputs with a subtle “(opravené)” hint. Use the **Resetovať na defaulty** button to repopulate the form with the defaults before saving.
 
+### Safe URL patterns
+- Each non-empty line accepts either:
+  - A leading-slash substring (e.g., `/workspaces`) matched against the ChatGPT tab’s `URL.pathname`.
+  - A full URL with an optional trailing `*` wildcard (suffix glob), e.g., `https://chatgpt.com/c/*`.
+- Lines starting with `#` are treated as comments and skipped. Duplicates are removed automatically.
+- The defaults ship with `/workspaces`, `/projects`, `/new-project`, and `https://chatgpt.com/c/*`.
+
 The IndexedDB store `categories` seeds the following categories on first run: `Programovanie`, `Kryptomeny`, `HW`, `Zdravie`. The background worker repeats the seed check on startup and during installation, logging the outcome.
 
-## Debug scan stub
-1. Open the **Debug** page and click **Scan now (stub)**.
+## Auto-scan feed stub
+1. Open the **Debug** page and click **Auto-scan feed (stub)**.
 2. Observe the inline toast with the deterministic JSON payload (e.g., `{ scanned: 0, matched: 0, dryRun: true }`).
-3. Refresh the logs list to review the corresponding entries under the `scan` scope.
+3. Inspect the background Service worker console to see the corresponding `scan` scope log entry.
 
 ## Connectivity test
 1. Navigate to [https://chatgpt.com](https://chatgpt.com) in the active browser tab.
@@ -60,13 +68,18 @@ The IndexedDB store `categories` seeds the following categories on first run: `P
 ## Metadata probe
 1. Open a conversation on [https://chatgpt.com](https://chatgpt.com) and launch the **Debug** page.
 2. Click **Probe metadata (read-only)** to request a deterministic snapshot of the current tab.
-3. If the active URL matches any entry under `SAFE_URL_PATTERNS`, the probe is skipped with a clear notice so you can adjust the page or pattern list.
+3. If the active URL matches any entry under `SAFE_URL_PATTERNS`, the probe is skipped with reason code `probe_safe_url` so you can adjust the page or pattern list.
 4. Successful probes return the resolved URL, title, conversation ID (if present), heuristic message counts, and UI markers that feed future `MAX_MESSAGES` controls.
+
+## Capture preview (read-only)
+1. With a ChatGPT conversation active, click **Capture preview (read-only)** on the **Debug** page to trigger a content-script capture without persisting a backup.
+2. SAFE URL matches respond with reason code `capture_safe_url` and skip the capture; remove or adjust the pattern to allow previews.
+3. Successful captures include the question/answer lengths in the debug panel and log a `capture_ok` summary in the Service worker console.
 
 ## Heuristics V1 & Cooldown
 - The background worker exposes **Evaluate heuristics (active tab)** on the debug page to score the active ChatGPT conversation without mutating the DOM or touching IndexedDB.
 - SAFE URL patterns always bypass the heuristic, while candidates require `counts.total ≤ MAX_MESSAGES` and, when available, `counts.user ≤ USER_MESSAGES_MAX`. Unknown totals defer the decision.
-- Reason codes reported to logs/debug history include: `candidate_ok`, `over_max` (including user limit breaches), `safe_url`, `counts_unknown`, and `no_probe` when the metadata probe is unavailable.
+- Reason codes reported to logs/debug history include: `candidate_ok`, `over_max` (including user limit breaches), `heuristics_safe_url`, `counts_unknown`, and `no_probe` when the metadata probe is unavailable.
 - Every evaluation updates `cooldown_v1.lastScanAt`. Auto-scans will respect `SCAN_COOLDOWN_MIN` minutes before re-running, while the manual debug button surfaces whether the cooldown would still delay an automated pass.
 
 ## Backup write V1

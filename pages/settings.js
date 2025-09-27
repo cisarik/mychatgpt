@@ -37,10 +37,21 @@
 
   /* Slovensky komentar: Z formulara vycita hodnoty pre ulozenie. */
   function readFormValues() {
-    const patterns = form.SAFE_URL_PATTERNS.value
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length);
+    const rawValue = form.SAFE_URL_PATTERNS.value;
+    const lines = rawValue.split(/\r?\n/);
+    const tooLong = [];
+    const maxLength = 200;
+    lines.forEach((line, index) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) {
+        return;
+      }
+      if (trimmed.length > maxLength) {
+        tooLong.push(index + 1);
+      }
+    });
+    const normalizer = typeof normalizeSafeUrlPatterns === 'function' ? normalizeSafeUrlPatterns : null;
+    const normalizedPatterns = normalizer ? normalizer(rawValue) : lines.map((line) => line.trim()).filter((line) => line);
     return {
       LIST_ONLY: form.LIST_ONLY.checked,
       DRY_RUN: form.DRY_RUN.checked,
@@ -50,7 +61,8 @@
       MAX_MESSAGES: Number(form.MAX_MESSAGES.value),
       USER_MESSAGES_MAX: Number(form.USER_MESSAGES_MAX.value),
       SCAN_COOLDOWN_MIN: Number(form.SCAN_COOLDOWN_MIN.value),
-      SAFE_URL_PATTERNS: patterns
+      SAFE_URL_PATTERNS: normalizedPatterns,
+      SAFE_URL_ERRORS: tooLong
     };
   }
 
@@ -80,11 +92,18 @@
     event.preventDefault();
     const previous = currentSettings;
     const rawInput = readFormValues();
-    const { settings: sanitized, healedFields } = await SettingsStore.save(rawInput);
+    const { SAFE_URL_ERRORS: patternErrors, ...preparedInput } = rawInput;
+    if (patternErrors.length) {
+      const linesText = patternErrors.join(', ');
+      setStatus(`Vzor na riadku ${linesText} presahuje limit 200 znakov.`);
+      return;
+    }
+    const { settings: sanitized, healedFields } = await SettingsStore.save(preparedInput);
     currentSettings = sanitized;
     renderHealedHints(healedFields);
     const changes = diffSettings(previous, sanitized);
     await Logger.log('info', 'settings', 'Settings updated', {
+      scope: 'settings',
       changed: changes,
       before: previous,
       after: sanitized

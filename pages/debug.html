@@ -15,18 +15,24 @@
     </header>
 
     <section class="page-section panel">
-      <label class="field">
-        <span class="field-label">Filter text</span>
-        <input id="filter-input" type="text" placeholder="Filter logs" />
-      </label>
+      <div>
+        <h2 class="section-title">Log access</h2>
+        <p>
+          Use <strong>Manage extensions → Service worker → Inspect views</strong> to open the background log console
+          (Chrome/Brave DevTools).
+        </p>
+        <p>
+          On <strong>chatgpt.com</strong> tabs press <strong>Ctrl/Cmd + Shift + I</strong> to inspect the page and review
+          content-script logs directly in DevTools.
+        </p>
+      </div>
       <div class="toolbar">
-        <button id="refresh-btn">Refresh</button>
-        <button id="export-btn">Export debug</button>
-        <button id="clear-btn">Clear logs</button>
-        <button id="scan-btn">Scan now (stub)</button>
+        <button id="test-log-btn">Test log</button>
         <button id="connectivity-btn">Connectivity test (chatgpt.com)</button>
         <button id="probe-btn">Probe metadata (read-only)</button>
         <button id="heuristics-btn">Evaluate heuristics (active tab)</button>
+        <button id="autoscan-feed-btn">Auto-scan feed (stub)</button>
+        <button id="capture-btn">Capture preview (read-only)</button>
         <button id="backup-btn" class="button-sub">
           <span>Backup now (manual)</span>
           <small id="backup-mode-label">Candidates only</small>
@@ -35,26 +41,20 @@
     </section>
 
     <section class="page-section panel panel-bleed">
-      <h2 class="section-title">Live toasts</h2>
+      <h2 class="section-title">Auto-scan feed</h2>
       <div id="scan-result" class="toast-stack" role="status" aria-live="polite"></div>
       <h2 class="section-title">Connectivity history</h2>
       <div id="connectivity-results" class="toast-stack" role="status" aria-live="polite"></div>
       <h2 class="section-title">Metadata probe history</h2>
       <div id="metadata-results" class="toast-stack" role="status" aria-live="polite"></div>
+      <h2 class="section-title">Capture preview history</h2>
+      <div id="capture-results" class="toast-stack" role="status" aria-live="polite"></div>
       <h2 class="section-title">Heuristics history</h2>
       <div id="heuristics-results" class="toast-stack" role="status" aria-live="polite"></div>
       <h2 class="section-title">Manual backup status</h2>
       <div id="backup-toast" class="toast-stack" role="status" aria-live="polite"></div>
       <h2 class="section-title">Manual backup history</h2>
       <div id="backup-history" class="toast-stack" role="status" aria-live="polite"></div>
-    </section>
-
-    <section class="page-section panel">
-      <div class="logs-header inline-stack">
-        <h2 class="section-title">Log stream</h2>
-        <span class="badge">Newest first</span>
-      </div>
-      <div id="logs" class="logs" aria-live="polite"></div>
     </section>
   </main>
 

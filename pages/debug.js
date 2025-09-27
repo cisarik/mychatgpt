@@ -1,11 +1,7 @@
-/* Slovensky komentar: Logika pre nacitanie, filtrovanie a export logov. */
+/* Slovensky komentar: Debug stranka ponuka manualne akcie bez ziveho streamu logov. */
 (async function () {
-  const filterInput = document.getElementById('filter-input');
-  const logsContainer = document.getElementById('logs');
-  const refreshButton = document.getElementById('refresh-btn');
-  const exportButton = document.getElementById('export-btn');
-  const clearButton = document.getElementById('clear-btn');
-  const scanButton = document.getElementById('scan-btn');
+  const testLogButton = document.getElementById('test-log-btn');
+  const autoscanButton = document.getElementById('autoscan-feed-btn');
   const scanResultContainer = document.getElementById('scan-result');
   const connectivityButton = document.getElementById('connectivity-btn');
   const connectivityContainer = document.getElementById('connectivity-results');
@@ -13,77 +9,29 @@
   const metadataContainer = document.getElementById('metadata-results');
   const heuristicsButton = document.getElementById('heuristics-btn');
   const heuristicsContainer = document.getElementById('heuristics-results');
+  const captureButton = document.getElementById('capture-btn');
+  const captureContainer = document.getElementById('capture-results');
   const backupButton = document.getElementById('backup-btn');
   const backupModeLabel = document.getElementById('backup-mode-label');
   const backupToastContainer = document.getElementById('backup-toast');
   const backupHistoryContainer = document.getElementById('backup-history');
 
-  async function loadAndRenderLogs() {
-    const filterValue = filterInput.value.trim().toLowerCase();
-    const logs = await Logger.getLogs();
-    logsContainer.innerHTML = '';
-    logs
-      .filter((entry) => {
-        if (!filterValue) {
-          return true;
-        }
-        const text = JSON.stringify(entry).toLowerCase();
-        return text.includes(filterValue);
-      })
-      .forEach((entry) => {
-        const block = document.createElement('div');
-        block.className = 'log-entry';
-        block.textContent = JSON.stringify(entry, null, 2);
-        logsContainer.appendChild(block);
-      });
-    if (!logsContainer.children.length) {
-      const empty = document.createElement('div');
-      empty.className = 'log-entry';
-      empty.textContent = 'No logs to display.';
-      logsContainer.appendChild(empty);
-    }
-  }
-
-  filterInput.addEventListener('input', () => {
-    loadAndRenderLogs();
-  });
-
-  refreshButton.addEventListener('click', () => {
-    loadAndRenderLogs();
-  });
-
-  exportButton.addEventListener('click', async () => {
-    const logs = await Logger.getLogs();
-    const blob = new Blob([JSON.stringify(logs, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'mychatgpt-debug-logs.json';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  });
-
-  clearButton.addEventListener('click', async () => {
-    await Logger.clear();
-    await Logger.log('info', 'db', 'Logs cleared from debug page');
-    await loadAndRenderLogs();
-  });
-
-  /* Slovensky komentar: Vytvori toast so stavom skenu. */
+  /* Slovensky komentar: Prida toast do autoscan feedu. */
   function appendScanToast(message) {
+    if (!scanResultContainer) {
+      return;
+    }
     const block = document.createElement('div');
     block.className = 'log-entry';
     block.textContent = message;
     scanResultContainer.prepend(block);
-    while (scanResultContainer.childElementCount > 4) {
+    while (scanResultContainer.childElementCount > 5) {
       scanResultContainer.removeChild(scanResultContainer.lastElementChild);
     }
   }
 
-  /* Slovensky komentar: Odosle spravu pre stub skenovanie. */
-  function requestScanStub() {
+  /* Slovensky komentar: Odosle stub pozadovku na autoscan. */
+  function requestAutoscanStub() {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ type: 'scan_now' }, (response) => {
         const runtimeError = chrome.runtime.lastError;
@@ -96,37 +44,64 @@
     });
   }
 
-  scanButton.addEventListener('click', async () => {
-    const originalLabel = scanButton.textContent;
-    scanButton.disabled = true;
-    scanButton.textContent = 'Prebieha stub…';
-    try {
-      const response = await requestScanStub();
-      if (response && response.ok) {
-        appendScanToast(`Scan stub executed: ${JSON.stringify(response.result)}`);
-        await Logger.log('info', 'scan', 'Scan stub completed on debug page', {
-          result: response.result
+  if (autoscanButton) {
+    autoscanButton.addEventListener('click', async () => {
+      const originalLabel = autoscanButton.textContent;
+      autoscanButton.disabled = true;
+      autoscanButton.textContent = 'Prebieha…';
+      try {
+        const response = await requestAutoscanStub();
+        if (response && response.ok) {
+          appendScanToast(`Auto-scan stub: ${JSON.stringify(response.result)}`);
+          await Logger.log('info', 'scan', 'Auto-scan feed stub executed', {
+            result: response.result
+          });
+        } else {
+          const errorMessage = (response && response.error) || 'Neznáma chyba';
+          appendScanToast(`Auto-scan chyba: ${errorMessage}`);
+          await Logger.log('error', 'scan', 'Auto-scan feed stub failed', {
+            message: errorMessage
+          });
+        }
+      } catch (error) {
+        appendScanToast(`Auto-scan chyba: ${error && error.message}`);
+        await Logger.log('error', 'scan', 'Auto-scan feed stub threw error', {
+          message: error && error.message
         });
-      } else {
-        const errorMessage = (response && response.error) || 'Neznáma chyba';
-        appendScanToast(`Scan stub failed: ${errorMessage}`);
-        await Logger.log('error', 'scan', 'Scan stub returned error', {
-          message: errorMessage
-        });
+      } finally {
+        autoscanButton.disabled = false;
+        autoscanButton.textContent = originalLabel;
       }
-    } catch (error) {
-      appendScanToast(`Scan stub failed: ${error && error.message}`);
-      await Logger.log('error', 'scan', 'Scan stub request threw error', {
-        message: error && error.message
-      });
-    } finally {
-      scanButton.disabled = false;
-      scanButton.textContent = originalLabel;
-    }
-  });
+    });
+  }
+
+  if (testLogButton) {
+    testLogButton.addEventListener('click', async () => {
+      /* Slovensky komentar: Zapise testovaci zaznam pre rychle overenie. */
+      const originalText = testLogButton.textContent;
+      testLogButton.disabled = true;
+      try {
+        await Logger.log('info', 'debug', 'Manual test log triggered on debug page');
+        testLogButton.textContent = 'Logged!';
+      } catch (error) {
+        testLogButton.textContent = 'Error';
+        await Logger.log('error', 'debug', 'Test log failed on debug page', {
+          message: error && error.message
+        });
+      } finally {
+        setTimeout(() => {
+          testLogButton.textContent = originalText;
+          testLogButton.disabled = false;
+        }, 1200);
+      }
+    });
+  }
 
   /* Slovensky komentar: Prida zaznam z konektivity do histórie. */
   function appendConnectivityRecord(text) {
+    if (!connectivityContainer) {
+      return;
+    }
     const block = document.createElement('div');
     block.className = 'log-entry';
     block.textContent = text;
@@ -218,7 +193,7 @@
         const response = await requestMetadataProbe();
         if (response && response.ok && response.payload) {
           const payload = response.payload;
-          if (payload.skipped && payload.reason === 'safe_url_pattern') {
+          if (payload.skipped && payload.reason === 'probe_safe_url') {
             appendProbeRecord('Preskocené: Aktívna stránka je chránená vzorom SAFE_URL.');
           } else {
             appendProbeRecord(`OK: ${JSON.stringify(payload)}`);
@@ -318,6 +293,74 @@
     });
   }
 
+  /* Slovensky komentar: Prida zaznam o capture preview do historie. */
+  function appendCaptureRecord(text) {
+    if (!captureContainer) {
+      return;
+    }
+    const block = document.createElement('div');
+    block.className = 'log-entry';
+    block.textContent = text;
+    captureContainer.prepend(block);
+    while (captureContainer.childElementCount > 5) {
+      captureContainer.removeChild(captureContainer.lastElementChild);
+    }
+  }
+
+  /* Slovensky komentar: Vyziada read-only capture z backgroundu. */
+  function requestCapturePreview() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'capture_preview_debug' }, (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(runtimeError);
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }
+
+  if (captureButton) {
+    captureButton.addEventListener('click', async () => {
+      const originalLabel = captureButton.textContent;
+      captureButton.disabled = true;
+      captureButton.textContent = 'Capturing…';
+      try {
+        const response = await requestCapturePreview();
+        if (response && response.ok && response.payload) {
+          const payload = response.payload;
+          if (payload.skipped) {
+            appendCaptureRecord('Preskočené: SAFE_URL vzor blokuje capture.');
+          } else {
+            const title = payload.title || '(bez názvu)';
+            const qLen = payload.questionText ? payload.questionText.length : 0;
+            const aLen = payload.answerHTML ? payload.answerHTML.length : 0;
+            appendCaptureRecord(`OK: title=${title} | qLen=${qLen} | aLen=${aLen}`);
+          }
+          await Logger.log('info', 'debug', 'Capture preview invoked', {
+            reasonCode: response.reasonCode,
+            skipped: Boolean(payload.skipped)
+          });
+        } else {
+          const message = (response && response.error) || 'Neznáma chyba';
+          appendCaptureRecord(`Chyba: ${message}`);
+          await Logger.log('warn', 'debug', 'Capture preview returned warning', {
+            reasonCode: response && response.reasonCode ? response.reasonCode : 'capture_error',
+            message
+          });
+        }
+      } catch (error) {
+        appendCaptureRecord(`Chyba: ${error && error.message}`);
+        await Logger.log('error', 'debug', 'Capture preview request threw error', {
+          message: error && error.message
+        });
+      } finally {
+        captureButton.disabled = false;
+        captureButton.textContent = originalLabel;
+      }
+    });
+  }
 
   /* Slovensky komentar: Vykresli toast pre manualne zalozenie. */
   function appendBackupToast(text) {
@@ -359,9 +402,7 @@
     }
     try {
       const { settings } = await SettingsStore.load();
-      backupModeLabel.textContent = settings.CAPTURE_ONLY_CANDIDATES
-        ? 'Candidates only'
-        : 'All chats allowed';
+      backupModeLabel.textContent = settings.CAPTURE_ONLY_CANDIDATES ? 'Candidates only' : 'All chats allowed';
     } catch (error) {
       backupModeLabel.textContent = 'Mode unknown';
       await Logger.log('warn', 'debug', 'Failed to read settings for backup label', {
@@ -430,7 +471,5 @@
   }
 
   await refreshBackupModeLabel();
-
   await Logger.log('info', 'db', 'Debug page opened');
-  await loadAndRenderLogs();
 })();

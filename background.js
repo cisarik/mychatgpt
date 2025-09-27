@@ -284,10 +284,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } else if (urlMatchesAnyPattern(activeTab.url, settings.SAFE_URL_PATTERNS)) {
           decision.decided = true;
           decision.isCandidate = false;
-          decision.reasonCodes.push('safe_url');
+          decision.reasonCodes.push('heuristics_safe_url');
           decision.snapshot.url = activeTab.url;
           decision.snapshot.title = activeTab.title || null;
-          logReasonCode = 'safe_url';
+          logReasonCode = 'heuristics_safe_url';
           payload = { ok: true, reasonCode: logReasonCode, decision, cooldown: cooldownReport };
         } else {
           decision.snapshot.url = activeTab.url;
@@ -515,7 +515,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         const { settings } = await SettingsStore.load();
         if (urlMatchesAnyPattern(activeTab.url, settings.SAFE_URL_PATTERNS)) {
-          reasonCode = 'safe_url';
+          reasonCode = 'probe_safe_url';
           const payload = {
             ok: true,
             traceId,
@@ -525,7 +525,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             counts: { total: null, user: null, assistant: null },
             markers: { hasAppRoot: false, hasComposer: false, guessChatView: false },
             skipped: true,
-            reason: 'safe_url_pattern'
+            reason: 'probe_safe_url'
           };
           await Logger.log('info', 'scan', 'Metadata probe summary', {
             reasonCode,
@@ -573,6 +573,87 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           error: error && error.message
         });
         sendResponse({ ok: false, reasonCode, error: error && error.message });
+      }
+    })();
+    return true;
+  }
+  if (message && message.type === 'capture_preview_debug') {
+    (async () => {
+      let reasonCode = 'capture_error';
+      try {
+        const { settings } = await SettingsStore.load();
+        const activeTab = await getActiveTab();
+        if (!activeTab || !activeTab.url || !activeTab.url.startsWith('https://chatgpt.com/')) {
+          reasonCode = 'capture_no_match';
+          await Logger.log('info', 'scan', 'Capture preview debug summary', {
+            reasonCode,
+            url: activeTab && activeTab.url ? activeTab.url : null,
+            title: activeTab && activeTab.title ? activeTab.title : null
+          });
+          sendResponse({ ok: false, reasonCode, error: 'Active tab is not chatgpt.com' });
+          return;
+        }
+
+        if (urlMatchesAnyPattern(activeTab.url, settings.SAFE_URL_PATTERNS)) {
+          reasonCode = 'capture_safe_url';
+          const payload = {
+            ok: true,
+            skipped: true,
+            reason: 'capture_safe_url',
+            url: activeTab.url,
+            title: activeTab.title || null,
+            questionText: null,
+            answerHTML: null
+          };
+          await Logger.log('info', 'scan', 'Capture preview debug summary', {
+            reasonCode,
+            url: activeTab.url,
+            title: activeTab.title || null,
+            skipped: true
+          });
+          sendResponse({ ok: true, reasonCode, payload });
+          return;
+        }
+
+        const capturePayload = await sendCaptureRequest(activeTab.id, `debug:${Date.now()}`);
+        if (capturePayload && capturePayload.ok) {
+          reasonCode = 'capture_ok';
+          await Logger.log('info', 'scan', 'Capture preview debug summary', {
+            reasonCode,
+            url: capturePayload.url || activeTab.url,
+            title: capturePayload.title || activeTab.title || null,
+            qLen:
+              capturePayload.questionText && typeof capturePayload.questionText === 'string'
+                ? capturePayload.questionText.length
+                : 0,
+            aLen:
+              capturePayload.answerHTML && typeof capturePayload.answerHTML === 'string'
+                ? capturePayload.answerHTML.length
+                : 0
+          });
+          sendResponse({ ok: true, reasonCode, payload: capturePayload });
+          return;
+        }
+
+        reasonCode = 'capture_error';
+        const messageText = capturePayload && capturePayload.error ? capturePayload.error : 'Capture unavailable.';
+        await Logger.log('warn', 'scan', 'Capture preview debug summary', {
+          reasonCode,
+          url: activeTab.url,
+          title: activeTab.title || null,
+          message: messageText
+        });
+        sendResponse({ ok: false, reasonCode, error: messageText });
+      } catch (error) {
+        const messageText = error && error.message ? error.message : String(error);
+        reasonCode = reasonCode === 'capture_safe_url' ? reasonCode : 'capture_error';
+        await Logger.log('error', 'scan', 'Capture preview debug summary', {
+          reasonCode,
+          url: null,
+          title: null,
+          message: messageText
+        });
+        sendResponse({ ok: false, reasonCode, error: messageText });
       }
     })();
     return true;
