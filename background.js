@@ -1320,7 +1320,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         dbMs: 0,
         uiMs: 0,
         backup: { ok: false, recordId: null, reasonCode: null },
-        ui: { ok: false, reason: 'not_attempted', steps: { ...stepsTemplate }, attempts: 0, matchSource: null },
+        ui: {
+          ok: false,
+          reason: 'not_attempted',
+          steps: { ...stepsTemplate },
+          attempts: [],
+          attemptsCount: 0,
+          matchSource: null,
+          debug: null
+        },
         retryCount: 0,
         traceId,
         tab: { url: null, title: null },
@@ -1495,14 +1503,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           alternatives.push(questionCandidate);
         }
 
-        const retriableReasons = new Set(['menu_not_found', 'convo_not_found', 'select_load_timeout']);
+        const shareUrlCandidate = probeResponse && typeof probeResponse.url === 'string'
+          ? probeResponse.url
+          : activeTab.url || '';
+        if (shareUrlCandidate && shareUrlCandidate.startsWith('https://chatgpt.com/share/')) {
+          summary.ok = true;
+          summary.didDelete = false;
+          summary.reasonCode = 'share_view_readonly';
+          summary.ui.reason = 'share_view_readonly';
+          summary.ui.ok = false;
+          summary.ui.steps = { ...stepsTemplate };
+          summary.ui.matchSource = null;
+          summary.ui.debug = null;
+          summary.ui.attempts = [];
+          summary.ui.attemptsCount = 0;
+          summary.uiMs = 0;
+          console.info('[MyChatGPT][runner] Share view detected — sidebar delete unsupported. Skipping delete.', {
+            url: shareUrlCandidate
+          });
+          logLevel = 'info';
+          return;
+        }
+
+        const retriableReasons = new Set(['menu_not_found', 'select_load_timeout', 'ui_click_failed']);
         let attempt = 0;
         let uiResponse = null;
         let lastError = null;
         let uiElapsedTotal = 0;
         while (attempt < 2) {
           attempt += 1;
-          summary.ui.attempts = attempt;
           const uiAttempt = await runWithTimer('runner.ui_delete', () => sendWithEnsureCS(
             activeTab.id,
             {
@@ -1531,6 +1560,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ? 'ui_delete_ok'
             : 'ui_click_failed';
 
+          const debugPayload = uiResponse && uiResponse.debug && typeof uiResponse.debug === 'object'
+            ? { ...uiResponse.debug }
+            : null;
+          if (debugPayload && Array.isArray(debugPayload.snapshot)) {
+            debugPayload.snapshot = debugPayload.snapshot.slice(0, 25);
+          }
+          const responseSteps = uiResponse && uiResponse.steps && typeof uiResponse.steps === 'object'
+            ? {
+                sidebar: Boolean(uiResponse.steps.sidebar),
+                select: Boolean(uiResponse.steps.select),
+                menu: Boolean(uiResponse.steps.menu),
+                item: Boolean(uiResponse.steps.item),
+                confirm: Boolean(uiResponse.steps.confirm)
+              }
+            : { ...stepsTemplate };
+          const attemptDetail = {
+            attempt,
+            ok: Boolean(uiResponse && uiResponse.ok),
+            reason: reasonRaw,
+            elapsedMs: uiResponse && typeof uiResponse.elapsedMs === 'number' ? uiResponse.elapsedMs : null,
+            timerMs: Number.isFinite(uiAttempt.elapsedMs) ? uiAttempt.elapsedMs : null,
+            steps: responseSteps,
+            matchSource: uiResponse && typeof uiResponse.matchSource === 'string' ? uiResponse.matchSource : null,
+            debug: debugPayload
+          };
+          summary.ui.attempts.push(attemptDetail);
+          summary.ui.attemptsCount = summary.ui.attempts.length;
+          summary.ui.debug = attemptDetail.debug;
+
           if (uiResponse && (uiResponse.ok || !retriableReasons.has(reasonRaw))) {
             break;
           }
@@ -1551,10 +1609,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           summary.reasonCode = 'ui_click_failed';
           summary.ui.reason = 'ui_click_failed';
           summary.ui.ok = false;
-          summary.ui.steps = { ...stepsTemplate };
+          const lastAttemptDetail = summary.ui.attempts[summary.ui.attempts.length - 1];
+          summary.ui.steps = lastAttemptDetail && lastAttemptDetail.steps ? lastAttemptDetail.steps : { ...stepsTemplate };
           summary.didDelete = false;
           summary.lastError = lastError && lastError.message ? lastError.message : null;
-          summary.ui.matchSource = null;
+          summary.ui.matchSource = lastAttemptDetail && lastAttemptDetail.matchSource ? lastAttemptDetail.matchSource : null;
           logLevel = 'error';
           return;
         }
@@ -1569,6 +1628,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         summary.ui.steps = steps;
         summary.ui.ok = Boolean(uiResponse.ok);
         summary.ui.matchSource = typeof uiResponse.matchSource === 'string' ? uiResponse.matchSource : null;
+        summary.ui.debug = uiResponse && uiResponse.debug && typeof uiResponse.debug === 'object'
+          ? { ...uiResponse.debug }
+          : null;
+        if (summary.ui.debug && Array.isArray(summary.ui.debug.snapshot)) {
+          summary.ui.debug.snapshot = summary.ui.debug.snapshot.slice(0, 25);
+        }
+
+        if (!summary.ui.attempts.length) {
+          summary.ui.attempts.push({
+            attempt: 1,
+            ok: summary.ui.ok,
+            reason: uiResponse.reason || (summary.ui.ok ? 'ui_delete_ok' : 'ui_click_failed'),
+            elapsedMs: typeof uiResponse.elapsedMs === 'number' ? uiResponse.elapsedMs : null,
+            timerMs: summary.uiMs,
+            steps,
+            matchSource: summary.ui.matchSource,
+            debug: summary.ui.debug || null
+          });
+          summary.ui.attemptsCount = 1;
+        }
 
         const uiReasonRaw = typeof uiResponse.reason === 'string'
           ? uiResponse.reason
@@ -1581,11 +1660,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sidebar_open_failed: 'sidebar_open_failed',
           sidebar_not_visible: 'sidebar_open_failed',
           convo_not_found: 'convo_not_found',
-          select_failed: 'select_failed',
           select_load_timeout: 'select_load_timeout',
           menu_not_found: 'menu_not_found',
-          delete_item_not_found: 'menu_not_found',
+          delete_item_not_found: 'delete_item_not_found',
           confirm_dialog_not_found: 'confirm_dialog_not_found',
+          share_view_readonly: 'share_view_readonly',
           ui_click_failed: 'ui_click_failed',
           ui_delete_ok: 'ui_delete_ok'
         };
@@ -1604,7 +1683,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           'convo_not_found',
           'sidebar_open_failed',
           'select_load_timeout',
-          'select_failed'
+          'delete_item_not_found'
         ].includes(mappedUiReason)) {
           logLevel = 'warn';
         } else {

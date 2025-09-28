@@ -5,6 +5,48 @@ if (!csGlobal.__mychatgptContentLogged) {
   csGlobal.__mychatgptContentLogged = true;
 }
 
+let __VERBOSE = false;
+(async () => {
+  try {
+    const { VERBOSE_CONSOLE } = await chrome.storage.local.get({ VERBOSE_CONSOLE: false });
+    __VERBOSE = Boolean(VERBOSE_CONSOLE);
+  } catch (_error) {
+    // Slovensky komentar: Tiche zlyhanie zachova povodny stav.
+  }
+})();
+
+if (chrome && chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !changes || !changes.VERBOSE_CONSOLE) {
+      return;
+    }
+    const nextValue = changes.VERBOSE_CONSOLE.newValue;
+    __VERBOSE = Boolean(nextValue);
+  });
+}
+
+function CDBG(...args) {
+  if (__VERBOSE) {
+    console.debug('[MyChatGPT][content][ui-delete]', ...args);
+  }
+}
+
+function CINFO(...args) {
+  if (__VERBOSE) {
+    console.info('[MyChatGPT][content][ui-delete]', ...args);
+  }
+}
+
+function CWARN(...args) {
+  if (__VERBOSE) {
+    console.warn('[MyChatGPT][content][ui-delete]', ...args);
+  }
+}
+
+function CERR(...args) {
+  console.error('[MyChatGPT][content][ui-delete]', ...args);
+}
+
 /* Slovensky komentar: Sleduje udalosti na jemne potvrdenie aktivity skriptu. */
 const announcementState = { pageShow: false, visibility: false };
 
@@ -413,7 +455,225 @@ async function waitForDocumentTitleMatch(normalizedTargets, timeoutMs = 3600) {
   return false;
 }
 
-/* Slovensky komentar: Spolocna cast mazania cez menu. */
+const DELETE_SELECTORS = [
+  '[data-testid="delete-conversation"]',
+  '[role="menuitem"][data-testid*="delete"]',
+  '[role="menuitem"][aria-label*="Delete" i]',
+  'button[aria-label*="Delete" i]',
+  '[role="menuitem"]:has(svg[data-icon*="trash"])'
+];
+
+const DELETE_TEXT_TOKENS = ['delete', 'remove', 'vymazať', 'zmazať', 'odstrániť'];
+
+function collectMenuContainers(root = document) {
+  if (!root || typeof root.querySelectorAll !== 'function') {
+    return [];
+  }
+  const selectors = ['[role="menu"]', '[data-testid*="menu"]'];
+  const seen = new Set();
+  const containers = [];
+  selectors.forEach((selector) => {
+    let matches = [];
+    try {
+      matches = Array.from(root.querySelectorAll(selector));
+    } catch (_error) {
+      matches = [];
+    }
+    matches.forEach((node) => {
+      if (node && !seen.has(node)) {
+        seen.add(node);
+        containers.push(node);
+      }
+    });
+  });
+  return containers;
+}
+
+function collectMenuItems(root = document) {
+  const containers = collectMenuContainers(root);
+  const interactiveSelectors = [
+    'button',
+    '[role="menuitem"]',
+    '[role="menuitemcheckbox"]',
+    '[role="menuitemradio"]',
+    '[role="option"]'
+  ];
+  const seen = new Set();
+  const items = [];
+  const gatherFromScope = (scope) => {
+    if (!scope || typeof scope.querySelectorAll !== 'function') {
+      return;
+    }
+    interactiveSelectors.forEach((selector) => {
+      let candidates = [];
+      try {
+        candidates = Array.from(scope.querySelectorAll(selector));
+      } catch (_error) {
+        candidates = [];
+      }
+      candidates.forEach((node) => {
+        if (!node || seen.has(node) || !isNodeEnabled(node)) {
+          return;
+        }
+        seen.add(node);
+        items.push(node);
+      });
+    });
+  };
+
+  if (containers.length) {
+    containers.forEach((container) => gatherFromScope(container));
+  } else {
+    gatherFromScope(root);
+  }
+
+  return items;
+}
+
+function countMenuItems(root = document) {
+  return collectMenuItems(root).length;
+}
+
+function dumpMenuSnapshot(root = document) {
+  const snapshot = [];
+  const containers = collectMenuContainers(root);
+  const scopes = containers.length ? containers : [root];
+  scopes.forEach((scope, index) => {
+    const items = collectMenuItems(scope);
+    items.forEach((node) => {
+      let rect = null;
+      try {
+        const bounds = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null;
+        if (bounds) {
+          rect = {
+            x: Number(bounds.x) || 0,
+            y: Number(bounds.y) || 0,
+            w: Number(bounds.width) || 0,
+            h: Number(bounds.height) || 0
+          };
+        }
+      } catch (_error) {
+        rect = null;
+      }
+      const ariaLabel = typeof node.getAttribute === 'function' ? node.getAttribute('aria-label') : null;
+      const role = typeof node.getAttribute === 'function' ? node.getAttribute('role') : null;
+      const testid = typeof node.getAttribute === 'function' ? node.getAttribute('data-testid') : null;
+      const classes = typeof node.className === 'string'
+        ? node.className
+        : typeof node.getAttribute === 'function'
+        ? node.getAttribute('class')
+        : '';
+      snapshot.push({
+        text: readNormalized(node),
+        ariaLabel: ariaLabel || null,
+        role: role || null,
+        testid: testid || null,
+        classes: classes || '',
+        rect,
+        containerIndex: index,
+        containerRole: scope && typeof scope.getAttribute === 'function' ? scope.getAttribute('role') || null : null,
+        containerTestid: scope && typeof scope.getAttribute === 'function' ? scope.getAttribute('data-testid') || null : null
+      });
+    });
+  });
+  return snapshot;
+}
+
+function resolveDeleteMenuItem() {
+  const selectorsTried = [];
+  for (const selector of DELETE_SELECTORS) {
+    selectorsTried.push(selector);
+    let candidate = null;
+    try {
+      candidate = document.querySelector(selector);
+    } catch (_error) {
+      candidate = null;
+    }
+    if (candidate && isNodeEnabled(candidate)) {
+      return {
+        node: candidate,
+        selector,
+        strategy: 'selector',
+        selectorsTried: [...selectorsTried],
+        menuSnapshotCount: countMenuItems(document),
+        textToken: null,
+        ariaLabel: candidate.getAttribute ? candidate.getAttribute('aria-label') || null : null,
+        role: candidate.getAttribute ? candidate.getAttribute('role') || null : null
+      };
+    }
+  }
+
+  const menuItems = collectMenuItems();
+  const lowerTokens = DELETE_TEXT_TOKENS.map((token) => token.toLowerCase());
+  for (const node of menuItems) {
+    const normalizedText = readNormalized(node);
+    const ariaLabel = node && node.getAttribute ? node.getAttribute('aria-label') : null;
+    for (const token of lowerTokens) {
+      const ariaMatch = ariaLabel && ariaLabel.toLowerCase().includes(token);
+      if (normalizedText.includes(token) || ariaMatch) {
+        return {
+          node,
+          selector: null,
+          strategy: 'text',
+          selectorsTried: [...selectorsTried],
+          menuSnapshotCount: menuItems.length,
+          textToken: token,
+          ariaLabel: ariaLabel || null,
+          role: node && node.getAttribute ? node.getAttribute('role') || null : null
+        };
+      }
+    }
+  }
+
+  return {
+    node: null,
+    selector: null,
+    strategy: null,
+    selectorsTried: [...selectorsTried],
+    menuSnapshotCount: menuItems.length
+  };
+}
+
+function makeDeleteGetter(resolution) {
+  if (!resolution || typeof resolution !== 'object') {
+    return () => null;
+  }
+  return () => {
+    if (resolution.node && resolution.node.isConnected) {
+      return resolution.node;
+    }
+    if (resolution.selector) {
+      try {
+        const node = document.querySelector(resolution.selector);
+        if (node && isNodeEnabled(node)) {
+          return node;
+        }
+      } catch (_error) {
+        return null;
+      }
+    }
+    if (resolution.strategy === 'text') {
+      const items = collectMenuItems();
+      for (const node of items) {
+        const normalizedText = readNormalized(node);
+        const ariaLabel = node && node.getAttribute ? node.getAttribute('aria-label') : null;
+        if (!resolution.textToken) {
+          if (normalizedText.includes('delete')) {
+            return node;
+          }
+          continue;
+        }
+        const token = resolution.textToken;
+        if (normalizedText.includes(token) || (ariaLabel && ariaLabel.toLowerCase().includes(token))) {
+          return node;
+        }
+      }
+    }
+    return null;
+  };
+}
+
+/* Slovensky komentar: Spolocna cast mazania cez menu s rozsirenym logovanim. */
 async function executeMenuDeletionSteps(baseSteps = {}) {
   const steps = {
     sidebar: Boolean(baseSteps.sidebar),
@@ -422,33 +682,109 @@ async function executeMenuDeletionSteps(baseSteps = {}) {
     item: Boolean(baseSteps.item),
     confirm: Boolean(baseSteps.confirm)
   };
+  const startedAt = Date.now();
+  const debug = {
+    selectors: [...DELETE_SELECTORS]
+  };
+
+  const beforeMenuItems = countMenuItems();
+  debug.menuItemsBefore = beforeMenuItems;
 
   const menuButton = findMoreActionsButton();
   if (!menuButton) {
-    return { ok: false, reason: 'menu_not_found', steps };
+    CWARN('menu_not_found', { phase: 'more_actions_button' });
+    return { ok: false, reason: 'menu_not_found', steps, debug, elapsedMs: Date.now() - startedAt };
   }
 
+  const menuClickStarted = Date.now();
   const menuClick = await clickAndWait(() => menuButton, { timeoutMs: 1000 });
+  const menuClickElapsed = Date.now() - menuClickStarted;
+  debug.menuClickMs = menuClickElapsed;
+  debug.menuClickOk = Boolean(menuClick.ok);
+  debug.menuItemsAfterMenuClick = countMenuItems();
+  CDBG('click menu button', { elapsedMs: menuClickElapsed, ok: menuClick.ok, items: debug.menuItemsAfterMenuClick });
   if (!menuClick.ok) {
-    return { ok: false, reason: 'ui_click_failed', steps };
+    return { ok: false, reason: 'ui_click_failed', steps, debug, elapsedMs: Date.now() - startedAt };
   }
   steps.menu = true;
 
-  const itemResult = await clickAndWait(() => findDeleteMenuItem(), { timeoutMs: 2000 });
+  const containers = collectMenuContainers();
+  const firstContainer = containers.length ? containers[0] : null;
+  debug.menuContainerRole = firstContainer && firstContainer.getAttribute ? firstContainer.getAttribute('role') || null : null;
+  debug.menuContainerTestid = firstContainer && firstContainer.getAttribute ? firstContainer.getAttribute('data-testid') || null : null;
+  const menuItemsCount = countMenuItems();
+  debug.menuItems = menuItemsCount;
+  CINFO('menu opened', { items: menuItemsCount, containerRole: debug.menuContainerRole, elapsedMs: menuClickElapsed });
+
+  CDBG('probing delete selectors', [...DELETE_SELECTORS]);
+  const resolution = resolveDeleteMenuItem();
+  debug.selectorsTried = resolution.selectorsTried || [...DELETE_SELECTORS];
+  debug.menuSnapshotCount = Number.isFinite(resolution.menuSnapshotCount)
+    ? resolution.menuSnapshotCount
+    : menuItemsCount;
+
+  if (!resolution.node) {
+    const snapshot = dumpMenuSnapshot();
+    const limited = snapshot.slice(0, 25);
+    debug.snapshot = limited;
+    debug.menuSnapshotCount = snapshot.length;
+    CERR('delete_item_not_found', { selectorsTried: [...DELETE_SELECTORS], snapshot: limited });
+    return {
+      ok: false,
+      reason: 'delete_item_not_found',
+      steps,
+      debug,
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  debug.deleteMatch = {
+    selector: resolution.selector || null,
+    strategy: resolution.strategy || null,
+    ariaLabel: resolution.ariaLabel || null,
+    role: resolution.role || null,
+    textToken: resolution.textToken || null,
+    text: resolution.node ? readNormalized(resolution.node) : null
+  };
+
+  const deleteGetter = makeDeleteGetter(resolution);
+  const deleteClickStarted = Date.now();
+  const itemResult = await clickAndWait(deleteGetter, { timeoutMs: 2000 });
+  const deleteElapsed = Date.now() - deleteClickStarted;
+  debug.deleteClickMs = deleteElapsed;
+  debug.deleteClickOk = Boolean(itemResult.ok);
+  CDBG('click delete item', {
+    selector: resolution.selector || null,
+    strategy: resolution.strategy || null,
+    elapsedMs: deleteElapsed,
+    ok: itemResult.ok
+  });
   if (!itemResult.ok) {
-    const reason = itemResult.element ? 'ui_click_failed' : 'delete_item_not_found';
-    return { ok: false, reason, steps };
+    const reason = itemResult.element ? 'ui_click_failed' : 'ui_click_failed';
+    return { ok: false, reason, steps, debug, elapsedMs: Date.now() - startedAt };
   }
   steps.item = true;
 
+  const confirmClickStarted = Date.now();
   const confirmResult = await clickAndWait(() => findDeleteConfirmButton(), { timeoutMs: 2500 });
+  const confirmElapsed = Date.now() - confirmClickStarted;
+  debug.confirmClickMs = confirmElapsed;
+  debug.confirmClickOk = Boolean(confirmResult.ok);
+  CDBG('click confirm delete', { elapsedMs: confirmElapsed, ok: confirmResult.ok });
   if (!confirmResult.ok) {
     const reason = confirmResult.element ? 'ui_click_failed' : 'confirm_dialog_not_found';
-    return { ok: false, reason, steps };
+    if (reason === 'confirm_dialog_not_found') {
+      CWARN('confirm_dialog_not_found', { elapsedMs: confirmElapsed });
+    }
+    return { ok: false, reason, steps, debug, elapsedMs: Date.now() - startedAt };
   }
   steps.confirm = true;
+  debug.confirmButtonLabel = confirmResult.element ? readNormalized(confirmResult.element) : null;
 
-  return { ok: true, reason: 'ui_delete_ok', steps };
+  const totalElapsed = Date.now() - startedAt;
+  debug.totalMs = totalElapsed;
+  CINFO('delete flow completed', { elapsedMs: totalElapsed });
+  return { ok: true, reason: 'ui_delete_ok', steps, debug, elapsedMs: totalElapsed };
 }
 
 /* Slovensky komentar: Bezpecne vrati pole kandidatov podla selektora (ignoruje syntakticke chyby). */
@@ -542,7 +878,7 @@ async function clickAndWait(sel, { textEquals = null, timeoutMs = 1500 } = {}) {
   }
 
   if (!element) {
-    return { ok: false, element: null };
+    return { ok: false, element: null, elapsedMs: Date.now() - start };
   }
 
   try {
@@ -556,11 +892,11 @@ async function clickAndWait(sel, { textEquals = null, timeoutMs = 1500 } = {}) {
   try {
     element.click();
   } catch (clickError) {
-    return { ok: false, element, error: clickError };
+    return { ok: false, element, error: clickError, elapsedMs: Date.now() - start };
   }
 
   await waitHelper(120);
-  return { ok: true, element };
+  return { ok: true, element, elapsedMs: Date.now() - start };
 }
 
 /* Slovensky komentar: Najde tlacidlo pre kebab menu dostupne vo view. */
@@ -575,49 +911,6 @@ function findMoreActionsButton() {
     const candidates = safeQueryAll(`${selector}:not([disabled])`).filter((node) => isNodeEnabled(node));
     if (candidates.length) {
       return candidates[0];
-    }
-  }
-  return null;
-}
-
-/* Slovensky komentar: Najde polozku Delete v otvorenom menu. */
-function findDeleteMenuItem() {
-  const targetText = 'delete';
-  const roleMatches = safeQueryAll('[role="menuitem"]');
-  for (const node of roleMatches) {
-    if (!isNodeEnabled(node)) {
-      continue;
-    }
-    if (readNormalized(node) === targetText) {
-      return node;
-    }
-  }
-
-  const menuSelectors = ['[role="menu"]', '[data-popover-root]'];
-  for (const selector of menuSelectors) {
-    const scopes = safeQueryAll(selector);
-    for (const scope of scopes) {
-      const interactive = Array.from(scope.querySelectorAll('button, div, a'));
-      for (const node of interactive) {
-        if (!isNodeEnabled(node)) {
-          continue;
-        }
-        const normalized = readNormalized(node);
-        if (normalized === targetText || normalized.includes(targetText)) {
-          return node;
-        }
-      }
-    }
-  }
-
-  const fallback = safeQueryAll('button, div, a');
-  for (const node of fallback) {
-    if (!isNodeEnabled(node)) {
-      continue;
-    }
-    const normalized = readNormalized(node);
-    if (normalized === targetText || normalized.includes(targetText)) {
-      return node;
     }
   }
   return null;
@@ -751,9 +1044,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const rawTitle = typeof message.title === 'string' ? message.title : '';
       const altInputs = Array.isArray(message.alternatives) ? message.alternatives : [];
       const steps = { sidebar: false, select: false, menu: false, item: false, confirm: false };
+      const startedAt = Date.now();
       const normalizedTargets = [];
       const seen = new Set();
       const targetMeta = new Map();
+      const respond = (payload) => {
+        const baseSteps = payload && payload.steps ? payload.steps : steps;
+        const response = {
+          ok: false,
+          steps: {
+            sidebar: Boolean(baseSteps.sidebar),
+            select: Boolean(baseSteps.select),
+            menu: Boolean(baseSteps.menu),
+            item: Boolean(baseSteps.item),
+            confirm: Boolean(baseSteps.confirm)
+          },
+          matchSource: matchSource || null,
+          ts: Date.now(),
+          ...payload
+        };
+        if (!('matchSource' in payload)) {
+          response.matchSource = matchSource || null;
+        }
+        if (typeof response.elapsedMs !== 'number') {
+          response.elapsedMs = Date.now() - startedAt;
+        }
+        sendResponse(response);
+      };
       const registerTarget = (value, source) => {
         const normalized = normalizeTitleValue(value);
         if (normalized && !seen.has(normalized)) {
@@ -768,7 +1085,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       let matchSource = null;
 
       if (!normalizedTargets.length) {
-        sendResponse({ ok: false, reason: 'missing_title', steps, matchSource: null, ts: Date.now() });
+        respond({ ok: false, reason: 'missing_title', matchSource: null });
         return;
       }
 
@@ -784,7 +1101,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (ensureResult.reason === 'already_visible') {
               steps.sidebar = true;
             }
-            sendResponse({ ok: false, reason, steps, matchSource: matchSource || null, ts: Date.now() });
+            respond({ ok: false, reason, steps });
             return;
           }
           steps.sidebar = true;
@@ -793,18 +1110,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             matchSource = nodeMatchSource;
           }
           if (!conversationNode) {
-            sendResponse({ ok: false, reason: 'convo_not_found', steps, matchSource: matchSource || null, ts: Date.now() });
+            respond({ ok: false, reason: 'convo_not_found', steps });
             return;
           }
           const selectResult = await clickAndWait(() => conversationNode, { timeoutMs: 2000 });
           if (!selectResult.ok) {
-            sendResponse({ ok: false, reason: 'select_failed', steps, matchSource: matchSource || null, ts: Date.now() });
+            respond({ ok: false, reason: 'ui_click_failed', steps });
             return;
           }
           steps.select = true;
           const loaded = await waitForDocumentTitleMatch(normalizedTargets, 3600);
           if (!loaded) {
-            sendResponse({ ok: false, reason: 'select_load_timeout', steps, matchSource: matchSource || null, ts: Date.now() });
+            respond({ ok: false, reason: 'select_load_timeout', steps });
             return;
           }
           const postLoadMatch = resolveMatchSource(getDocumentConversationTitle(), normalizedTargets, targetMeta);
@@ -823,10 +1140,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const result = await executeMenuDeletionSteps(steps);
-        sendResponse({ ok: result.ok, reason: result.reason, steps: result.steps, matchSource: matchSource || null, ts: Date.now() });
+        respond({
+          ok: result.ok,
+          reason: result.reason,
+          steps: result.steps,
+          matchSource: matchSource || null,
+          debug: result.debug || null,
+          elapsedMs: typeof result.elapsedMs === 'number' ? result.elapsedMs : undefined
+        });
       } catch (error) {
         const messageText = error && error.message ? error.message : String(error);
-        sendResponse({ ok: false, reason: 'ui_click_failed', steps, matchSource: matchSource || null, error: messageText, ts: Date.now() });
+        respond({ ok: false, reason: 'ui_click_failed', steps, error: messageText });
       }
     })();
     return true;
@@ -841,12 +1165,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         item: false,
         confirm: false
       };
+      const startedAt = Date.now();
       try {
         const result = await executeMenuDeletionSteps(steps);
-        sendResponse({ ok: result.ok, reason: result.reason, steps: result.steps, ts: Date.now() });
+        sendResponse({
+          ok: result.ok,
+          reason: result.reason,
+          steps: result.steps,
+          debug: result.debug || null,
+          ts: Date.now(),
+          elapsedMs: typeof result.elapsedMs === 'number' ? result.elapsedMs : Date.now() - startedAt
+        });
       } catch (error) {
         const messageText = error && error.message ? error.message : String(error);
-        sendResponse({ ok: false, reason: 'ui_click_failed', steps, error: messageText, ts: Date.now() });
+        sendResponse({
+          ok: false,
+          reason: 'ui_click_failed',
+          steps,
+          error: messageText,
+          ts: Date.now(),
+          elapsedMs: Date.now() - startedAt
+        });
       }
     })();
     return true;

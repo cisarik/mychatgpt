@@ -35,6 +35,20 @@ const globalTarget = typeof self !== 'undefined' ? self : window;
 /* Slovensky komentar: Asynchronne pocka stanoveny pocet milisekund. */
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 
+/* Slovensky komentar: Ziska hodnotu VERBOSE flagu zo storage. */
+async function getVerboseConsoleFlag() {
+  try {
+    const { VERBOSE_CONSOLE } = await chrome.storage.local.get({ VERBOSE_CONSOLE: false });
+    return Boolean(VERBOSE_CONSOLE);
+  } catch (_error) {
+    return false;
+  }
+}
+
+if (typeof self !== 'undefined') {
+  self.getVerboseConsoleFlag = getVerboseConsoleFlag;
+}
+
 /* Slovensky komentar: Normalizuje textovy obsah uzla na male pismena. */
 const normText = (node) => {
   const raw = node && typeof node.textContent === 'string' ? node.textContent : '';
