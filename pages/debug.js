@@ -111,106 +111,6 @@
     });
   }
 
-  /* Slovensky komentar: Zostavi textovy zaznam pre backup-delete akciu. */
-  function formatBackupDeleteHistory(entry) {
-    const timestampValue = Number.isFinite(entry?.timestamp)
-      ? new Date(entry.timestamp)
-      : new Date();
-    const timestamp = Number.isFinite(timestampValue.getTime())
-      ? timestampValue.toLocaleTimeString([], { hour12: false })
-      : '';
-    const steps = {
-      menu: Boolean(entry?.ui?.steps?.menu),
-      item: Boolean(entry?.ui?.steps?.item),
-      confirm: Boolean(entry?.ui?.steps?.confirm)
-    };
-    const recordId = entry?.backup && (entry.backup.recordId || entry.backup.id)
-      ? entry.backup.recordId || entry.backup.id
-      : null;
-    const payload = {
-      ok: entry?.ok === true,
-      didDelete: entry?.didDelete === true,
-      reasonCode: typeof entry?.reasonCode === 'string' && entry.reasonCode ? entry.reasonCode : 'unknown',
-      candidate: typeof entry?.candidate === 'boolean' ? entry.candidate : null,
-      dryRun: entry?.dryRun === true ? true : entry?.dryRun === false ? false : null,
-      backup: { recordId },
-      ui: { steps }
-    };
-    const formatted = JSON.stringify(payload);
-    return timestamp ? `[${timestamp}] ${formatted}` : formatted;
-  }
-
-  /* Slovensky komentar: Prida zaznam o backup-delete akcii. */
-  function appendBackupDeleteHistoryEntry(entry) {
-    if (!isMounted()) {
-      return;
-    }
-    const historyHost = getElement('backupDeleteHistory');
-    if (!historyHost) {
-      return;
-    }
-    const block = createNode('div');
-    block.className = 'history-entry';
-    block.textContent = formatBackupDeleteHistory(entry || {});
-    historyHost.prepend(block);
-    while (historyHost.childElementCount > 10) {
-      historyHost.removeChild(historyHost.lastElementChild);
-    }
-  }
-
-  /* Slovensky komentar: Vrati toast spravu podla vysledku backup-delete. */
-  function getBackupDeleteToastMessage(summary) {
-    if (!summary) {
-      return 'Failed: unknown';
-    }
-    const recordId = summary?.backup && summary.backup.recordId ? summary.backup.recordId : null;
-    const recordHint = recordId ? ` (id=${recordId})` : '';
-    if (summary.ok && summary.didDelete) {
-      return `Backup & delete: done${recordHint}.`;
-    }
-    if (summary.ok && summary.reasonCode === 'dry_run') {
-      return `Dry run—backup only${recordHint}.`;
-    }
-    if (summary.reasonCode === 'blocked_by_list_only') {
-      return `Read-only: nothing deleted${recordHint}.`;
-    }
-    const code = typeof summary.reasonCode === 'string' && summary.reasonCode ? summary.reasonCode : 'unknown';
-    return `Failed: ${code}${recordHint}`;
-  }
-
-  /* Slovensky komentar: Normalizuje odozvu pre historicku stopu. */
-  function normalizeBackupDeleteSummary(raw) {
-    const candidate = typeof raw?.candidate === 'boolean' ? raw.candidate : null;
-    const dryRun = raw?.dryRun === true ? true : raw?.dryRun === false ? false : null;
-    const steps = {
-      menu: Boolean(raw?.ui?.steps?.menu),
-      item: Boolean(raw?.ui?.steps?.item),
-      confirm: Boolean(raw?.ui?.steps?.confirm)
-    };
-    const recordId = raw?.backup && typeof raw.backup === 'object'
-      ? raw.backup.recordId || raw.backup.id || (raw.backup.record && raw.backup.record.id) || null
-      : null;
-    const backup = raw?.backup && typeof raw.backup === 'object'
-      ? { ...raw.backup, recordId, reasonCode: raw.backup.reasonCode || null }
-      : { recordId, reasonCode: null };
-    const backupDryRun = typeof backup?.dryRun === 'boolean' ? backup.dryRun : null;
-    const effectiveDryRun = dryRun !== null ? dryRun : backupDryRun;
-    return {
-      ok: raw?.ok === true,
-      didDelete: raw?.didDelete === true,
-      reasonCode: typeof raw?.reasonCode === 'string' && raw.reasonCode ? raw.reasonCode : 'unknown',
-      candidate,
-      dryRun: effectiveDryRun,
-      backup,
-      ui: {
-        ok: raw?.ui?.ok === true,
-        reason: typeof raw?.ui?.reason === 'string' ? raw.ui.reason : undefined,
-        steps
-      },
-      timestamp: Number.isFinite(raw?.timestamp) ? raw.timestamp : Date.now()
-    };
-  }
-
   /* Slovensky komentar: Extrahuje surovu chybovu spravu pre toast. */
   function extractErrorMessage(error, fallback = 'Žiadna odozva') {
     if (!error) {
@@ -680,41 +580,6 @@
     });
   }
 
-  /* Slovensky komentar: Vyziada backup-delete spravu z backgroundu. */
-  function requestBackupDeleteActive({ confirmed = false, timeoutMs = 5000 } = {}) {
-    return new Promise((resolve, reject) => {
-      const payload = { type: 'backup_and_delete_active' };
-      if (typeof confirmed === 'boolean') {
-        payload.confirm = confirmed;
-      }
-      let settled = false;
-      const safeTimeout = Number.isFinite(timeoutMs) && timeoutMs >= 1000 ? timeoutMs : 5000;
-      const timeoutId = globalTarget.setTimeout(() => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        reject(new Error('timeout'));
-      }, safeTimeout);
-      rememberTimeout(timeoutId);
-      chrome.runtime.sendMessage(payload, (response) => {
-        if (settled) {
-          return;
-        }
-        const runtimeError = chrome.runtime.lastError;
-        if (runtimeError) {
-          settled = true;
-          globalTarget.clearTimeout(timeoutId);
-          reject(runtimeError);
-          return;
-        }
-        settled = true;
-        globalTarget.clearTimeout(timeoutId);
-        resolve(response);
-      });
-    });
-  }
-
   /* Slovensky komentar: Aktualizuje popis rezimu zalohy. */
   async function refreshBackupModeLabel() {
     if (!isMounted()) {
@@ -751,8 +616,7 @@
       'captureButton',
       'bulkOpenTabsButton',
       'backupButton',
-      'evalBackupButton',
-      'backupDeleteButton'
+      'evalBackupButton'
     ];
     candidates.forEach((key) => {
       const element = getElement(key);
@@ -761,6 +625,476 @@
         element.removeAttribute('aria-busy');
       }
     });
+  }
+
+  async function handleAutoscanClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Prebieha…';
+    try {
+      const response = await requestAutoscanStub();
+      if (response && response.ok) {
+        appendScanToast(`Auto-scan stub: ${JSON.stringify(response.result)}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'scan', 'Auto-scan feed stub executed', {
+            result: response.result
+          });
+        }
+      } else {
+        const errorMessage = extractErrorMessage(response && (response.error || response.message));
+        appendScanToast(`Auto-scan chyba: ${errorMessage}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('error', 'scan', 'Auto-scan feed stub failed', {
+            message: errorMessage
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      appendScanToast(`Auto-scan chyba: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'scan', 'Auto-scan feed stub threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+
+  async function handleTestLogClick(button) {
+    const originalText = button.textContent;
+    const note = `debug_page:${Date.now()}`;
+    button.disabled = true;
+    button.textContent = 'Odosielam…';
+    try {
+      const response = await requestTestLog(note);
+      if (!response || response.ok !== true) {
+        const errorMessage = response && response.error ? response.error : 'Žiadna odozva';
+        throw new Error(errorMessage);
+      }
+      showDebugToast('Test log odoslaný (pozri DevTools)');
+      button.textContent = 'Odoslané';
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('info', 'debug', 'Test log request forwarded', {
+          forwarded: Boolean(response.forwarded),
+          forwardError: response.forwardError || null,
+          requestedAt: response.requestedAt,
+          note
+        });
+      }
+    } catch (error) {
+      button.textContent = 'Chyba';
+      const message = extractErrorMessage(error);
+      showDebugToast(`Test log zlyhal: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Test log request failed', {
+          message,
+          note
+        });
+      }
+    } finally {
+      const timeoutId = globalTarget.setTimeout(() => {
+        if (button) {
+          button.textContent = originalText;
+          button.disabled = false;
+        }
+      }, 1400);
+      rememberTimeout(timeoutId);
+    }
+  }
+
+  async function handleConnectivityClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Overujem…';
+    try {
+      const response = await requestConnectivityTest();
+      if (response && response.ok && response.payload) {
+        appendConnectivityRecord(`OK: ${JSON.stringify(response.payload)}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Connectivity test succeeded', {
+            reasonCode: response.reasonCode,
+            traceId: response.payload.traceId
+          });
+        }
+      } else {
+        const errorMessage = extractErrorMessage(response && (response.error || response.message));
+        appendConnectivityRecord(`Chyba: ${errorMessage}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Connectivity test returned warning', {
+            reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
+            message: errorMessage
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      appendConnectivityRecord(`Chyba: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Connectivity test request threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+
+  async function handleCheckCsClick(button) {
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Overujem…';
+    try {
+      const response = await requestConnectivityTest();
+      if (response && response.ok) {
+        button.textContent = 'Content script aktívny';
+        appendConnectivityRecord(`Check CS OK: ${JSON.stringify(response.payload || {})}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Content script check succeeded', {
+            reasonCode: response.reasonCode || 'ping_ok'
+          });
+        }
+      } else {
+        const errorMessage = extractErrorMessage(response && (response.error || response.message));
+        button.textContent = 'Content script chýba';
+        appendConnectivityRecord(`Check CS chyba: ${errorMessage}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Content script check warning', {
+            reasonCode: response && response.reasonCode ? response.reasonCode : 'no_response',
+            message: errorMessage
+          });
+        }
+      }
+    } catch (error) {
+      button.textContent = 'Content script chýba';
+      const message = extractErrorMessage(error);
+      appendConnectivityRecord(`Check CS chyba: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Content script check threw error', {
+          message
+        });
+      }
+    } finally {
+      const timeoutId = globalTarget.setTimeout(() => {
+        if (button) {
+          button.textContent = originalText;
+          button.disabled = false;
+        }
+      }, 1400);
+      rememberTimeout(timeoutId);
+    }
+  }
+
+  async function handleProbeClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Prebieha…';
+    try {
+      const response = await requestMetadataProbe();
+      if (response && response.ok && response.payload) {
+        const payload = response.payload;
+        if (payload.skipped && payload.reason === 'probe_safe_url') {
+          appendProbeRecord('Preskocené: Aktívna stránka je chránená vzorom SAFE_URL.');
+        } else {
+          appendProbeRecord(`OK: ${JSON.stringify(payload)}`);
+        }
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Metadata probe completed', {
+            reasonCode: response.reasonCode,
+            traceId: payload.traceId,
+            skipped: Boolean(payload.skipped)
+          });
+        }
+      } else {
+        const errorMessage = extractErrorMessage(response && (response.error || response.message));
+        appendProbeRecord(`Chyba: ${errorMessage}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Metadata probe returned warning', {
+            reasonCode: response && response.reasonCode ? response.reasonCode : 'unknown',
+            message: errorMessage
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      appendProbeRecord(`Chyba: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Metadata probe request threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+
+  async function handleHeuristicsClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Evaluating…';
+    try {
+      const response = await requestHeuristicsEvaluation();
+      const timestamp = new Date().toLocaleTimeString();
+      if (response && response.decision) {
+        const decision = response.decision;
+        const reasons = decision.reasonCodes && decision.reasonCodes.length ? decision.reasonCodes.join(', ') : 'none';
+        const countsText = JSON.stringify(decision.snapshot && decision.snapshot.counts ? decision.snapshot.counts : {});
+        const candidateText = decision.decided ? `candidate=${decision.isCandidate}` : 'candidate=undecided';
+        const cooldown = response.cooldown || { used: false, remainingMs: 0 };
+        const cooldownText = cooldown.used
+          ? `cooldown=active (${cooldown.remainingMs}ms)`
+          : 'cooldown=inactive';
+        appendHeuristicsRecord(`[${timestamp}] ${candidateText}; reasons=[${reasons}]; counts=${countsText}; ${cooldownText}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Heuristics evaluation invoked manually', {
+            reasonCode: response.reasonCode,
+            candidate: decision.isCandidate,
+            decided: decision.decided,
+            reasonCodes: decision.reasonCodes,
+            cooldown
+          });
+        }
+      } else {
+        const reason = response && response.reasonCode ? response.reasonCode : 'unknown';
+        const errorDetail = extractErrorMessage(response && (response.error || response.message), '').trim();
+        const reasonLine = errorDetail ? `${reason} (${errorDetail})` : reason;
+        appendHeuristicsRecord(`[${timestamp}] Heuristics failed: ${reasonLine}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Heuristics evaluation returned warning', {
+            reasonCode: reason,
+            message: errorDetail || null
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      appendHeuristicsRecord(`Heuristics error: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Heuristics evaluation request threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+
+  async function handleCaptureClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Capturing…';
+    try {
+      const response = await requestCapturePreview();
+      if (response && response.ok && response.payload) {
+        const payload = response.payload;
+        if (payload.skipped) {
+          appendCaptureRecord('Preskočené: SAFE_URL vzor blokuje capture.');
+        } else {
+          const title = payload.title || '(bez názvu)';
+          const qLen = payload.questionText ? payload.questionText.length : 0;
+          const aLen = payload.answerHTML ? payload.answerHTML.length : 0;
+          appendCaptureRecord(`OK: title=${title} | qLen=${qLen} | aLen=${aLen}`);
+        }
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Capture preview invoked', {
+            reasonCode: response.reasonCode,
+            skipped: Boolean(payload.skipped)
+          });
+        }
+      } else {
+        const message = extractErrorMessage(response && (response.error || response.message));
+        appendCaptureRecord(`Chyba: ${message}`);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Capture preview returned warning', {
+            reasonCode: response && response.reasonCode ? response.reasonCode : 'capture_error',
+            message
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      appendCaptureRecord(`Chyba: ${message}`);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Capture preview request threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+
+  async function handleBulkOpenTabsClick(button) {
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Working…';
+    try {
+      const response = await requestBulkBackupOpenTabs();
+      if (response && response.ok) {
+        const summary = response.summary || {};
+        const toastMeta = summarizeBulkToast(summary);
+        const toastOptions = !toastMeta.dryRun && toastMeta.writtenCount > 0
+          ? {
+              actionLabel: 'Open list',
+              onAction: () => {
+                if (typeof globalTarget !== 'undefined' && globalTarget.location) {
+                  globalTarget.location.hash = '#searches';
+                }
+                showSearchesToast(summarizeBulkResult(summary));
+              }
+            }
+          : undefined;
+        showDebugToast(toastMeta.message, toastOptions);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          const meta = {
+            reasonCode: toastMeta.dryRun ? 'bulk_backup_dry_run' : 'bulk_backup_ok',
+            scannedTabs: toastMeta.scanned,
+            candidates: toastMeta.candidates,
+            written: toastMeta.writtenCount,
+            wouldWrite: toastMeta.dryRun ? toastMeta.wouldWriteCount : 0,
+            skipped: toastMeta.skippedCount
+          };
+          await Logger.log('info', 'debug', 'Bulk backup over open tabs finished', meta);
+        }
+      } else {
+        const message = extractErrorMessage(response && (response.error || response.message), 'Bulk backup failed.');
+        showDebugToast(message);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Bulk backup over open tabs blocked', {
+            message,
+            reasonCode: 'bulk_backup_error'
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error, 'Bulk backup error.');
+      showDebugToast(message);
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Bulk backup over open tabs threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+
+  async function handleManualBackupClick(button) {
+    const labelSpan = button.querySelector('span');
+    const originalLabel = labelSpan ? labelSpan.textContent : button.textContent;
+    button.disabled = true;
+    if (labelSpan) {
+      labelSpan.textContent = 'Working…';
+    } else {
+      button.textContent = 'Working…';
+    }
+    try {
+      const response = await requestManualBackup();
+      if (response && response.ok) {
+        appendBackupToast(response.message || 'Backup completed.');
+        appendBackupHistoryCard(response.record);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Manual backup executed', {
+            reasonCode: response.reasonCode,
+            dryRun: Boolean(response.dryRun),
+            id: response.record ? response.record.id : null
+          });
+        }
+      } else {
+        const reason = response && response.reasonCode ? response.reasonCode : 'unknown';
+        const message = extractErrorMessage(response && (response.message || response.error));
+        appendBackupToast(message || 'Manual backup failed.');
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Manual backup blocked', {
+            reasonCode: reason,
+            message: message || null
+          });
+        }
+      }
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      appendBackupToast(message || 'Manual backup error.');
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Manual backup threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      if (labelSpan) {
+        labelSpan.textContent = originalLabel;
+      } else {
+        button.textContent = originalLabel;
+      }
+      await refreshBackupModeLabel();
+    }
+  }
+
+  async function handleEvalBackupClick(button) {
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Evaluating…';
+    try {
+      const response = await requestEvalAndBackup();
+      const reasons = Array.isArray(response && response.reasonCodes)
+        ? response.reasonCodes
+        : response && typeof response.reasonCode === 'string'
+          ? [response.reasonCode]
+          : [];
+      if (response && response.ok) {
+        const toastMessage = response.message || 'Evaluate & backup: completed.';
+        showDebugToast(toastMessage);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('info', 'debug', 'Evaluate & backup completed', {
+            ok: true,
+            reasonCodes: reasons,
+            id: response.id || null,
+            dryRun: Boolean(response.dryRun)
+          });
+        }
+      } else {
+        const toastMessage = response && response.message ? response.message : 'Evaluate & backup blocked.';
+        showDebugToast(toastMessage);
+        if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+          await Logger.log('warn', 'debug', 'Evaluate & backup blocked', {
+            ok: false,
+            reasonCodes: reasons,
+            message: toastMessage
+          });
+        }
+      }
+      appendEvalBackupHistory({
+        didBackup: Boolean(response && response.didBackup),
+        dryRun: Boolean(response && response.dryRun),
+        id: response && response.id ? response.id : null,
+        reasonCodes: reasons,
+        message: response && response.message ? response.message : undefined
+      });
+    } catch (error) {
+      const message = extractErrorMessage(error);
+      showDebugToast(message);
+      appendEvalBackupHistory({
+        didBackup: false,
+        dryRun: false,
+        reasonCodes: ['error'],
+        message
+      });
+      if (typeof Logger === 'object' && typeof Logger.log === 'function') {
+        await Logger.log('error', 'debug', 'Evaluate & backup threw error', {
+          message
+        });
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
   }
 
   async function handleAutoscanClick(button) {
@@ -1362,8 +1696,7 @@
       captureButton,
       bulkOpenTabsButton,
       backupButton,
-      evalBackupButton,
-      backupDeleteButton
+      evalBackupButton
     } = state.elements;
 
     if (autoscanButton) {
@@ -1395,9 +1728,6 @@
     }
     if (evalBackupButton) {
       addListener(evalBackupButton, 'click', () => handleEvalBackupClick(evalBackupButton));
-    }
-    if (backupDeleteButton) {
-      addListener(backupDeleteButton, 'click', () => handleBackupDeleteClick(backupDeleteButton));
     }
   }
 
@@ -1435,18 +1765,10 @@
       return;
     }
     const doc = panel.ownerDocument || globalTarget.document || document;
-    const backupDeleteButton = resolveElement(panel, 'backup-delete-active-btn');
-    const backupDeleteHistory = resolveElement(panel, 'backup-delete-history');
-    if (!backupDeleteButton || !backupDeleteHistory) {
-      return;
-    }
-
     state.panel = panel;
     state.document = doc;
     state.cleanup = [];
     state.elements = {
-      backupDeleteButton,
-      backupDeleteHistory,
       testLogButton: resolveElement(panel, 'test-log-btn'),
       autoscanButton: resolveElement(panel, 'autoscan-feed-btn'),
       scanResultContainer: resolveElement(panel, 'scan-result'),

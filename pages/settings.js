@@ -12,11 +12,13 @@
     AUTO_SCAN: { sel: '#AUTO_SCAN', type: 'bool' },
     SHOW_CANDIDATE_BADGE: { sel: '#SHOW_CANDIDATE_BADGE', type: 'bool' },
     CAPTURE_ONLY_CANDIDATES: { sel: '#CAPTURE_ONLY_CANDIDATES', type: 'bool' },
-    MAX_MESSAGES: { sel: '#MAX_MESSAGES', type: 'int' },
-    USER_MESSAGES_MAX: { sel: '#USER_MESSAGES_MAX', type: 'int' },
-    SCAN_COOLDOWN_MIN: { sel: '#SCAN_COOLDOWN_MIN', type: 'int' },
-    MIN_AGE_MINUTES: { sel: '#MIN_AGE_MINUTES', type: 'int' },
-    DELETE_LIMIT: { sel: '#DELETE_LIMIT', type: 'int' },
+    verboseConsole: { sel: '#verboseConsole', type: 'bool' },
+    MAX_MESSAGES: { sel: '#MAX_MESSAGES', type: 'int', min: 1 },
+    USER_MESSAGES_MAX: { sel: '#USER_MESSAGES_MAX', type: 'int', min: 1 },
+    SCAN_COOLDOWN_MIN: { sel: '#SCAN_COOLDOWN_MIN', type: 'int', min: 1 },
+    MIN_AGE_MINUTES: { sel: '#MIN_AGE_MINUTES', type: 'int', min: 0 },
+    DELETE_LIMIT: { sel: '#DELETE_LIMIT', type: 'int', min: 1 },
+    searchHintDelayMs: { sel: '#searchHintDelayMs', type: 'int', min: 0 },
     SAFE_URL_PATTERNS: { sel: '#SAFE_URL_PATTERNS', type: 'multiline' }
   };
 
@@ -81,6 +83,8 @@
           MIN_AGE_MINUTES: 2,
           DELETE_LIMIT: 10,
           CAPTURE_ONLY_CANDIDATES: true,
+          verboseConsole: true,
+          searchHintDelayMs: 2500,
           SAFE_URL_PATTERNS: [
             '/workspaces',
             '/projects',
@@ -148,16 +152,31 @@
         ...defaults,
         ...raw
       };
-      ['LIST_ONLY', 'DRY_RUN', 'CONFIRM_BEFORE_DELETE', 'AUTO_SCAN', 'SHOW_CANDIDATE_BADGE', 'CAPTURE_ONLY_CANDIDATES'].forEach((key) => {
+      [
+        'LIST_ONLY',
+        'DRY_RUN',
+        'CONFIRM_BEFORE_DELETE',
+        'AUTO_SCAN',
+        'SHOW_CANDIDATE_BADGE',
+        'CAPTURE_ONLY_CANDIDATES',
+        'verboseConsole'
+      ].forEach((key) => {
         if (typeof raw[key] === 'boolean') {
           merged[key] = raw[key];
         } else {
           merged[key] = defaults[key];
         }
       });
-      ['MAX_MESSAGES', 'USER_MESSAGES_MAX', 'SCAN_COOLDOWN_MIN', 'MIN_AGE_MINUTES', 'DELETE_LIMIT'].forEach((key) => {
+      [
+        { key: 'MAX_MESSAGES', min: 1 },
+        { key: 'USER_MESSAGES_MAX', min: 1 },
+        { key: 'SCAN_COOLDOWN_MIN', min: 1 },
+        { key: 'MIN_AGE_MINUTES', min: 0 },
+        { key: 'DELETE_LIMIT', min: 1 },
+        { key: 'searchHintDelayMs', min: 0 }
+      ].forEach(({ key, min }) => {
         const value = Number(raw[key]);
-        merged[key] = Number.isFinite(value) && value >= 1 ? Math.floor(value) : defaults[key];
+        merged[key] = Number.isFinite(value) && value >= min ? Math.floor(value) : defaults[key];
       });
       const normalizedPatterns = normalizePatterns(raw.SAFE_URL_PATTERNS ?? merged.SAFE_URL_PATTERNS);
       merged.SAFE_URL_PATTERNS = normalizedPatterns.length ? normalizedPatterns : [...defaults.SAFE_URL_PATTERNS];
@@ -209,8 +228,10 @@
         case 'int':
           {
             const rawNumber = Number(element.value);
-            const safeNumber = Math.max(1, Number.isFinite(rawNumber) ? rawNumber : 1);
-            output[key] = Math.floor(safeNumber);
+            const minValue = Number.isFinite(def.min) ? def.min : 1;
+            const baseValue = Number.isFinite(rawNumber) ? rawNumber : minValue;
+            const floored = Math.floor(baseValue);
+            output[key] = floored >= minValue ? floored : minValue;
           }
           break;
         case 'multiline':

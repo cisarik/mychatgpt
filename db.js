@@ -1,8 +1,9 @@
 /* Slovensky komentar: Inicializacia IndexedDB uloziska pre aplikaciu. */
 const DB_NAME = 'mychatgpt-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_BACKUPS = 'backups';
 const STORE_CATEGORIES = 'categories';
+const STORE_DELETION_QUEUE = 'deletionQueue';
 
 /* Slovensky komentar: Predvolene kategorie na prvy beh. */
 const DEFAULT_CATEGORIES = [
@@ -31,6 +32,13 @@ function openDatabase() {
       }
       if (!db.objectStoreNames.contains(STORE_CATEGORIES)) {
         db.createObjectStore(STORE_CATEGORIES, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORE_DELETION_QUEUE)) {
+        const queueStore = db.createObjectStore(STORE_DELETION_QUEUE, { keyPath: 'id' });
+        queueStore.createIndex('byStatus', 'status', { unique: false });
+        queueStore.createIndex('byConvoId', 'convoId', { unique: false });
+        queueStore.createIndex('byTitleKey', 'titleKey', { unique: false });
+        queueStore.createIndex('byCreatedAt', 'createdAt', { unique: false });
       }
     };
 
@@ -132,6 +140,203 @@ const Database = {
       await Logger.log('error', 'db', 'Backup persist failed', { message: error && error.message });
       throw error;
     }
+  },
+  /* Slovensky komentar: Zaradi zaznam do fronty mazania s deduplikaciou. */
+  enqueueForDelete: async ({ title, convoId }) => {
+    const db = await Database.initDB();
+    const normalizedTitle = typeof title === 'string' ? title.trim() : '';
+    const normalizedConvoId = typeof convoId === 'string' && convoId.trim() ? convoId.trim() : null;
+    const titleKey = normalizedTitle.toLowerCase();
+    const now = Date.now();
+    const dedupeWindowMs = 10 * 60 * 1000;
+    const oldestAllowedTs = now - dedupeWindowMs;
+
+    const transaction = db.transaction([STORE_DELETION_QUEUE], 'readwrite');
+    const store = transaction.objectStore(STORE_DELETION_QUEUE);
+
+    const resolveDuplicates = async () => {
+      if (normalizedConvoId) {
+        try {
+          const index = store.index('byConvoId');
+          const existing = await requestAsPromise(index.getAll(normalizedConvoId));
+          if (Array.isArray(existing)) {
+            const duplicate = existing.find((item) => {
+              if (!item) {
+                return false;
+              }
+              if (item.status === 'queued') {
+                return true;
+              }
+              const createdAt = Number(item.createdAt);
+              return Number.isFinite(createdAt) && createdAt >= oldestAllowedTs;
+            });
+            if (duplicate) {
+              return duplicate;
+            }
+          }
+        } catch (_error) {
+          /* Slovensky komentar: Pokracuje bez convo deduplikacie pri chybe. */
+        }
+      }
+      if (!normalizedTitle) {
+        return null;
+      }
+      try {
+        const index = store.index('byTitleKey');
+        const existing = await requestAsPromise(index.getAll(titleKey));
+        if (!Array.isArray(existing) || !existing.length) {
+          return null;
+        }
+        const queuedMatch = existing.find((item) => item && item.status === 'queued');
+        if (queuedMatch) {
+          return queuedMatch;
+        }
+        return existing.find((item) => {
+          if (!item) {
+            return false;
+          }
+          const createdAt = Number(item.createdAt);
+          if (!Number.isFinite(createdAt)) {
+            return false;
+          }
+          return createdAt >= oldestAllowedTs;
+        }) || null;
+      } catch (_error) {
+        return null;
+      }
+    };
+
+    const duplicateRecord = await resolveDuplicates();
+    if (duplicateRecord) {
+      transaction.abort();
+      return { enqueued: false, record: duplicateRecord };
+    }
+
+    const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `dq-${now}`;
+    const record = {
+      id,
+      title: normalizedTitle || null,
+      titleKey: titleKey || null,
+      convoId: normalizedConvoId,
+      createdAt: now,
+      status: 'queued',
+      deletedAt: null
+    };
+    store.put(record);
+
+    await new Promise((resolve, reject) => {
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+
+    return { enqueued: true, record };
+  },
+  /* Slovensky komentar: Zrata pocet zaznamov vo fronte v stave queued. */
+  countQueued: async () => {
+    const db = await Database.initDB();
+    const transaction = db.transaction([STORE_DELETION_QUEUE], 'readonly');
+    const store = transaction.objectStore(STORE_DELETION_QUEUE);
+    let count = 0;
+    try {
+      const index = store.index('byStatus');
+      const cursorRequest = index.openCursor('queued');
+      await new Promise((resolve, reject) => {
+        cursorRequest.onsuccess = (event) => {
+          const cursor = event.target.result;
+          if (cursor) {
+            count += 1;
+            cursor.continue();
+          } else {
+            resolve();
+          }
+        };
+        cursorRequest.onerror = () => reject(cursorRequest.error);
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+        transaction.oncomplete = () => resolve();
+      });
+    } catch (_error) {
+      count = 0;
+    }
+    return count;
+  },
+  /* Slovensky komentar: Vypise polozky vo fronte podla casu vytvorenia. */
+  listQueued: async (limit = 50) => {
+    const db = await Database.initDB();
+    const transaction = db.transaction([STORE_DELETION_QUEUE], 'readonly');
+    const store = transaction.objectStore(STORE_DELETION_QUEUE);
+    const results = [];
+    try {
+      const index = store.index('byCreatedAt');
+      const cursorRequest = index.openCursor(null, 'prev');
+      await new Promise((resolve, reject) => {
+        cursorRequest.onsuccess = (event) => {
+          const cursor = event.target.result;
+          if (cursor && results.length < limit) {
+            if (cursor.value && cursor.value.status === 'queued') {
+              results.push(cursor.value);
+            }
+            cursor.continue();
+          } else {
+            resolve();
+          }
+        };
+        cursorRequest.onerror = () => reject(cursorRequest.error);
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+        transaction.oncomplete = () => resolve();
+      });
+    } catch (_error) {
+      return results;
+    }
+    return results;
+  },
+  /* Slovensky komentar: Označí polozku ako zlyhanu s kodom. */
+  markFailed: async (id, reasonCode) => {
+    if (!id) {
+      return false;
+    }
+    const db = await Database.initDB();
+    const transaction = db.transaction([STORE_DELETION_QUEUE], 'readwrite');
+    const store = transaction.objectStore(STORE_DELETION_QUEUE);
+    const existing = await requestAsPromise(store.get(id));
+    if (!existing) {
+      transaction.abort();
+      return false;
+    }
+    existing.status = `failed:${reasonCode || 'unknown'}`;
+    existing.deletedAt = null;
+    store.put(existing);
+    await new Promise((resolve, reject) => {
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    return true;
+  },
+  /* Slovensky komentar: Označí polozku ako odstranenu. */
+  markDeleted: async (id) => {
+    if (!id) {
+      return false;
+    }
+    const db = await Database.initDB();
+    const transaction = db.transaction([STORE_DELETION_QUEUE], 'readwrite');
+    const store = transaction.objectStore(STORE_DELETION_QUEUE);
+    const existing = await requestAsPromise(store.get(id));
+    if (!existing) {
+      transaction.abort();
+      return false;
+    }
+    existing.status = 'deleted';
+    existing.deletedAt = Date.now();
+    store.put(existing);
+    await new Promise((resolve, reject) => {
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    return true;
   },
   /* Slovensky komentar: Alias pre insert zalohy, aby background nemusel riesit sanitizaciu. */
   insertBackup: async (record) => {

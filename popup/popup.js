@@ -7,6 +7,8 @@
   let activeTabName = null;
   const globalTarget = typeof window !== 'undefined' ? window : self;
   const toastHost = document.getElementById('popup-toast-stack');
+  const queueCountElement = document.getElementById('queue-count');
+  const deleteQueuedButton = document.getElementById('delete-queued-btn');
 
   /* Slovensky komentar: Mini toast API pre jednotny vizualny feedback. */
   function spawnMiniToast(type, message, options = {}) {
@@ -69,6 +71,46 @@
 
   if (globalTarget && typeof globalTarget === 'object') {
     globalTarget.MiniToast = MiniToast;
+  }
+
+  /* Slovensky komentar: Promise wrapper pre runtime spravy. */
+  function sendRuntimeMessage(payload) {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage(payload, (response) => {
+          const lastError = chrome.runtime && chrome.runtime.lastError ? chrome.runtime.lastError : null;
+          if (lastError) {
+            reject(new Error(lastError.message || 'sendMessage failed'));
+            return;
+          }
+          resolve(response);
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  if (deleteQueuedButton) {
+    deleteQueuedButton.disabled = true;
+    deleteQueuedButton.title = 'Available after Phase 2';
+  }
+
+  async function refreshQueueCount() {
+    if (!queueCountElement) {
+      return;
+    }
+    try {
+      const response = await sendRuntimeMessage({ type: 'deletion_queue_count' });
+      if (response && response.ok) {
+        queueCountElement.textContent = `Queued: ${response.count}`;
+      } else {
+        queueCountElement.textContent = 'Queued: –';
+      }
+    } catch (error) {
+      console.warn('Failed to fetch deletion queue count', error);
+      queueCountElement.textContent = 'Queued: –';
+    }
   }
 
   function getDebugAPI() {
@@ -215,6 +257,8 @@
   if (tabButtons.length) {
     syncFromHash({ focus: false, ensureHash: true });
   }
+
+  refreshQueueCount();
 
   document.addEventListener('mychatgpt:debug-panel-ready', () => {
     if (activeTabName === 'debug') {
@@ -410,8 +454,19 @@
   }
 
   chrome.runtime.onMessage.addListener((message) => {
-    if (message && message.type === 'runner_update') {
+    if (!message || typeof message !== 'object') {
+      return;
+    }
+    if (message.type === 'runner_update') {
       handleRunnerUpdate(message.payload || message);
+      return;
+    }
+    if (message.type === 'deletion_queue_updated') {
+      if (queueCountElement && typeof message.count === 'number') {
+        queueCountElement.textContent = `Queued: ${message.count}`;
+      } else {
+        refreshQueueCount();
+      }
     }
   });
 })();

@@ -26,7 +26,9 @@ const SETTINGS_DEFAULTS = Object.freeze({
   MIN_AGE_MINUTES: 2,
   DELETE_LIMIT: 10,
   CAPTURE_ONLY_CANDIDATES: true,
-  SAFE_URL_PATTERNS: SAFE_URL_DEFAULTS
+  SAFE_URL_PATTERNS: SAFE_URL_DEFAULTS,
+  searchHintDelayMs: 2500,
+  verboseConsole: true
 });
 
 /* Slovensky komentar: Ziska referenciu na globalny objekt pre rozne prostredia. */
@@ -38,10 +40,13 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, Nu
 /* Slovensky komentar: Ziska hodnotu VERBOSE flagu zo storage. */
 async function getVerboseConsoleFlag() {
   try {
-    const { VERBOSE_CONSOLE } = await chrome.storage.local.get({ VERBOSE_CONSOLE: false });
+    const { VERBOSE_CONSOLE } = await chrome.storage.local.get({ VERBOSE_CONSOLE: true });
+    if (VERBOSE_CONSOLE === undefined || VERBOSE_CONSOLE === null) {
+      return true;
+    }
     return Boolean(VERBOSE_CONSOLE);
   } catch (_error) {
-    return false;
+    return true;
   }
 }
 
@@ -168,7 +173,8 @@ function sanitizeSettings(rawSettings) {
     'CONFIRM_BEFORE_DELETE',
     'AUTO_SCAN',
     'CAPTURE_ONLY_CANDIDATES',
-    'SHOW_CANDIDATE_BADGE'
+    'SHOW_CANDIDATE_BADGE',
+    'verboseConsole'
   ];
   boolFields.forEach((key) => {
     if (typeof rawSettings[key] === 'boolean') {
@@ -183,7 +189,8 @@ function sanitizeSettings(rawSettings) {
     { key: 'USER_MESSAGES_MAX', min: 1 },
     { key: 'SCAN_COOLDOWN_MIN', min: 1 },
     { key: 'MIN_AGE_MINUTES', min: 0 },
-    { key: 'DELETE_LIMIT', min: 1 }
+    { key: 'DELETE_LIMIT', min: 1 },
+    { key: 'searchHintDelayMs', min: 0 }
   ];
   intFields.forEach(({ key, min }) => {
     const value = rawSettings[key];
@@ -297,7 +304,7 @@ function normalizeNodeText(node) {
 
 /* Slovensky komentar: Nacita nastavenia a vykona automaticke opravy. */
 async function loadSettings() {
-  const stored = await chrome.storage.local.get({ [SETTINGS_STORAGE_KEY]: null });
+  const stored = await chrome.storage.local.get({ [SETTINGS_STORAGE_KEY]: null, VERBOSE_CONSOLE: null });
   const raw = stored[SETTINGS_STORAGE_KEY];
   const { settings, healedFields } = sanitizeSettings(raw);
   const normalizedPatterns = normalizeSafeUrlPatterns(settings.SAFE_URL_PATTERNS);
@@ -310,8 +317,15 @@ async function loadSettings() {
   if (normalizedChanged && !healedFields.includes('SAFE_URL_PATTERNS')) {
     healedFields.push('SAFE_URL_PATTERNS');
   }
-  if (shouldPersist) {
-    await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: nextSettings });
+  const verboseTarget = Boolean(nextSettings.verboseConsole);
+  const needsVerboseUpdate = typeof stored.VERBOSE_CONSOLE !== 'boolean'
+    || stored.VERBOSE_CONSOLE !== verboseTarget;
+  if (shouldPersist || needsVerboseUpdate) {
+    const payload = { VERBOSE_CONSOLE: verboseTarget };
+    if (shouldPersist) {
+      payload[SETTINGS_STORAGE_KEY] = nextSettings;
+    }
+    await chrome.storage.local.set(payload);
   }
   return { settings: nextSettings, healedFields, meta: { normalizedSafePatterns: normalizedChanged } };
 }
@@ -319,7 +333,10 @@ async function loadSettings() {
 /* Slovensky komentar: Ulozi nastavenia po sanitizacii a vrati pripadne opravy. */
 async function persistSettings(nextSettings) {
   const { settings, healedFields } = sanitizeSettings(nextSettings);
-  await chrome.storage.local.set({ [SETTINGS_STORAGE_KEY]: settings });
+  await chrome.storage.local.set({
+    [SETTINGS_STORAGE_KEY]: settings,
+    VERBOSE_CONSOLE: Boolean(settings.verboseConsole)
+  });
   return { settings, healedFields };
 }
 

@@ -62,6 +62,22 @@
           <div id="searches-toast" class="toast-stack" role="status" aria-live="polite"></div>
         </header>
 
+        <div class="panel stack queue-panel" aria-live="polite">
+          <div class="panel-heading">
+            <h3>Deletion queue</h3>
+          </div>
+          <p id="queue-count" class="stat-value">Queued: …</p>
+          <button
+            id="delete-queued-btn"
+            class="button-sub"
+            type="button"
+            disabled
+            title="Available after Phase 2"
+          >
+            Delete queued (UI automation)
+          </button>
+        </div>
+
         <div id="bulk-summary" class="panel stack" aria-live="polite">
           <div class="panel-heading">
             <h3>Last bulk backup</h3>
@@ -163,6 +179,13 @@
                 <span class="heal-hint" data-field="CAPTURE_ONLY_CANDIDATES" hidden>(opravené)</span>
               </span>
             </label>
+            <label class="setting-row">
+              <span class="label-text">Verbózne konzolové logy</span>
+              <span class="setting-control">
+                <input type="checkbox" id="verboseConsole" name="verboseConsole" />
+                <span class="heal-hint" data-field="verboseConsole" hidden>(opravené)</span>
+              </span>
+            </label>
           </section>
 
           <section class="panel settings-card">
@@ -200,6 +223,13 @@
               <span class="setting-control">
                 <input type="number" id="DELETE_LIMIT" name="DELETE_LIMIT" min="1" />
                 <span class="heal-hint" data-field="DELETE_LIMIT" hidden>(opravené)</span>
+              </span>
+            </label>
+            <label class="setting-row">
+              <span class="label-text">Delay hints=search (ms)</span>
+              <span class="setting-control">
+                <input type="number" id="searchHintDelayMs" name="searchHintDelayMs" min="0" step="100" />
+                <span class="heal-hint" data-field="searchHintDelayMs" hidden>(opravené)</span>
               </span>
             </label>
           </section>
@@ -276,23 +306,6 @@
             <h3>Evaluate heuristics</h3>
             <button id="heuristics-btn">Evaluate heuristics (active tab)</button>
             <div id="heuristics-results" class="toast-stack" role="status" aria-live="polite"></div>
-          </section>
-
-          <section class="debug-section">
-            <div class="section-heading">
-              <h3>Backup &amp; Delete</h3>
-              <span class="badge">Active tab</span>
-            </div>
-            <p class="section-note">Zálohuje aktuálny chat a následne sa pokúsi o jeho zmazanie.</p>
-            <button
-              id="backup-delete-active-btn"
-              class="button-sub"
-              type="button"
-              aria-label="Backup and delete the active chat"
-            >
-              Backup &amp; Delete (active tab)
-            </button>
-            <div id="backup-delete-history" class="history-feed" aria-live="polite"></div>
           </section>
 
           <section class="debug-section">

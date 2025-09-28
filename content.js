@@ -5,13 +5,17 @@ if (!csGlobal.__mychatgptContentLogged) {
   csGlobal.__mychatgptContentLogged = true;
 }
 
-let __VERBOSE = false;
+let __VERBOSE = true;
 (async () => {
   try {
-    const { VERBOSE_CONSOLE } = await chrome.storage.local.get({ VERBOSE_CONSOLE: false });
-    __VERBOSE = Boolean(VERBOSE_CONSOLE);
+    const { VERBOSE_CONSOLE } = await chrome.storage.local.get({ VERBOSE_CONSOLE: true });
+    if (VERBOSE_CONSOLE === undefined || VERBOSE_CONSOLE === null) {
+      __VERBOSE = true;
+    } else {
+      __VERBOSE = Boolean(VERBOSE_CONSOLE);
+    }
   } catch (_error) {
-    // Slovensky komentar: Tiche zlyhanie zachova povodny stav.
+    __VERBOSE = true;
   }
 })();
 
@@ -231,6 +235,24 @@ function captureLatestConversationPair() {
     userNode,
     assistantNode
   };
+}
+
+/* Slovensky komentar: Posle runtime spravu ako Promise. */
+function sendRuntimeMessage(payload) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.runtime.sendMessage(payload, (response) => {
+        const lastError = chrome.runtime && chrome.runtime.lastError ? chrome.runtime.lastError : null;
+        if (lastError) {
+          reject(new Error(lastError.message || 'sendMessage failed'));
+          return;
+        }
+        resolve(response);
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
 }
 
 /* Slovensky komentar: Normalizuje nazvy konverzacie pre porovnavanie. */
@@ -2509,218 +2531,93 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return undefined;
   }
 
-  if (message.type === 'ui_delete_by_title') {
-    (async () => {
-      const rawTitle = typeof message.title === 'string' ? message.title : '';
-      const altInputs = Array.isArray(message.alternatives) ? message.alternatives : [];
-      const steps = { sidebar: false, select: false, menu: false, item: false, confirm: false };
-      const startedAt = Date.now();
-      const normalizedTargets = [];
-      const seen = new Set();
-      const targetMeta = new Map();
-      const sanitizedAlternatives = altInputs
-        .filter((value) => typeof value === 'string' && value.trim())
-        .map((value) => value.trim());
-      const orchestratorCtx = {
-        title: rawTitle || null,
-        alternatives: sanitizedAlternatives,
-        matchSource: null,
-        steps: { ...steps },
-        selectorsTried: { menu: [], delete: [], confirm: [] },
-        timings: {},
-        menuSnapshot: null,
-        dialogSnapshot: null,
-        confirmVia: null,
-        reason: null
-      };
-      const respond = (payload) => {
-        const baseSteps = payload && payload.steps ? payload.steps : steps;
-        const normalizedSteps = {
-          sidebar: Boolean(baseSteps.sidebar),
-          select: Boolean(baseSteps.select),
-          menu: Boolean(baseSteps.menu),
-          item: Boolean(baseSteps.item),
-          confirm: Boolean(baseSteps.confirm)
-        };
-        orchestratorCtx.steps = { ...normalizedSteps };
-        const inferredReason = payload && typeof payload.reason === 'string'
-          ? payload.reason
-          : payload && payload.ok
-          ? 'ok'
-          : orchestratorCtx.reason || null;
-        if (inferredReason) {
-          orchestratorCtx.reason = inferredReason === 'ui_delete_ok' ? 'ok' : inferredReason;
-        }
-        const resolvedMatchSource = payload && Object.prototype.hasOwnProperty.call(payload, 'matchSource')
-          ? payload.matchSource
-          : matchSource || orchestratorCtx.matchSource || null;
-        orchestratorCtx.matchSource = resolvedMatchSource;
-        if (!Number.isFinite(orchestratorCtx.timings.totalUiMs)) {
-          orchestratorCtx.timings.totalUiMs = Date.now() - startedAt;
-        }
-        const report = logOrchestratorReport(orchestratorCtx);
-        const response = {
-          ok: false,
-          steps: normalizedSteps,
-          ts: Date.now(),
-          ...payload
-        };
-        response.matchSource = resolvedMatchSource;
-        response.debug = report;
-        if (typeof response.elapsedMs !== 'number') {
-          response.elapsedMs = Date.now() - startedAt;
-        }
-        if (typeof response.ok !== 'boolean') {
-          response.ok = Boolean(payload && payload.ok);
-        }
-        return sendResponse(response);
-      };
-      const registerTarget = (value, source) => {
-        const normalized = normalizeTitleValue(value);
-        if (normalized && !seen.has(normalized)) {
-          seen.add(normalized);
-          normalizedTargets.push(normalized);
-          targetMeta.set(normalized, source || 'title');
-        }
-      };
-      registerTarget(rawTitle, 'title');
-      altInputs.forEach((value) => registerTarget(value, 'alternative'));
 
-      let matchSource = null;
 
-      if (!normalizedTargets.length) {
-        orchestratorCtx.reason = 'missing_title';
-        respond({ ok: false, reason: 'missing_title', matchSource: null });
-        return;
-      }
 
-      try {
-        const currentTitle = normalizeTitleValue(getDocumentConversationTitle());
-        const alreadyActive = currentTitle
-          && normalizedTargets.some((target) => titlesMatchNormalized(currentTitle, target));
-
-        if (!alreadyActive) {
-          const ensureResult = await ensureSidebarVisible();
-          if (!ensureResult.ok) {
-            const reason = ensureResult.reason || 'sidebar_open_failed';
-            if (ensureResult.reason === 'already_visible') {
-              steps.sidebar = true;
-            }
-            orchestratorCtx.reason = reason;
-            respond({ ok: false, reason, steps });
-            return;
-          }
-          steps.sidebar = true;
-          const { node: conversationNode, matchSource: nodeMatchSource } = findConversationNodeByTitles(normalizedTargets, targetMeta);
-          if (nodeMatchSource) {
-            matchSource = nodeMatchSource;
-            orchestratorCtx.matchSource = nodeMatchSource;
-          }
-          if (!conversationNode) {
-            orchestratorCtx.reason = 'convo_not_found';
-            respond({ ok: false, reason: 'convo_not_found', steps });
-            return;
-          }
-          const selectResult = await clickAndWait(() => conversationNode, { timeoutMs: 2000 });
-          if (!selectResult.ok) {
-            orchestratorCtx.reason = 'ui_click_failed';
-            respond({ ok: false, reason: 'ui_click_failed', steps });
-            return;
-          }
-          steps.select = true;
-          const loaded = await waitForDocumentTitleMatch(normalizedTargets, 3600);
-          if (!loaded) {
-            orchestratorCtx.reason = 'select_load_timeout';
-            respond({ ok: false, reason: 'select_load_timeout', steps });
-            return;
-          }
-          const postLoadMatch = resolveMatchSource(getDocumentConversationTitle(), normalizedTargets, targetMeta);
-          if (postLoadMatch) {
-            matchSource = postLoadMatch;
-            orchestratorCtx.matchSource = postLoadMatch;
-          }
-        } else {
-          steps.select = true;
-          if (isSidebarVisible()) {
-            steps.sidebar = true;
-          }
-          const activeSource = resolveMatchSource(currentTitle, normalizedTargets, targetMeta);
-          if (activeSource) {
-            matchSource = activeSource;
-            orchestratorCtx.matchSource = activeSource;
-          }
-        }
-
-        const result = await executeMenuDeletionSteps(steps, orchestratorCtx);
-        respond({
-          ok: result.ok,
-          reason: result.reason,
-          steps: result.steps,
-          matchSource: matchSource || null,
-          elapsedMs: typeof result.elapsedMs === 'number' ? result.elapsedMs : undefined
-        });
-      } catch (error) {
-        const messageText = error && error.message ? error.message : String(error);
-        orchestratorCtx.reason = 'ui_click_failed';
-        respond({ ok: false, reason: 'ui_click_failed', steps, error: messageText });
-      }
-    })();
-    return true;
-  }
-
-  if (message.type === 'ui_delete_active') {
-    (async () => {
-      const steps = {
-        sidebar: isSidebarVisible(),
-        select: true,
-        menu: false,
-        item: false,
-        confirm: false
-      };
-      const startedAt = Date.now();
-      const activeTitle = getDocumentConversationTitle() || document.title || '';
-      const orchestratorCtx = {
-        title: activeTitle || null,
-        alternatives: [],
-        matchSource: 'active_conversation',
-        steps: { ...steps },
-        selectorsTried: { menu: [], delete: [], confirm: [] },
-        timings: {},
-        menuSnapshot: null,
-        dialogSnapshot: null,
-        confirmVia: null,
-        reason: null
-      };
-      try {
-        const result = await executeMenuDeletionSteps(steps, orchestratorCtx);
-        orchestratorCtx.reason = result.ok ? 'ok' : result.reason || orchestratorCtx.reason;
-        const report = logOrchestratorReport(orchestratorCtx);
-        sendResponse({
-          ok: result.ok,
-          reason: result.reason,
-          steps: result.steps,
-          debug: report,
-          ts: Date.now(),
-          elapsedMs: typeof result.elapsedMs === 'number' ? result.elapsedMs : Date.now() - startedAt
-        });
-      } catch (error) {
-        const messageText = error && error.message ? error.message : String(error);
-        orchestratorCtx.reason = 'ui_click_failed';
-        orchestratorCtx.timings.totalUiMs = Date.now() - startedAt;
-        const report = logOrchestratorReport(orchestratorCtx);
-        sendResponse({
-          ok: false,
-          reason: 'ui_click_failed',
-          steps,
-          error: messageText,
-          debug: report,
-          ts: Date.now(),
-          elapsedMs: Date.now() - startedAt
-        });
-      }
-    })();
-    return true;
-  }
 
   return undefined;
 });
+
+/* Slovensky komentar: Stav pre spracovanie hints=search. */
+const searchHintState = {
+  scheduled: false,
+  executed: false
+};
+
+/* Slovensky komentar: Zisti, ci URL obsahuje hints=search. */
+function hasSearchHintInLocation() {
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    const values = params.getAll('hints');
+    if (!values.length) {
+      return false;
+    }
+    return values.some((value) => {
+      if (typeof value !== 'string') {
+        return false;
+      }
+      return value
+        .split(',')
+        .map((item) => item.trim().toLowerCase())
+        .includes('search');
+    });
+  } catch (_error) {
+    return false;
+  }
+}
+
+/* Slovensky komentar: Spusti workflow po zistenom hint-e. */
+async function runSearchHintWorkflow() {
+  if (searchHintState.executed) {
+    return;
+  }
+  searchHintState.executed = true;
+  const traceId = `hints-search:${Date.now()}`;
+  const snapshot = captureLatestConversationPair();
+  const convoId = extractConvoId(window.location.href);
+  const title = getDocumentConversationTitle();
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'phase1_enqueue_delete',
+      traceId,
+      snapshot: {
+        title,
+        tabTitle: document.title || '',
+        questionText: snapshot.questionText || null,
+        answerHTML: snapshot.answerHTML || null,
+        convoId
+      }
+    });
+    if (response && response.ok) {
+      return;
+    }
+    console.warn('[queue] enqueue_response_error', response);
+  } catch (error) {
+    console.error('phase1 enqueue message failed', error);
+  }
+}
+
+/* Slovensky komentar: Naplanuje workflow po nacitani nastaveni. */
+function scheduleSearchHintWorkflow() {
+  if (searchHintState.scheduled || !hasSearchHintInLocation()) {
+    return;
+  }
+  searchHintState.scheduled = true;
+  const defaultDelay = 2500;
+  chrome.storage.local.get({ settings_v1: null }, (stored) => {
+    const settings = stored && typeof stored.settings_v1 === 'object' ? stored.settings_v1 : {};
+    const rawDelay = Number(settings.searchHintDelayMs);
+    const resolvedDelay = Number.isFinite(rawDelay) ? rawDelay : defaultDelay;
+    const delayMs = Math.max(0, resolvedDelay);
+    console.info(`[detect] hints_search: true url=${window.location.href} delayMs=${delayMs}`);
+    setTimeout(() => {
+      runSearchHintWorkflow();
+    }, delayMs);
+  });
+}
+
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+  scheduleSearchHintWorkflow();
+} else {
+  window.addEventListener('DOMContentLoaded', scheduleSearchHintWorkflow, { once: true });
+}

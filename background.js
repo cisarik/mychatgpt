@@ -6,26 +6,6 @@ const COOLDOWN_KEY = typeof COOLDOWN_STORAGE_KEY !== 'undefined' ? COOLDOWN_STOR
 /* Slovensky komentar: Limit na velkost HTML odpovede pre zalohu. */
 const MAX_ANSWER_BYTES = 250 * 1024;
 
-/* Slovensky komentar: Lokalny prepínac pre verbose logovanie v runneri. */
-let RUNNER_VERBOSE_CONSOLE = false;
-try {
-  chrome.storage.local.get({ VERBOSE_CONSOLE: false }, (stored) => {
-    RUNNER_VERBOSE_CONSOLE = Boolean(stored && stored.VERBOSE_CONSOLE);
-  });
-} catch (_error) {
-  RUNNER_VERBOSE_CONSOLE = false;
-}
-if (chrome && chrome.storage && chrome.storage.onChanged) {
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes && changes.VERBOSE_CONSOLE) {
-      RUNNER_VERBOSE_CONSOLE = Boolean(changes.VERBOSE_CONSOLE.newValue);
-    }
-  });
-}
-
-/* Slovensky komentar: Strucny prehlad kodov pre runner log. */
-const RUNNER_REASON_CODES_HINT = 'ok|sidebar_open_failed|convo_not_found|select_load_timeout|menu_not_found|delete_item_not_found|confirm_dialog_not_found|ui_click_failed';
-
 /* Slovensky komentar: Vrati hlboku kopiu predvolenych nastaveni. */
 function createDefaultSettingsSnapshot() {
   const base = typeof SETTINGS_DEFAULTS === 'object' && SETTINGS_DEFAULTS
@@ -42,6 +22,8 @@ function createDefaultSettingsSnapshot() {
         MIN_AGE_MINUTES: 2,
         DELETE_LIMIT: 10,
         CAPTURE_ONLY_CANDIDATES: true,
+        verboseConsole: true,
+        searchHintDelayMs: 2500,
         SAFE_URL_PATTERNS: [
           '/workspaces',
           '/projects',
@@ -95,16 +77,31 @@ async function getSettingsFresh() {
       ...defaults,
       ...raw
     };
-    ['LIST_ONLY', 'DRY_RUN', 'CONFIRM_BEFORE_DELETE', 'AUTO_SCAN', 'SHOW_CANDIDATE_BADGE', 'CAPTURE_ONLY_CANDIDATES'].forEach((key) => {
+    [
+      'LIST_ONLY',
+      'DRY_RUN',
+      'CONFIRM_BEFORE_DELETE',
+      'AUTO_SCAN',
+      'SHOW_CANDIDATE_BADGE',
+      'CAPTURE_ONLY_CANDIDATES',
+      'verboseConsole'
+    ].forEach((key) => {
       if (typeof raw[key] === 'boolean') {
         merged[key] = raw[key];
       } else {
         merged[key] = defaults[key];
       }
     });
-    ['MAX_MESSAGES', 'USER_MESSAGES_MAX', 'SCAN_COOLDOWN_MIN', 'MIN_AGE_MINUTES', 'DELETE_LIMIT'].forEach((key) => {
+    [
+      { key: 'MAX_MESSAGES', min: 1 },
+      { key: 'USER_MESSAGES_MAX', min: 1 },
+      { key: 'SCAN_COOLDOWN_MIN', min: 1 },
+      { key: 'MIN_AGE_MINUTES', min: 0 },
+      { key: 'DELETE_LIMIT', min: 1 },
+      { key: 'searchHintDelayMs', min: 0 }
+    ].forEach(({ key, min }) => {
       const value = Number(raw[key]);
-      merged[key] = Number.isFinite(value) && value >= 1 ? Math.floor(value) : defaults[key];
+      merged[key] = Number.isFinite(value) && value >= min ? Math.floor(value) : defaults[key];
     });
     const normalizedPatterns = typeof normalizeSafeUrlPatterns === 'function'
       ? normalizeSafeUrlPatterns(raw.SAFE_URL_PATTERNS ?? merged.SAFE_URL_PATTERNS)
@@ -342,6 +339,143 @@ function truncateAnswerHtml(htmlValue) {
   return { value: bestSlice, truncated: true, bytes: finalBytes };
 }
 
+/* Slovensky komentar: Ulozi pripraveny snapshot do IndexedDB s deduplikaciou. */
+async function persistSnapshotRecord(snapshot, settings, traceId, {
+  tabTitle = '',
+  fallbackConvoId = null,
+  runWithTimer = null,
+  timings = null
+} = {}) {
+  const dryRun = Boolean(settings && settings.DRY_RUN);
+  const timer = typeof runWithTimer === 'function'
+    ? runWithTimer
+    : async (_label, fn) => {
+        const started = Date.now();
+        if (typeof fn !== 'function') {
+          return { ok: false, value: null, elapsedMs: 0, error: new Error('Timer callback missing') };
+        }
+        try {
+          const value = await fn();
+          return { ok: true, value, elapsedMs: Date.now() - started };
+        } catch (error) {
+          return { ok: false, value: null, elapsedMs: Date.now() - started, error };
+        }
+      };
+  const timingBucket = timings || { captureMs: 0, dbMs: 0 };
+  const titleCandidate = snapshot && typeof snapshot.title === 'string' ? snapshot.title.trim() : '';
+  const questionText = snapshot && typeof snapshot.questionText === 'string'
+    ? snapshot.questionText.trim()
+    : '';
+  const answerHtmlRaw = snapshot && typeof snapshot.answerHTML === 'string' ? snapshot.answerHTML : '';
+  const resolvedConvoId = (snapshot && snapshot.convoId) || fallbackConvoId || null;
+  const now = Date.now();
+  const truncateResult = truncateAnswerHtml(answerHtmlRaw || '');
+  const backupRecord = {
+    id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `backup-${now}`,
+    title: titleCandidate || (questionText ? questionText.slice(0, 80) : tabTitle || null) || null,
+    questionText: questionText || null,
+    answerHTML: truncateResult.value || null,
+    timestamp: now,
+    category: null,
+    convoId: resolvedConvoId,
+    answerTruncated: truncateResult.truncated
+  };
+
+  try {
+    const activeCategoryId = await resolveActiveCategoryId();
+    if (activeCategoryId) {
+      backupRecord.category = activeCategoryId;
+    }
+  } catch (_categoryError) {
+    backupRecord.category = backupRecord.category || null;
+  }
+
+  const logMeta = {
+    convoId: backupRecord.convoId,
+    qLen: questionText ? questionText.length : 0,
+    aLen: truncateResult.value ? truncateResult.value.length : 0,
+    truncated: truncateResult.truncated,
+    id: backupRecord.id,
+    bytes: truncateResult.bytes,
+    category: backupRecord.category || null
+  };
+
+  if (!dryRun && backupRecord.convoId) {
+    const lookupAttempt = await timer(
+      `db:getBackupByConvoId:${traceId}`,
+      () => Database.getBackupByConvoId(backupRecord.convoId)
+    );
+    if (Number.isFinite(lookupAttempt.elapsedMs)) {
+      timingBucket.dbMs = (timingBucket.dbMs || 0) + lookupAttempt.elapsedMs;
+    }
+    if (!lookupAttempt.ok) {
+      const lookupError = lookupAttempt.error;
+      const message = lookupError && lookupError.message ? lookupError.message : String(lookupError);
+      return {
+        ok: false,
+        reasonCode: 'backup_lookup_error',
+        message: 'Failed to verify existing backup.',
+        record: null,
+        dryRun,
+        logMeta: { ...logMeta, error: message },
+        timings: { captureMs: timingBucket.captureMs || 0, dbMs: timingBucket.dbMs || 0 }
+      };
+    }
+    const existingRecord = lookupAttempt.value;
+    if (existingRecord) {
+      return {
+        ok: false,
+        reasonCode: 'backup_duplicate',
+        message: 'Conversation already backed up.',
+        record: existingRecord,
+        dryRun,
+        logMeta: { ...logMeta, duplicateId: existingRecord.id || null },
+        timings: { captureMs: timingBucket.captureMs || 0, dbMs: timingBucket.dbMs || 0 }
+      };
+    }
+  }
+
+  if (dryRun) {
+    return {
+      ok: true,
+      reasonCode: 'backup_dry_run',
+      message: 'Dry run: not persisted.',
+      record: backupRecord,
+      dryRun,
+      logMeta,
+      timings: { captureMs: timingBucket.captureMs || 0, dbMs: timingBucket.dbMs || 0 }
+    };
+  }
+
+  const insertAttempt = await timer('db:insertBackup', () => Database.insertBackup(backupRecord));
+  if (Number.isFinite(insertAttempt.elapsedMs)) {
+    timingBucket.dbMs = (timingBucket.dbMs || 0) + insertAttempt.elapsedMs;
+  }
+  if (!insertAttempt.ok) {
+    const insertError = insertAttempt.error;
+    const message = insertError && insertError.message ? insertError.message : String(insertError);
+    return {
+      ok: false,
+      reasonCode: 'backup_write_error',
+      message: 'Failed to persist backup.',
+      record: null,
+      dryRun,
+      logMeta: { ...logMeta, error: message },
+      timings: { captureMs: timingBucket.captureMs || 0, dbMs: timingBucket.dbMs || 0 }
+    };
+  }
+
+  return {
+    ok: true,
+    reasonCode: 'backup_ok',
+    message: 'Backup stored.',
+    record: backupRecord,
+    dryRun,
+    logMeta,
+    timings: { captureMs: timingBucket.captureMs || 0, dbMs: timingBucket.dbMs || 0 }
+  };
+}
+
 /* Slovensky komentar: Zachyti obsah aktivnej karty a pripadne ulozi zaznam. */
 async function captureAndPersistBackup(activeTab, settings, traceId, { fallbackConvoId = null } = {}) {
   const dryRun = Boolean(settings && settings.DRY_RUN);
@@ -422,58 +556,20 @@ async function captureAndPersistBackup(activeTab, settings, traceId, { fallbackC
     };
   }
 
-  const now = Date.now();
-  const questionText = capturePayload.questionText && typeof capturePayload.questionText === 'string'
-    ? capturePayload.questionText.trim()
-    : null;
-  const answerHtmlRaw = capturePayload.answerHTML && typeof capturePayload.answerHTML === 'string'
-    ? capturePayload.answerHTML
-    : null;
-  const titleCandidate = capturePayload.title && typeof capturePayload.title === 'string'
-    ? capturePayload.title.trim()
-    : '';
-  const resolvedConvoId = capturePayload.convoId || fallbackConvoId || null;
-  const truncateResult = truncateAnswerHtml(answerHtmlRaw || '');
-  const backupRecord = {
-    id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `backup-${now}`,
-    title: titleCandidate || (questionText ? questionText.slice(0, 80) : tabTitle || null) || null,
-    questionText: questionText || null,
-    answerHTML: truncateResult.value || null,
-    timestamp: now,
-    category: null,
-    convoId: resolvedConvoId,
-    answerTruncated: truncateResult.truncated
-  };
+  const snapshotResult = await persistSnapshotRecord(
+    {
+      title: capturePayload.title,
+      questionText: capturePayload.questionText,
+      answerHTML: capturePayload.answerHTML,
+      convoId: capturePayload.convoId
+    },
+    settings,
+    traceId,
+    { tabTitle, fallbackConvoId, runWithTimer, timings }
+  );
 
-  let activeCategoryId = null;
-  try {
-    activeCategoryId = await resolveActiveCategoryId();
-  } catch (_categoryError) {
-    activeCategoryId = null;
-  }
-  if (activeCategoryId) {
-    backupRecord.category = activeCategoryId;
-  }
-
-  const logMeta = {
-    convoId: backupRecord.convoId,
-    qLen: questionText ? questionText.length : 0,
-    aLen: truncateResult.value ? truncateResult.value.length : 0,
-    truncated: truncateResult.truncated,
-    id: backupRecord.id,
-    bytes: truncateResult.bytes,
-    category: backupRecord.category || null
-  };
-
-  if (!dryRun && backupRecord.convoId) {
-    const lookupAttempt = await runWithTimer('db:getBackupByConvoId', () => Database.getBackupByConvoId(backupRecord.convoId));
-    if (Number.isFinite(lookupAttempt.elapsedMs)) {
-      timings.dbMs += lookupAttempt.elapsedMs;
-    }
-    if (!lookupAttempt.ok) {
-      const lookupError = lookupAttempt.error;
-      const message = lookupError && lookupError.message ? lookupError.message : String(lookupError);
-      return {
+  return snapshotResult;
+  return {
         ok: false,
         reasonCode: 'backup_lookup_error',
         message: 'Failed to verify existing backup.',
@@ -1311,507 +1407,133 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message && message.type === 'backup_and_delete_active') {
-    (async () => {
-      const traceId = `backup-delete:${Date.now()}`;
-      const stepsTemplate = { sidebar: false, select: false, menu: false, item: false, confirm: false };
-      let logLevel = 'info';
-      let activeTab = null;
-      const runWithTimer = typeof Logger === 'object' && typeof Logger.withTimer === 'function'
-        ? Logger.withTimer
-        : async (_label, fn) => {
-            const started = Date.now();
-            if (typeof fn !== 'function') {
-              return { ok: false, value: null, elapsedMs: 0, error: new Error('Timer callback missing') };
-            }
-            try {
-              const value = await fn();
-              return { ok: true, value, elapsedMs: Date.now() - started };
-            } catch (error) {
-              return { ok: false, value: null, elapsedMs: Date.now() - started, error };
-            }
-          };
-      const summary = {
-        ok: false,
-        didDelete: false,
-        reasonCode: 'runtime_error',
-        candidate: false,
-        dryRun: null,
-        captureMs: 0,
-        dbMs: 0,
-        uiMs: 0,
-        backup: { ok: false, recordId: null, reasonCode: null },
-        ui: {
-          ok: false,
-          reason: 'not_attempted',
-          steps: { ...stepsTemplate },
-          attempts: [],
-          attemptsCount: 0,
-          matchSource: null,
-          debug: null
-        },
-        retryCount: 0,
-        traceId,
-        tab: { url: null, title: null },
-        timestamp: Date.now()
-      };
-
-      const finalize = async () => {
-        summary.timestamp = Date.now();
-        try {
-          await Logger.log(logLevel, 'runner', 'Backup+Delete outcome', summary);
-        } catch (logError) {
-          console.warn('backup_and_delete_active log failed', logError);
-        }
-        try {
-          chrome.runtime.sendMessage({ type: 'runner_update', payload: summary });
-        } catch (_broadcastError) {
-          // Slovensky komentar: Popup nemusi byt pripojeny.
-        }
-        sendResponse(summary);
-      };
-
-      try {
-        activeTab = await getActiveTab();
-        if (activeTab) {
-          summary.tab.url = activeTab.url || null;
-          summary.tab.title = activeTab.title || null;
-        }
-        if (!activeTab) {
-          summary.reasonCode = 'no_active_tab';
-          summary.ui.reason = 'no_active_tab';
-          summary.dryRun = false;
-          logLevel = 'warn';
-          return;
-        }
-
-        if (!activeTab.url || !activeTab.url.startsWith('https://chatgpt.com/')) {
-          summary.reasonCode = 'not_chatgpt';
-          summary.ui.reason = 'not_chatgpt';
-          summary.dryRun = false;
-          logLevel = 'info';
-          return;
-        }
-
-        const settings = await getSettingsFresh();
-        const isDryRun = Boolean(settings && settings.DRY_RUN);
-        summary.dryRun = isDryRun;
-        summary.candidate = false;
-
-        if (settings && urlMatchesAnyPattern(activeTab.url, settings.SAFE_URL_PATTERNS)) {
-          summary.reasonCode = 'safe_url';
-          summary.ui.reason = 'safe_url';
-          logLevel = 'info';
-          return;
-        }
-
-        let probeResponse = null;
-        try {
-          probeResponse = await sendProbeRequest(activeTab.id, traceId);
-        } catch (probeError) {
-          const messageText = probeError && probeError.message ? probeError.message : String(probeError);
-          summary.reasonCode = 'probe_failed';
-          summary.ui.reason = 'probe_failed';
-          summary.errorMessage = messageText;
-          logLevel = 'warn';
-          return;
-        }
-
-        if (!probeResponse || !probeResponse.ok) {
-          summary.reasonCode = 'probe_failed';
-          summary.ui.reason = 'probe_failed';
-          logLevel = 'warn';
-          return;
-        }
-
-        const evaluation = evaluateCandidateFromProbe(probeResponse, settings);
-        summary.candidate = evaluation.ok;
-        summary.convoId = evaluation.convoId || null;
-
-        if (!evaluation || !evaluation.ok) {
-          summary.reasonCode = 'not_candidate';
-          summary.ui.reason = 'not_candidate';
-          logLevel = 'info';
-          return;
-        }
-
-        const captureAttempt = await runWithTimer('runner.capture', () => captureAndPersistBackup(activeTab, settings, traceId, {
-          fallbackConvoId: evaluation.convoId || null
-        }));
-        if (Number.isFinite(captureAttempt.elapsedMs)) {
-          summary.captureMs = captureAttempt.elapsedMs;
-        }
-        const captureResult = captureAttempt.value;
-        if (captureResult && captureResult.timings) {
-          const captureMs = Number(captureResult.timings.captureMs);
-          if (Number.isFinite(captureMs)) {
-            summary.captureMs = captureMs;
-          }
-          const dbMs = Number(captureResult.timings.dbMs);
-          if (Number.isFinite(dbMs)) {
-            summary.dbMs = dbMs;
-          }
-        }
-
-        if (!captureResult) {
-          summary.backup = { ok: false, recordId: null, reasonCode: 'backup_capture_error' };
-          summary.reasonCode = 'capture_failed';
-          summary.ui.reason = 'capture_failed';
-          logLevel = 'error';
-          return;
-        }
-
-        const backupRecordId = captureResult.record && captureResult.record.id
-          ? captureResult.record.id
-          : captureResult.logMeta && (captureResult.logMeta.id || captureResult.logMeta.duplicateId)
-          ? captureResult.logMeta.id || captureResult.logMeta.duplicateId
-          : null;
-        const backupOk = Boolean(captureResult.ok || captureResult.reasonCode === 'backup_duplicate');
-        summary.backup = {
-          ok: backupOk,
-          recordId: backupRecordId,
-          reasonCode: captureResult.reasonCode || null
-        };
-        if (typeof captureResult.dryRun === 'boolean') {
-          summary.dryRun = captureResult.dryRun;
-        }
-
-        if (!backupOk) {
-          const mappedReason = captureResult.reasonCode === 'backup_write_error'
-            ? 'db_insert_failed'
-            : 'capture_failed';
-          summary.reasonCode = mappedReason;
-          summary.ui.reason = mappedReason;
-          logLevel = mappedReason === 'db_insert_failed' ? 'error' : 'warn';
-          return;
-        }
-
-        if (summary.dryRun === true) {
-          summary.ok = true;
-          summary.didDelete = false;
-          summary.reasonCode = 'dry_run';
-          summary.ui.reason = 'dry_run';
-          logLevel = 'info';
-          return;
-        }
-
-        if (settings && settings.LIST_ONLY) {
-          summary.ok = true;
-          summary.didDelete = false;
-          summary.reasonCode = 'list_only';
-          summary.ui.reason = 'list_only';
-          logLevel = 'info';
-          return;
-        }
-
-        if (settings && settings.CONFIRM_BEFORE_DELETE) {
-          summary.ok = false;
-          summary.didDelete = false;
-          summary.reasonCode = 'confirm_required';
-          summary.ui.reason = 'confirm_required';
-          logLevel = 'info';
-          return;
-        }
-
-        const primaryTitle = captureResult.record && typeof captureResult.record.title === 'string'
-          ? captureResult.record.title
-          : null;
-        const questionCandidate = captureResult.record && typeof captureResult.record.questionText === 'string'
-          ? captureResult.record.questionText
-          : null;
-        const alternatives = [];
-        if (questionCandidate && (!primaryTitle || questionCandidate.trim() !== primaryTitle.trim())) {
-          alternatives.push(questionCandidate);
-        }
-
-        const shareUrlCandidate = probeResponse && typeof probeResponse.url === 'string'
-          ? probeResponse.url
-          : activeTab.url || '';
-        if (shareUrlCandidate && shareUrlCandidate.startsWith('https://chatgpt.com/share/')) {
-          summary.ok = true;
-          summary.didDelete = false;
-          summary.reasonCode = 'share_view_readonly';
-          summary.ui.reason = 'share_view_readonly';
-          summary.ui.ok = false;
-          summary.ui.steps = { ...stepsTemplate };
-          summary.ui.matchSource = null;
-          summary.ui.debug = null;
-          summary.ui.attempts = [];
-          summary.ui.attemptsCount = 0;
-          summary.uiMs = 0;
-          console.info('[MyChatGPT][runner] Share view detected — sidebar delete unsupported. Skipping delete.', {
-            url: shareUrlCandidate
-          });
-          logLevel = 'info';
-          return;
-        }
-
-        const retriableReasons = new Set(['menu_not_found', 'select_load_timeout', 'ui_click_failed']);
-        const sanitizeUiDebug = (payload) => {
-          if (!payload || typeof payload !== 'object') {
-            return null;
-          }
-          const clone = { ...payload };
-          if (Array.isArray(clone.menuSnapshot)) {
-            clone.menuSnapshot = clone.menuSnapshot.slice(0, 20);
-          }
-          if (Array.isArray(clone.dialogSnapshot)) {
-            clone.dialogSnapshot = clone.dialogSnapshot.slice(0, 20);
-          }
-          if (Array.isArray(clone.deleteIgnoredByText)) {
-            clone.deleteIgnoredByText = clone.deleteIgnoredByText.slice(0, 10);
-          }
-          if (Array.isArray(clone.snapshot)) {
-            clone.snapshot = clone.snapshot.slice(0, 25);
-          }
-          if (clone.legacyDebug && typeof clone.legacyDebug === 'object') {
-            const legacy = { ...clone.legacyDebug };
-            if (Array.isArray(legacy.snapshot)) {
-              legacy.snapshot = legacy.snapshot.slice(0, 25);
-            }
-            if (Array.isArray(legacy.deleteIgnoredByText)) {
-              legacy.deleteIgnoredByText = legacy.deleteIgnoredByText.slice(0, 10);
-            }
-            clone.legacyDebug = legacy;
-          }
-          return clone;
-        };
-        let attempt = 0;
-        let uiResponse = null;
-        let lastError = null;
-        let uiElapsedTotal = 0;
-        while (attempt < 2) {
-          attempt += 1;
-          const uiAttempt = await runWithTimer('runner.ui_delete', () => sendWithEnsureCS(
-            activeTab.id,
-            {
-              type: 'ui_delete_by_title',
-              title: primaryTitle,
-              alternatives,
-              traceId
-            },
-            { timeoutMs: 5000 }
-          ));
-          if (Number.isFinite(uiAttempt.elapsedMs)) {
-            uiElapsedTotal += uiAttempt.elapsedMs;
-            summary.uiMs = uiElapsedTotal;
-          }
-          if (uiAttempt.ok) {
-            uiResponse = uiAttempt.value;
-            lastError = null;
-          } else {
-            lastError = uiAttempt.error || null;
-            uiResponse = null;
-          }
-
-          const reasonRaw = uiResponse && typeof uiResponse.reason === 'string'
-            ? uiResponse.reason
-            : uiResponse && uiResponse.ok
-            ? 'ui_delete_ok'
-            : 'ui_click_failed';
-
-          const rawDebug = uiResponse && uiResponse.debug && typeof uiResponse.debug === 'object'
-            ? uiResponse.debug
-            : null;
-          const debugPayload = sanitizeUiDebug(rawDebug);
-          const confirmVia = debugPayload && typeof debugPayload.confirmVia === 'string'
-            ? debugPayload.confirmVia
-            : debugPayload && debugPayload.legacyDebug && typeof debugPayload.legacyDebug.confirmVia === 'string'
-            ? debugPayload.legacyDebug.confirmVia
-            : null;
-          const responseSteps = uiResponse && uiResponse.steps && typeof uiResponse.steps === 'object'
-            ? {
-                sidebar: Boolean(uiResponse.steps.sidebar),
-                select: Boolean(uiResponse.steps.select),
-                menu: Boolean(uiResponse.steps.menu),
-                item: Boolean(uiResponse.steps.item),
-                confirm: Boolean(uiResponse.steps.confirm)
-              }
-            : { ...stepsTemplate };
-          const attemptDetail = {
-            attempt,
-            ok: Boolean(uiResponse && uiResponse.ok),
-            reason: reasonRaw,
-            elapsedMs: uiResponse && typeof uiResponse.elapsedMs === 'number' ? uiResponse.elapsedMs : null,
-            timerMs: Number.isFinite(uiAttempt.elapsedMs) ? uiAttempt.elapsedMs : null,
-            steps: responseSteps,
-            matchSource: uiResponse && typeof uiResponse.matchSource === 'string' ? uiResponse.matchSource : null,
-            debug: debugPayload
-          };
-          if (RUNNER_VERBOSE_CONSOLE) {
-            const uiMsValue = Number.isFinite(summary.uiMs) ? summary.uiMs : (attemptDetail.elapsedMs || null);
-            const uiMsText = Number.isFinite(uiMsValue) ? uiMsValue : 'n/a';
-            const reasonText = reasonRaw || 'unknown';
-            const sourceText = attemptDetail.matchSource || 'null';
-            const confirmText = confirmVia || 'null';
-            console.info(`[MyChatGPT][runner] uiMs=${uiMsText}, reason=${reasonText}, matchSource=${sourceText}, confirmVia=${confirmText} | codes=${RUNNER_REASON_CODES_HINT}`);
-          }
-          summary.ui.attempts.push(attemptDetail);
-          summary.ui.attemptsCount = summary.ui.attempts.length;
-          summary.ui.debug = attemptDetail.debug;
-
-          if (uiResponse && (uiResponse.ok || !retriableReasons.has(reasonRaw))) {
-            break;
-          }
-
-          if (!uiResponse && attempt >= 2) {
-            break;
-          }
-
-          if (attempt < 2 && retriableReasons.has(reasonRaw)) {
-            summary.retryCount += 1;
-            await wait(180);
-            continue;
-          }
-          break;
-        }
-
-        if (!uiResponse) {
-          summary.reasonCode = 'ui_click_failed';
-          summary.ui.reason = 'ui_click_failed';
-          summary.ui.ok = false;
-          const lastAttemptDetail = summary.ui.attempts[summary.ui.attempts.length - 1];
-          summary.ui.steps = lastAttemptDetail && lastAttemptDetail.steps ? lastAttemptDetail.steps : { ...stepsTemplate };
-          summary.didDelete = false;
-          summary.lastError = lastError && lastError.message ? lastError.message : null;
-          summary.ui.matchSource = lastAttemptDetail && lastAttemptDetail.matchSource ? lastAttemptDetail.matchSource : null;
-          logLevel = 'error';
-          return;
-        }
-
-        const steps = {
-          sidebar: Boolean(uiResponse.steps && uiResponse.steps.sidebar),
-          select: Boolean(uiResponse.steps && uiResponse.steps.select),
-          menu: Boolean(uiResponse.steps && uiResponse.steps.menu),
-          item: Boolean(uiResponse.steps && uiResponse.steps.item),
-          confirm: Boolean(uiResponse.steps && uiResponse.steps.confirm)
-        };
-        summary.ui.steps = steps;
-        summary.ui.ok = Boolean(uiResponse.ok);
-        summary.ui.matchSource = typeof uiResponse.matchSource === 'string' ? uiResponse.matchSource : null;
-        summary.ui.debug = sanitizeUiDebug(
-          uiResponse && uiResponse.debug && typeof uiResponse.debug === 'object' ? uiResponse.debug : null
-        );
-
-        if (!summary.ui.attempts.length) {
-          summary.ui.attempts.push({
-            attempt: 1,
-            ok: summary.ui.ok,
-            reason: uiResponse.reason || (summary.ui.ok ? 'ui_delete_ok' : 'ui_click_failed'),
-            elapsedMs: typeof uiResponse.elapsedMs === 'number' ? uiResponse.elapsedMs : null,
-            timerMs: summary.uiMs,
-            steps,
-            matchSource: summary.ui.matchSource,
-            debug: summary.ui.debug || null
-          });
-          summary.ui.attemptsCount = 1;
-        }
-
-        const uiReasonRaw = typeof uiResponse.reason === 'string'
-          ? uiResponse.reason
-          : uiResponse.ok
-          ? 'ui_delete_ok'
-          : 'ui_click_failed';
-        const reasonMap = {
-          missing_title: 'ui_click_failed',
-          sidebar_toggle_not_found: 'sidebar_open_failed',
-          sidebar_open_failed: 'sidebar_open_failed',
-          sidebar_not_visible: 'sidebar_open_failed',
-          convo_not_found: 'convo_not_found',
-          select_load_timeout: 'select_load_timeout',
-          menu_not_found: 'menu_not_found',
-          delete_item_not_found: 'delete_item_not_found',
-          confirm_dialog_not_found: 'confirm_dialog_not_found',
-          share_view_readonly: 'share_view_readonly',
-          ui_click_failed: 'ui_click_failed',
-          ui_delete_ok: 'ui_delete_ok'
-        };
-        const mappedUiReason = reasonMap[uiReasonRaw] || (summary.ui.ok ? 'ui_delete_ok' : 'ui_click_failed');
-
-        summary.ui.reason = uiReasonRaw;
-        summary.didDelete = summary.ui.ok;
-        summary.ok = summary.ui.ok;
-        summary.reasonCode = summary.ui.ok ? 'ui_delete_ok' : mappedUiReason;
-
-        if (summary.ok) {
-          logLevel = 'info';
-        } else if ([
-          'menu_not_found',
-          'confirm_dialog_not_found',
-          'convo_not_found',
-          'sidebar_open_failed',
-          'select_load_timeout',
-          'delete_item_not_found'
-        ].includes(mappedUiReason)) {
-          logLevel = 'warn';
-        } else {
-          logLevel = 'error';
-        }
-      } catch (error) {
-        console.error('backup_and_delete_active crashed', error);
-        summary.ok = false;
-        summary.reasonCode = summary.reasonCode === 'runtime_error' ? 'ui_click_failed' : summary.reasonCode;
-        summary.ui.reason = summary.ui.reason || 'ui_click_failed';
-        summary.lastError = error && error.message ? error.message : String(error);
-        logLevel = 'error';
-      } finally {
-        await finalize();
-      }
-    })();
-    return true;
+    sendResponse({ ok: false, reasonCode: 'deprecated' });
+    return false;
   }
 
   if (message && message.type === 'delete_backup') {
-    (async () => {
-      const id = message.id;
-      if (!id) {
-        sendResponse({ ok: false, reason: 'error', error: 'missing_id' });
-        return;
-      }
+    sendResponse({ ok: false, reason: 'deprecated' });
+    return false;
+  }
 
+  if (message && message.type === 'phase1_enqueue_delete') {
+    (async () => {
+      const traceId = typeof message.traceId === 'string' && message.traceId
+        ? message.traceId
+        : `hints-search:${Date.now()}`;
+      const snapshot = message.snapshot && typeof message.snapshot === 'object'
+        ? message.snapshot
+        : {};
+      const tabTitle = typeof snapshot.tabTitle === 'string' ? snapshot.tabTitle : '';
       let settings = null;
       try {
         settings = await getSettingsFresh();
       } catch (settingsError) {
-        await Logger.log('warn', 'settings', 'Delete backup settings load failed', {
-          message: settingsError && settingsError.message
+        await Logger.log('warn', 'settings', 'Phase1 enqueue settings load failed', {
+          traceId,
+          message: settingsError && settingsError.message ? settingsError.message : String(settingsError)
         });
-      }
-
-      const listOnly = Boolean(settings && settings.LIST_ONLY);
-      if (listOnly) {
-        sendResponse({ ok: false, reason: 'list_only' });
-        return;
-      }
-
-      const confirmRequired = Boolean(settings && settings.CONFIRM_BEFORE_DELETE);
-      if (confirmRequired && !message.confirm) {
-        sendResponse({ ok: false, reason: 'need_confirm' });
-        return;
       }
 
       try {
-        await Database.deleteBackup(id);
-        await Logger.log('info', 'db', 'Backup deleted', {
-          reasonCode: 'backup_deleted',
-          id
+        const backupResult = await persistSnapshotRecord(
+          {
+            title: snapshot.title,
+            questionText: snapshot.questionText,
+            answerHTML: snapshot.answerHTML,
+            convoId: snapshot.convoId
+          },
+          settings,
+          traceId,
+          { tabTitle, fallbackConvoId: snapshot.convoId || null }
+        );
+
+        const effectiveTitle = (backupResult.record && backupResult.record.title)
+          || (typeof snapshot.title === 'string' ? snapshot.title.trim() : '')
+          || null;
+        const queueResult = await Database.enqueueForDelete({
+          title: effectiveTitle,
+          convoId: snapshot.convoId || null
         });
-        try {
-          chrome.runtime.sendMessage({ type: 'backups_updated', reason: 'delete', id });
-        } catch (_broadcastError) {
-          // Slovensky komentar: Ak nie je posluchac, chyba sa ignoruje.
+
+        const bytesValue = backupResult && backupResult.logMeta ? backupResult.logMeta.bytes : null;
+        if (backupResult && backupResult.record && backupResult.reasonCode === 'backup_ok') {
+          console.info(
+            `[backup] saved: title="${backupResult.record.title || '(untitled)'}" convoId=${backupResult.record.convoId || 'null'} bytes=${bytesValue || 0}`
+          );
+        } else {
+          console.info(
+            `[backup] result: reason=${backupResult.reasonCode || 'unknown'} convoId=${snapshot.convoId || 'null'} bytes=${bytesValue || 0}`
+          );
         }
-        sendResponse({ ok: true });
-      } catch (error) {
-        await Logger.log('error', 'db', 'Delete backup failed', {
-          reasonCode: 'delete_failed',
-          id,
-          message: error && error.message
+
+        if (queueResult.enqueued) {
+          console.info(
+            `[queue] enqueued_for_delete: id=${queueResult.record && queueResult.record.id} title="${queueResult.record && queueResult.record.title ? queueResult.record.title : '(untitled)'}" convoId=${queueResult.record && queueResult.record.convoId ? queueResult.record.convoId : 'null'}`
+          );
+        } else if (queueResult.record) {
+          console.info(
+            `[queue] duplicate_skipped: id=${queueResult.record.id} title="${queueResult.record.title || '(untitled)'}" convoId=${queueResult.record.convoId || 'null'}`
+          );
+        }
+
+        let queueCount = null;
+        try {
+          queueCount = await Database.countQueued();
+        } catch (_countError) {
+          queueCount = null;
+        }
+        try {
+          chrome.runtime.sendMessage({
+            type: 'deletion_queue_updated',
+            count: queueCount
+          });
+        } catch (_notifyError) {
+          /* Slovensky komentar: Ignoruje chybu pri notifikacii popupu. */
+        }
+
+        sendResponse({
+          ok: true,
+          traceId,
+          backup: {
+            ok: Boolean(backupResult && backupResult.ok),
+            reasonCode: backupResult ? backupResult.reasonCode : null,
+            recordId: backupResult && backupResult.record && backupResult.record.id ? backupResult.record.id : null
+          },
+          queue: {
+            enqueued: Boolean(queueResult && queueResult.enqueued),
+            id: queueResult && queueResult.record && queueResult.record.id ? queueResult.record.id : null,
+            duplicate: queueResult && !queueResult.enqueued ? queueResult.record || null : null,
+            count: queueCount
+          }
         });
-        sendResponse({ ok: false, reason: 'error', error: error && error.message });
+      } catch (error) {
+        console.error('phase1_enqueue_delete failed', error);
+        sendResponse({
+          ok: false,
+          traceId,
+          error: error && error.message ? error.message : String(error)
+        });
       }
     })();
     return true;
   }
+
+  if (message && message.type === 'deletion_queue_count') {
+    (async () => {
+      try {
+        const count = await Database.countQueued();
+        sendResponse({ ok: true, count });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: error && error.message ? error.message : String(error)
+        });
+      }
+    })();
+    return true;
+  }
+
   if (message && message.type === 'bulk_backup_open_tabs') {
     (async () => {
       const summary = {

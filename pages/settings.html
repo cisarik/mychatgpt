@@ -59,6 +59,13 @@
             <span class="heal-hint" data-field="SHOW_CANDIDATE_BADGE" hidden>(opravené)</span>
           </span>
         </label>
+        <label class="setting-row" for="verboseConsole">
+          <span class="label-text">Verbózne konzolové logy</span>
+          <span class="setting-control">
+            <input type="checkbox" id="verboseConsole" name="verboseConsole" />
+            <span class="heal-hint" data-field="verboseConsole" hidden>(opravené)</span>
+          </span>
+        </label>
       </section>
       <section class="page-section panel settings-card">
         <h2>Limity</h2>
@@ -95,6 +102,13 @@
           <span class="setting-control">
             <input type="number" id="DELETE_LIMIT" name="DELETE_LIMIT" min="1" />
             <span class="heal-hint" data-field="DELETE_LIMIT" hidden>(opravené)</span>
+          </span>
+        </label>
+        <label class="setting-row" for="searchHintDelayMs">
+          <span class="label-text">Delay hints=search (ms)</span>
+          <span class="setting-control">
+            <input type="number" id="searchHintDelayMs" name="searchHintDelayMs" min="0" step="100" />
+            <span class="heal-hint" data-field="searchHintDelayMs" hidden>(opravené)</span>
           </span>
         </label>
       </section>
