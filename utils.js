@@ -3,6 +3,8 @@ const LOG_STORAGE_KEY = 'debug_logs';
 const MAX_LOG_RECORDS = 500;
 const SETTINGS_STORAGE_KEY = 'settings_v1';
 const COOLDOWN_STORAGE_KEY = 'cooldown_v1';
+/* Slovensky komentar: Kluc pre ulozenie aktivnej kategorie v storage. */
+const ACTIVE_CATEGORY_STORAGE_KEY = 'active_category_id';
 
 /* Slovensky komentar: Predvolene nastavenia pre funkcionalitu extension. */
 const SAFE_URL_DEFAULTS = Object.freeze([

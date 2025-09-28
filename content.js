@@ -191,6 +191,234 @@ function captureLatestConversationPair() {
   };
 }
 
+/* Slovensky komentar: Normalizuje nazvy konverzacie pre porovnavanie. */
+function normalizeTitleValue(raw) {
+  if (!raw) {
+    return '';
+  }
+  let text = String(raw);
+  text = text.replace(/[\u2026]/g, '');
+  text = text.replace(/\s*-\s*ChatGPT\s*$/i, '');
+  text = text.replace(/\s+/g, ' ');
+  return text.trim().toLowerCase();
+}
+
+/* Slovensky komentar: Porovna dve normalizovane hodnoty tolerantne. */
+function titlesMatchNormalized(candidate, target) {
+  if (!candidate || !target) {
+    return false;
+  }
+  if (candidate === target) {
+    return true;
+  }
+  const minLen = 6;
+  if (candidate.length >= minLen && target.includes(candidate)) {
+    return true;
+  }
+  if (target.length >= minLen && candidate.includes(target)) {
+    return true;
+  }
+  return false;
+}
+
+/* Slovensky komentar: Ziska aktualny titulok konverzacie z dokumentu. */
+function getDocumentConversationTitle() {
+  const candidate = document.querySelector('[data-testid="conversation-title"], header h1, main h1');
+  if (candidate && typeof candidate.textContent === 'string' && candidate.textContent.trim()) {
+    return candidate.textContent.trim();
+  }
+  return typeof document.title === 'string' ? document.title : '';
+}
+
+/* Slovensky komentar: Zbiera interaktivne prvky so zoznamom konverzacii v sidebare. */
+function collectSidebarCandidates() {
+  const selectors = [
+    'nav a[href*="/c/"]',
+    'aside a[href*="/c/"]',
+    '[data-testid*="conversation-list"] a[href*="/c/"]',
+    'a[data-testid*="conversation-item"]',
+    'button[data-testid*="conversation-item"]'
+  ];
+  const seen = new Set();
+  const collected = [];
+  selectors.forEach((selector) => {
+    const matches = safeQueryAll(selector);
+    matches.forEach((node) => {
+      const interactive = node.closest('a[href], button, [role="button"]') || node;
+      if (!interactive || seen.has(interactive)) {
+        return;
+      }
+      seen.add(interactive);
+      collected.push(interactive);
+    });
+  });
+  return collected;
+}
+
+/* Slovensky komentar: Overi, ci je sidebar viditelny. */
+function isSidebarVisible() {
+  const candidates = collectSidebarCandidates();
+  return candidates.some((node) => node && typeof node.offsetParent !== 'undefined' && node.offsetParent !== null);
+}
+
+/* Slovensky komentar: Najde tlacidlo na otvorenie sidebara. */
+function findSidebarToggleButton() {
+  const selectors = [
+    'button[aria-label="Open sidebar"]',
+    'button[aria-label="Show sidebar"]',
+    'button[aria-label*="open sidebar" i]',
+    'button[aria-label*="toggle sidebar" i]',
+    'button[aria-label*="expand sidebar" i]'
+  ];
+  for (const selector of selectors) {
+    const matches = safeQueryAll(selector).filter((node) => isNodeEnabled(node));
+    if (matches.length) {
+      return matches[0];
+    }
+  }
+  return null;
+}
+
+/* Slovensky komentar: Zabezpeci, ze sidebar je otvoreny. */
+async function ensureSidebarVisible() {
+  if (isSidebarVisible()) {
+    return { ok: true, reason: 'already_visible' };
+  }
+  const toggle = findSidebarToggleButton();
+  if (!toggle) {
+    return { ok: false, reason: 'sidebar_toggle_not_found' };
+  }
+  const toggleResult = await clickAndWait(() => toggle, { timeoutMs: 1500 });
+  if (!toggleResult.ok) {
+    return { ok: false, reason: 'sidebar_open_failed' };
+  }
+  const start = Date.now();
+  while (Date.now() - start < 1600) {
+    if (isSidebarVisible()) {
+      return { ok: true, reason: 'opened' };
+    }
+    await waitHelper(80);
+  }
+  return { ok: false, reason: 'sidebar_not_visible' };
+}
+
+/* Slovensky komentar: Ziska textove tokeny pre kandidat konverzacie. */
+function collectNodeTitleTokens(node) {
+  if (!node) {
+    return [];
+  }
+  const tokens = new Set();
+  const addToken = (value) => {
+    const normalized = normalizeTitleValue(value);
+    if (normalized) {
+      tokens.add(normalized);
+    }
+  };
+  if (typeof node.textContent === 'string') {
+    addToken(node.textContent);
+  }
+  if (typeof node.getAttribute === 'function') {
+    const ariaLabel = node.getAttribute('aria-label');
+    if (ariaLabel) {
+      addToken(ariaLabel);
+    }
+    const titleAttr = node.getAttribute('title');
+    if (titleAttr) {
+      addToken(titleAttr);
+    }
+  }
+  const descendants = node.querySelectorAll('[title], [aria-label]');
+  descendants.forEach((desc) => {
+    if (typeof desc.getAttribute === 'function') {
+      const aria = desc.getAttribute('aria-label');
+      if (aria) {
+        addToken(aria);
+      }
+      const title = desc.getAttribute('title');
+      if (title) {
+        addToken(title);
+      }
+    }
+    if (typeof desc.textContent === 'string') {
+      addToken(desc.textContent);
+    }
+  });
+  return Array.from(tokens);
+}
+
+/* Slovensky komentar: Najde polozku sidebara podla cielovych nazvov. */
+function findConversationNodeByTitles(normalizedTargets) {
+  if (!Array.isArray(normalizedTargets) || normalizedTargets.length === 0) {
+    return null;
+  }
+  const nodes = collectSidebarCandidates();
+  for (const node of nodes) {
+    if (!isNodeEnabled(node)) {
+      continue;
+    }
+    const tokens = collectNodeTitleTokens(node);
+    if (tokens.some((token) => normalizedTargets.some((target) => titlesMatchNormalized(token, target)))) {
+      return node;
+    }
+  }
+  return null;
+}
+
+/* Slovensky komentar: Caka na zosuladenie titulku dokumentu s cielom. */
+async function waitForDocumentTitleMatch(normalizedTargets, timeoutMs = 3500) {
+  const safeTargets = Array.isArray(normalizedTargets) ? normalizedTargets : [];
+  if (!safeTargets.length) {
+    return false;
+  }
+  const deadline = Date.now() + Math.max(0, timeoutMs || 0);
+  while (Date.now() < deadline) {
+    const current = normalizeTitleValue(getDocumentConversationTitle());
+    if (current && safeTargets.some((target) => titlesMatchNormalized(current, target))) {
+      return true;
+    }
+    await waitHelper(110);
+  }
+  return false;
+}
+
+/* Slovensky komentar: Spolocna cast mazania cez menu. */
+async function executeMenuDeletionSteps(baseSteps = {}) {
+  const steps = {
+    sidebar: Boolean(baseSteps.sidebar),
+    select: Boolean(baseSteps.select),
+    menu: Boolean(baseSteps.menu),
+    item: Boolean(baseSteps.item),
+    confirm: Boolean(baseSteps.confirm)
+  };
+
+  const menuButton = findMoreActionsButton();
+  if (!menuButton) {
+    return { ok: false, reason: 'menu_not_found', steps };
+  }
+
+  const menuClick = await clickAndWait(() => menuButton, { timeoutMs: 1000 });
+  if (!menuClick.ok) {
+    return { ok: false, reason: 'ui_click_failed', steps };
+  }
+  steps.menu = true;
+
+  const itemResult = await clickAndWait(() => findDeleteMenuItem(), { timeoutMs: 2000 });
+  if (!itemResult.ok) {
+    const reason = itemResult.element ? 'ui_click_failed' : 'delete_item_not_found';
+    return { ok: false, reason, steps };
+  }
+  steps.item = true;
+
+  const confirmResult = await clickAndWait(() => findDeleteConfirmButton(), { timeoutMs: 2500 });
+  if (!confirmResult.ok) {
+    const reason = confirmResult.element ? 'ui_click_failed' : 'confirm_dialog_not_found';
+    return { ok: false, reason, steps };
+  }
+  steps.confirm = true;
+
+  return { ok: true, reason: 'ui_delete_ok', steps };
+}
+
 /* Slovensky komentar: Bezpecne vrati pole kandidatov podla selektora (ignoruje syntakticke chyby). */
 const safeQueryAll = typeof window !== 'undefined' && typeof window.safeQueryAll === 'function'
   ? window.safeQueryAll
@@ -486,40 +714,89 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return undefined;
   }
 
+  if (message.type === 'ui_delete_by_title') {
+    (async () => {
+      const rawTitle = typeof message.title === 'string' ? message.title : '';
+      const altInputs = Array.isArray(message.alternatives) ? message.alternatives : [];
+      const steps = { sidebar: false, select: false, menu: false, item: false, confirm: false };
+      const normalizedTargets = [];
+      const seen = new Set();
+      const registerTarget = (value) => {
+        const normalized = normalizeTitleValue(value);
+        if (normalized && !seen.has(normalized)) {
+          seen.add(normalized);
+          normalizedTargets.push(normalized);
+        }
+      };
+      registerTarget(rawTitle);
+      altInputs.forEach((value) => registerTarget(value));
+
+      if (!normalizedTargets.length) {
+        sendResponse({ ok: false, reason: 'missing_title', steps, ts: Date.now() });
+        return;
+      }
+
+      try {
+        const currentTitle = normalizeTitleValue(getDocumentConversationTitle());
+        const alreadyActive = currentTitle
+          && normalizedTargets.some((target) => titlesMatchNormalized(currentTitle, target));
+
+        if (!alreadyActive) {
+          const ensureResult = await ensureSidebarVisible();
+          if (!ensureResult.ok) {
+            const reason = ensureResult.reason || 'sidebar_open_failed';
+            if (ensureResult.reason === 'already_visible') {
+              steps.sidebar = true;
+            }
+            sendResponse({ ok: false, reason, steps, ts: Date.now() });
+            return;
+          }
+          steps.sidebar = true;
+          const conversationNode = findConversationNodeByTitles(normalizedTargets);
+          if (!conversationNode) {
+            sendResponse({ ok: false, reason: 'convo_not_found', steps, ts: Date.now() });
+            return;
+          }
+          const selectResult = await clickAndWait(() => conversationNode, { timeoutMs: 2000 });
+          if (!selectResult.ok) {
+            sendResponse({ ok: false, reason: 'select_failed', steps, ts: Date.now() });
+            return;
+          }
+          steps.select = true;
+          const loaded = await waitForDocumentTitleMatch(normalizedTargets, 3600);
+          if (!loaded) {
+            sendResponse({ ok: false, reason: 'select_load_timeout', steps, ts: Date.now() });
+            return;
+          }
+        } else {
+          steps.select = true;
+          if (isSidebarVisible()) {
+            steps.sidebar = true;
+          }
+        }
+
+        const result = await executeMenuDeletionSteps(steps);
+        sendResponse({ ok: result.ok, reason: result.reason, steps: result.steps, ts: Date.now() });
+      } catch (error) {
+        const messageText = error && error.message ? error.message : String(error);
+        sendResponse({ ok: false, reason: 'ui_click_failed', steps, error: messageText, ts: Date.now() });
+      }
+    })();
+    return true;
+  }
+
   if (message.type === 'ui_delete_active') {
     (async () => {
-      const steps = { menu: false, item: false, confirm: false };
+      const steps = {
+        sidebar: isSidebarVisible(),
+        select: true,
+        menu: false,
+        item: false,
+        confirm: false
+      };
       try {
-        const menuButton = findMoreActionsButton();
-        if (!menuButton) {
-          sendResponse({ ok: false, reason: 'menu_not_found', steps, ts: Date.now() });
-          return;
-        }
-
-        const menuClick = await clickAndWait(() => menuButton, { timeoutMs: 1000 });
-        if (!menuClick.ok) {
-          sendResponse({ ok: false, reason: 'ui_click_failed', steps, ts: Date.now() });
-          return;
-        }
-        steps.menu = true;
-
-        const itemResult = await clickAndWait(() => findDeleteMenuItem(), { timeoutMs: 2000 });
-        if (!itemResult.ok) {
-          const reason = itemResult.element ? 'ui_click_failed' : 'delete_item_not_found';
-          sendResponse({ ok: false, reason, steps, ts: Date.now() });
-          return;
-        }
-        steps.item = true;
-
-        const confirmResult = await clickAndWait(() => findDeleteConfirmButton(), { timeoutMs: 2500 });
-        if (!confirmResult.ok) {
-          const reason = confirmResult.element ? 'ui_click_failed' : 'confirm_dialog_not_found';
-          sendResponse({ ok: false, reason, steps, ts: Date.now() });
-          return;
-        }
-        steps.confirm = true;
-
-        sendResponse({ ok: true, reason: 'ui_delete_ok', steps, ts: Date.now() });
+        const result = await executeMenuDeletionSteps(steps);
+        sendResponse({ ok: result.ok, reason: result.reason, steps: result.steps, ts: Date.now() });
       } catch (error) {
         const messageText = error && error.message ? error.message : String(error);
         sendResponse({ ok: false, reason: 'ui_click_failed', steps, error: messageText, ts: Date.now() });

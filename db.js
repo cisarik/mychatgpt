@@ -110,6 +110,10 @@ const Database = {
         ? sanitizedRecord.questionText.trim()
         : '';
       sanitizedRecord.questionText = questionTextValid ? questionTextValid : '(untitled)';
+      const categoryValue = typeof sanitizedRecord.category === 'string'
+        ? sanitizedRecord.category.trim()
+        : '';
+      sanitizedRecord.category = categoryValue ? categoryValue : null;
       const db = await Database.initDB();
       const transaction = db.transaction([STORE_BACKUPS], 'readwrite');
       const store = transaction.objectStore(STORE_BACKUPS);
@@ -126,6 +130,74 @@ const Database = {
       return sanitizedRecord && sanitizedRecord.id ? sanitizedRecord.id : null;
     } catch (error) {
       await Logger.log('error', 'db', 'Backup persist failed', { message: error && error.message });
+      throw error;
+    }
+  },
+  /* Slovensky komentar: Vyhlada kategoriu podla ID. */
+  getCategoryById: async (id) => {
+    if (!id) {
+      return null;
+    }
+    try {
+      const db = await Database.initDB();
+      return await new Promise((resolve, reject) => {
+        try {
+          const transaction = db.transaction([STORE_CATEGORIES], 'readonly');
+          const store = transaction.objectStore(STORE_CATEGORIES);
+          const request = store.get(id);
+
+          request.onsuccess = () => {
+            resolve(request.result || null);
+          };
+          request.onerror = () => {
+            reject(request.error);
+          };
+
+          transaction.onerror = () => {
+            reject(transaction.error);
+          };
+          transaction.onabort = () => {
+            reject(transaction.error);
+          };
+        } catch (innerError) {
+          reject(innerError);
+        }
+      });
+    } catch (error) {
+      await Logger.log('error', 'db', 'Lookup category by id failed', { message: error && error.message, id });
+      throw error;
+    }
+  },
+  /* Slovensky komentar: Vrati zoznam vsetkych kategorii. */
+  getAllCategories: async () => {
+    try {
+      const db = await Database.initDB();
+      return await new Promise((resolve, reject) => {
+        try {
+          const transaction = db.transaction([STORE_CATEGORIES], 'readonly');
+          const store = transaction.objectStore(STORE_CATEGORIES);
+          const request = store.getAll();
+
+          request.onsuccess = () => {
+            const rows = Array.isArray(request.result) ? request.result : [];
+            resolve(rows);
+          };
+          request.onerror = () => {
+            reject(request.error);
+          };
+
+          transaction.onerror = () => {
+            reject(transaction.error);
+          };
+          transaction.onabort = () => {
+            reject(transaction.error);
+          };
+        } catch (innerError) {
+          reject(innerError);
+        }
+      });
+    } catch (error) {
+      await Logger.log('error', 'db', 'Load categories failed', { message: error && error.message });
       throw error;
     }
   },

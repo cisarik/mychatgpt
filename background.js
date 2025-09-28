@@ -36,6 +36,34 @@ function createDefaultSettingsSnapshot() {
   };
 }
 
+/* Slovensky komentar: Ziska platnu aktivnu kategoriu zo storage ak existuje. */
+async function resolveActiveCategoryId() {
+  try {
+    const stored = await chrome.storage.local.get({ [ACTIVE_CATEGORY_STORAGE_KEY]: null });
+    const rawId = stored && typeof stored[ACTIVE_CATEGORY_STORAGE_KEY] === 'string'
+      ? stored[ACTIVE_CATEGORY_STORAGE_KEY].trim()
+      : '';
+    if (!rawId) {
+      return null;
+    }
+    try {
+      const category = await Database.getCategoryById(rawId);
+      return category && category.id ? category.id : null;
+    } catch (lookupError) {
+      const message = lookupError && lookupError.message ? lookupError.message : String(lookupError);
+      await Logger.log('warn', 'db', 'Active category lookup failed', {
+        categoryId: rawId,
+        message
+      });
+      return null;
+    }
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    await Logger.log('warn', 'settings', 'Active category read failed', { message });
+    return null;
+  }
+}
+
 /* Slovensky komentar: Ziska cerstve nastavenia zo storage bez cache. */
 async function getSettingsFresh() {
   const defaults = createDefaultSettingsSnapshot();
@@ -388,13 +416,24 @@ async function captureAndPersistBackup(activeTab, settings, traceId, { fallbackC
     answerTruncated: truncateResult.truncated
   };
 
+  let activeCategoryId = null;
+  try {
+    activeCategoryId = await resolveActiveCategoryId();
+  } catch (_categoryError) {
+    activeCategoryId = null;
+  }
+  if (activeCategoryId) {
+    backupRecord.category = activeCategoryId;
+  }
+
   const logMeta = {
     convoId: backupRecord.convoId,
     qLen: questionText ? questionText.length : 0,
     aLen: truncateResult.value ? truncateResult.value.length : 0,
     truncated: truncateResult.truncated,
     id: backupRecord.id,
-    bytes: truncateResult.bytes
+    bytes: truncateResult.bytes,
+    category: backupRecord.category || null
   };
 
   if (!dryRun && backupRecord.convoId) {
@@ -1233,7 +1272,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'backup_and_delete_active') {
     (async () => {
       const traceId = `backup-delete:${Date.now()}`;
-      const stepsTemplate = { menu: false, item: false, confirm: false };
+      const stepsTemplate = { sidebar: false, select: false, menu: false, item: false, confirm: false };
       let logLevel = 'info';
       let activeTab = null;
       const summary = {
@@ -1359,7 +1398,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         let uiResponse = null;
         try {
-          uiResponse = await sendWithEnsureCS(activeTab.id, { type: 'ui_delete_active' }, { timeoutMs: 2500 });
+          const primaryTitle = captureResult.record && typeof captureResult.record.title === 'string'
+            ? captureResult.record.title
+            : null;
+          const questionCandidate = captureResult.record && typeof captureResult.record.questionText === 'string'
+            ? captureResult.record.questionText
+            : null;
+          const alternatives = [];
+          if (questionCandidate && (!primaryTitle || questionCandidate.trim() !== primaryTitle.trim())) {
+            alternatives.push(questionCandidate);
+          }
+          uiResponse = await sendWithEnsureCS(
+            activeTab.id,
+            {
+              type: 'ui_delete_by_title',
+              title: primaryTitle,
+              alternatives,
+              traceId
+            },
+            { timeoutMs: 4000 }
+          );
         } catch (uiError) {
           console.warn('ui delete dispatch failed', uiError);
         }
@@ -1372,6 +1430,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const steps = {
+          sidebar: Boolean(uiResponse.steps && uiResponse.steps.sidebar),
+          select: Boolean(uiResponse.steps && uiResponse.steps.select),
           menu: Boolean(uiResponse.steps && uiResponse.steps.menu),
           item: Boolean(uiResponse.steps && uiResponse.steps.item),
           confirm: Boolean(uiResponse.steps && uiResponse.steps.confirm)
@@ -1384,7 +1444,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           : uiResponse.ok
           ? 'ui_delete_ok'
           : 'ui_click_failed';
-        const uiReason = ['menu_not_found', 'delete_item_not_found', 'confirm_dialog_not_found', 'ui_click_failed', 'ui_delete_ok'].includes(uiReasonRaw)
+        const knownReasons = [
+          'missing_title',
+          'sidebar_toggle_not_found',
+          'sidebar_open_failed',
+          'sidebar_not_visible',
+          'convo_not_found',
+          'select_failed',
+          'select_load_timeout',
+          'menu_not_found',
+          'delete_item_not_found',
+          'confirm_dialog_not_found',
+          'ui_click_failed',
+          'ui_delete_ok'
+        ];
+        const uiReason = knownReasons.includes(uiReasonRaw)
           ? uiReasonRaw
           : uiResponse.ok
           ? 'ui_delete_ok'
@@ -1397,7 +1471,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         if (summary.ok) {
           logLevel = 'info';
-        } else if (uiReason === 'menu_not_found' || uiReason === 'delete_item_not_found' || uiReason === 'confirm_dialog_not_found') {
+        } else if ([
+          'menu_not_found',
+          'delete_item_not_found',
+          'confirm_dialog_not_found',
+          'convo_not_found',
+          'sidebar_not_visible',
+          'sidebar_toggle_not_found',
+          'select_load_timeout'
+        ].includes(uiReason)) {
           logLevel = 'warn';
         } else {
           logLevel = 'error';

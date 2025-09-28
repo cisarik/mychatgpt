@@ -4,6 +4,8 @@
   const listHost = document.getElementById('backups-list');
   const toastHost = document.getElementById('searches-toast');
   const bulkButton = document.getElementById('bulk-open-tabs-btn');
+  const categorySelect = document.getElementById('active-category-select');
+  const categoryStatus = document.getElementById('active-category-status');
 
   if (!listHost) {
     return;
@@ -18,6 +20,8 @@
 
   let settingsSnapshot = { ...defaultSettings };
   let isBulkRunning = false;
+  let categoryMap = new Map();
+  let activeCategoryId = '';
 
   /* Slovensky komentar: Kratke toast upozornenie. */
   function showToast(message) {
@@ -45,6 +49,91 @@
       default:
         return 'Mazanie zlyhalo.';
     }
+  }
+
+  /* Slovensky komentar: Naformatuje status aktivnej kategorie. */
+  function updateCategoryStatus() {
+    if (!categoryStatus) {
+      return;
+    }
+    if (activeCategoryId) {
+      const label = categoryMap.get(activeCategoryId) || activeCategoryId;
+      categoryStatus.textContent = `Aktuálne sa použije kategória „${label}“.`;
+    } else {
+      categoryStatus.textContent = 'Nové zálohy budú bez kategórie.';
+    }
+  }
+
+  /* Slovensky komentar: Ulozi novu aktivnu kategoriu do storage. */
+  async function persistActiveCategory(newId) {
+    try {
+      const payload = newId ? newId : null;
+      await chrome.storage.local.set({ [ACTIVE_CATEGORY_STORAGE_KEY]: payload });
+      activeCategoryId = newId || '';
+      updateCategoryStatus();
+    } catch (error) {
+      await Logger.log('warn', 'settings', 'Active category persist failed', {
+        message: error && error.message
+      });
+    }
+  }
+
+  /* Slovensky komentar: Inicializuje select s dostupnymi kategoriami. */
+  async function initCategorySelector() {
+    if (!categorySelect) {
+      return;
+    }
+    categorySelect.disabled = true;
+    if (categoryStatus) {
+      categoryStatus.textContent = 'Načítavam kategórie…';
+    }
+    try {
+      const items = await Database.getAllCategories();
+      categoryMap = new Map();
+      if (Array.isArray(items)) {
+        items.forEach((row) => {
+          if (row && row.id) {
+            categoryMap.set(row.id, row.name || row.id);
+          }
+        });
+      }
+      categorySelect.innerHTML = '';
+      const optionNone = document.createElement('option');
+      optionNone.value = '';
+      optionNone.textContent = 'Bez kategórie';
+      categorySelect.appendChild(optionNone);
+      Array.from(categoryMap.entries()).forEach(([id, name]) => {
+        const option = document.createElement('option');
+        option.value = id;
+        option.textContent = name;
+        categorySelect.appendChild(option);
+      });
+      try {
+        const stored = await chrome.storage.local.get({ [ACTIVE_CATEGORY_STORAGE_KEY]: null });
+        const raw = stored ? stored[ACTIVE_CATEGORY_STORAGE_KEY] : null;
+        activeCategoryId = typeof raw === 'string' && raw.trim() ? raw.trim() : '';
+      } catch (_readError) {
+        activeCategoryId = '';
+      }
+      categorySelect.value = activeCategoryId;
+      updateCategoryStatus();
+    } catch (error) {
+      await Logger.log('warn', 'settings', 'Category selector init failed', {
+        message: error && error.message
+      });
+      if (categoryStatus) {
+        categoryStatus.textContent = 'Nepodarilo sa načítať kategórie.';
+      }
+    } finally {
+      categorySelect.disabled = false;
+    }
+
+    categorySelect.addEventListener('change', (event) => {
+      const value = typeof event.target.value === 'string' ? event.target.value : '';
+      persistActiveCategory(value).catch(() => {
+        // Slovensky komentar: Chyba sa zaznamenala v persist funkcii.
+      });
+    });
   }
 
   /* Slovensky komentar: Nastavi vizualne spustenie mazania na riadku. */
@@ -197,6 +286,14 @@
     timeEl.textContent = formatTimestamp(timestamp);
     meta.appendChild(timeEl);
 
+    if (backup && backup.category) {
+      const badge = document.createElement('span');
+      badge.className = 'row-category';
+      const label = categoryMap.get(backup.category) || backup.category;
+      badge.textContent = label;
+      meta.appendChild(badge);
+    }
+
     if (backup && backup.answerTruncated) {
       const badge = document.createElement('span');
       badge.className = 'row-badge';
@@ -289,6 +386,7 @@
   }
 
   await refreshSettings();
+  await initCategorySelector();
   await loadAndRenderRecent();
 
   if (globalTarget && typeof globalTarget === 'object') {
