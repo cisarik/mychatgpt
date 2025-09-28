@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
+  <div id="popup-toast-stack" class="mini-toast-stack" role="status" aria-live="polite"></div>
   <div class="popup-root">
     <main class="popup-shell">
       <div class="tab-container" role="tablist" aria-label="MyChatGPT sections">
@@ -245,8 +246,6 @@
             </label>
             <div class="debug-actions">
               <button id="refresh-btn">Refresh</button>
-              <button id="export-btn">Export debug</button>
-              <button id="clear-btn">Clear logs</button>
             </div>
           </section>
 

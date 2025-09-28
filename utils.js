@@ -70,6 +70,20 @@ async function appendLog(level, scope, message, meta) {
   return entry;
 }
 
+/* Slovensky komentar: Zmeri cas vykonania funkcie a vrati vysledok s flagom uspechu. */
+async function withTimer(label, fn) {
+  const startedAt = Date.now();
+  if (typeof fn !== 'function') {
+    return { ok: false, value: null, elapsedMs: 0, error: new Error('Timer callback missing') };
+  }
+  try {
+    const value = await fn();
+    return { ok: true, value, elapsedMs: Date.now() - startedAt };
+  } catch (error) {
+    return { ok: false, value: null, elapsedMs: Date.now() - startedAt, error };
+  }
+}
+
 /* Slovensky komentar: Vymaze vsetky logy. */
 async function clearLogs() {
   await chrome.storage.local.set({ [LOG_STORAGE_KEY]: [] });
@@ -300,6 +314,7 @@ const Logger = {
   log: appendLog,
   getLogs: readLogs,
   clear: clearLogs,
+  withTimer,
   constants: {
     storageKey: LOG_STORAGE_KEY,
     maxRecords: MAX_LOG_RECORDS

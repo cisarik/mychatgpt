@@ -221,6 +221,35 @@ function titlesMatchNormalized(candidate, target) {
   return false;
 }
 
+/* Slovensky komentar: Urci povod zhody titulku pre debug merania. */
+function resolveMatchSource(candidateValue, normalizedTargets, targetMetaMap) {
+  const normalizedCandidate = normalizeTitleValue(candidateValue);
+  if (!normalizedCandidate) {
+    return null;
+  }
+  const targets = Array.isArray(normalizedTargets) ? normalizedTargets : [];
+  const meta = targetMetaMap instanceof Map ? targetMetaMap : null;
+  for (const target of targets) {
+    if (!target) {
+      continue;
+    }
+    if (!titlesMatchNormalized(normalizedCandidate, target)) {
+      continue;
+    }
+    const baseSource = meta && meta.has(target) ? meta.get(target) : 'title';
+    if (normalizedCandidate === target) {
+      return baseSource;
+    }
+    const prefixMatch = (normalizedCandidate.length >= 6 && target.includes(normalizedCandidate))
+      || (target.length >= 6 && normalizedCandidate.includes(target));
+    if (prefixMatch) {
+      return 'prefix';
+    }
+    return baseSource;
+  }
+  return null;
+}
+
 /* Slovensky komentar: Ziska aktualny titulok konverzacie z dokumentu. */
 function getDocumentConversationTitle() {
   const candidate = document.querySelector('[data-testid="conversation-title"], header h1, main h1');
@@ -347,9 +376,9 @@ function collectNodeTitleTokens(node) {
 }
 
 /* Slovensky komentar: Najde polozku sidebara podla cielovych nazvov. */
-function findConversationNodeByTitles(normalizedTargets) {
+function findConversationNodeByTitles(normalizedTargets, targetMetaMap) {
   if (!Array.isArray(normalizedTargets) || normalizedTargets.length === 0) {
-    return null;
+    return { node: null, matchSource: null };
   }
   const nodes = collectSidebarCandidates();
   for (const node of nodes) {
@@ -357,11 +386,14 @@ function findConversationNodeByTitles(normalizedTargets) {
       continue;
     }
     const tokens = collectNodeTitleTokens(node);
-    if (tokens.some((token) => normalizedTargets.some((target) => titlesMatchNormalized(token, target)))) {
-      return node;
+    for (const token of tokens) {
+      const matchSource = resolveMatchSource(token, normalizedTargets, targetMetaMap);
+      if (matchSource) {
+        return { node, matchSource };
+      }
     }
   }
-  return null;
+  return { node: null, matchSource: null };
 }
 
 /* Slovensky komentar: Caka na zosuladenie titulku dokumentu s cielom. */
@@ -721,18 +753,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const steps = { sidebar: false, select: false, menu: false, item: false, confirm: false };
       const normalizedTargets = [];
       const seen = new Set();
-      const registerTarget = (value) => {
+      const targetMeta = new Map();
+      const registerTarget = (value, source) => {
         const normalized = normalizeTitleValue(value);
         if (normalized && !seen.has(normalized)) {
           seen.add(normalized);
           normalizedTargets.push(normalized);
+          targetMeta.set(normalized, source || 'title');
         }
       };
-      registerTarget(rawTitle);
-      altInputs.forEach((value) => registerTarget(value));
+      registerTarget(rawTitle, 'title');
+      altInputs.forEach((value) => registerTarget(value, 'alternative'));
+
+      let matchSource = null;
 
       if (!normalizedTargets.length) {
-        sendResponse({ ok: false, reason: 'missing_title', steps, ts: Date.now() });
+        sendResponse({ ok: false, reason: 'missing_title', steps, matchSource: null, ts: Date.now() });
         return;
       }
 
@@ -748,38 +784,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (ensureResult.reason === 'already_visible') {
               steps.sidebar = true;
             }
-            sendResponse({ ok: false, reason, steps, ts: Date.now() });
+            sendResponse({ ok: false, reason, steps, matchSource: matchSource || null, ts: Date.now() });
             return;
           }
           steps.sidebar = true;
-          const conversationNode = findConversationNodeByTitles(normalizedTargets);
+          const { node: conversationNode, matchSource: nodeMatchSource } = findConversationNodeByTitles(normalizedTargets, targetMeta);
+          if (nodeMatchSource) {
+            matchSource = nodeMatchSource;
+          }
           if (!conversationNode) {
-            sendResponse({ ok: false, reason: 'convo_not_found', steps, ts: Date.now() });
+            sendResponse({ ok: false, reason: 'convo_not_found', steps, matchSource: matchSource || null, ts: Date.now() });
             return;
           }
           const selectResult = await clickAndWait(() => conversationNode, { timeoutMs: 2000 });
           if (!selectResult.ok) {
-            sendResponse({ ok: false, reason: 'select_failed', steps, ts: Date.now() });
+            sendResponse({ ok: false, reason: 'select_failed', steps, matchSource: matchSource || null, ts: Date.now() });
             return;
           }
           steps.select = true;
           const loaded = await waitForDocumentTitleMatch(normalizedTargets, 3600);
           if (!loaded) {
-            sendResponse({ ok: false, reason: 'select_load_timeout', steps, ts: Date.now() });
+            sendResponse({ ok: false, reason: 'select_load_timeout', steps, matchSource: matchSource || null, ts: Date.now() });
             return;
+          }
+          const postLoadMatch = resolveMatchSource(getDocumentConversationTitle(), normalizedTargets, targetMeta);
+          if (postLoadMatch) {
+            matchSource = postLoadMatch;
           }
         } else {
           steps.select = true;
           if (isSidebarVisible()) {
             steps.sidebar = true;
           }
+          const activeSource = resolveMatchSource(currentTitle, normalizedTargets, targetMeta);
+          if (activeSource) {
+            matchSource = activeSource;
+          }
         }
 
         const result = await executeMenuDeletionSteps(steps);
-        sendResponse({ ok: result.ok, reason: result.reason, steps: result.steps, ts: Date.now() });
+        sendResponse({ ok: result.ok, reason: result.reason, steps: result.steps, matchSource: matchSource || null, ts: Date.now() });
       } catch (error) {
         const messageText = error && error.message ? error.message : String(error);
-        sendResponse({ ok: false, reason: 'ui_click_failed', steps, error: messageText, ts: Date.now() });
+        sendResponse({ ok: false, reason: 'ui_click_failed', steps, matchSource: matchSource || null, error: messageText, ts: Date.now() });
       }
     })();
     return true;

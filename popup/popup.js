@@ -6,6 +6,70 @@
   let suppressHashChange = false;
   let activeTabName = null;
   const globalTarget = typeof window !== 'undefined' ? window : self;
+  const toastHost = document.getElementById('popup-toast-stack');
+
+  /* Slovensky komentar: Mini toast API pre jednotny vizualny feedback. */
+  function spawnMiniToast(type, message, options = {}) {
+    if (!toastHost || !message) {
+      return null;
+    }
+    const toast = document.createElement('div');
+    toast.className = `mini-toast mini-toast--${type}`;
+    toast.textContent = message;
+    toastHost.prepend(toast);
+    while (toastHost.childElementCount > 4) {
+      toastHost.removeChild(toastHost.lastElementChild);
+    }
+
+    let settled = false;
+    const removeToast = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeoutId && typeof globalTarget.clearTimeout === 'function') {
+        globalTarget.clearTimeout(timeoutId);
+      }
+      toast.removeEventListener('click', onClick);
+      if (toast.parentElement === toastHost) {
+        toastHost.removeChild(toast);
+      }
+    };
+
+    const duration = typeof options.durationMs === 'number' && Number.isFinite(options.durationMs)
+      ? Math.max(600, options.durationMs)
+      : 2800;
+    const timeoutId = globalTarget && typeof globalTarget.setTimeout === 'function'
+      ? globalTarget.setTimeout(removeToast, duration)
+      : null;
+
+    const onClick = () => {
+      removeToast();
+    };
+    toast.addEventListener('click', onClick);
+
+    return { close: removeToast };
+  }
+
+  const MiniToast = {
+    show(type, message, options) {
+      const intent = typeof type === 'string' && type ? type : 'info';
+      return spawnMiniToast(intent, message, options);
+    },
+    success(message, options) {
+      return spawnMiniToast('success', message, options);
+    },
+    info(message, options) {
+      return spawnMiniToast('info', message, options);
+    },
+    error(message, options) {
+      return spawnMiniToast('error', message, options);
+    }
+  };
+
+  if (globalTarget && typeof globalTarget === 'object') {
+    globalTarget.MiniToast = MiniToast;
+  }
 
   function getDebugAPI() {
     return globalTarget && globalTarget.DebugPanel ? globalTarget.DebugPanel : null;
@@ -174,7 +238,7 @@
   const searchesToast = document.getElementById('searches-toast');
 
   /* Slovensky komentar: Zobrazi kratku toast spravu v sekcii Searches. */
-  function showSearchToast(message) {
+  function showSearchToast(message, intent = 'info') {
     if (!searchesToast || !message) {
       return;
     }
@@ -190,6 +254,16 @@
         searchesToast.removeChild(toast);
       }
     }, 3200);
+    const intentValue = typeof intent === 'string' ? intent : 'info';
+    if (intentValue === 'success') {
+      MiniToast.success(message);
+      return;
+    }
+    if (intentValue === 'error') {
+      MiniToast.error(message);
+      return;
+    }
+    MiniToast.info(message);
   }
 
   /* Slovensky komentar: Naformatuje sumar do toast spravy. */
@@ -233,14 +307,14 @@
       try {
         const response = await requestBulkBackupOpenTabs();
         if (response && response.ok) {
-          showSearchToast(summarizeBulkResult(response.summary));
+          showSearchToast(summarizeBulkResult(response.summary), 'success');
         } else {
           const message = response && response.error ? response.error : 'Bulk backup failed.';
-          showSearchToast(message);
+          showSearchToast(message, 'error');
         }
       } catch (error) {
         const message = error && error.message ? error.message : String(error);
-        showSearchToast(`Bulk backup error: ${message}`);
+        showSearchToast(`Bulk backup error: ${message}`, 'error');
       } finally {
         bulkBackupButton.disabled = false;
         bulkBackupButton.textContent = originalText;
@@ -261,36 +335,50 @@
     }
     const reasonCode = payload.reasonCode;
     const backupInfo = payload.backup && typeof payload.backup === 'object' ? payload.backup : null;
+    const matchSource = payload.ui && typeof payload.ui.matchSource === 'string'
+      ? payload.ui.matchSource
+      : null;
+    const matchHint = matchSource ? ` (match: ${matchSource})` : '';
     if (backupInfo && backupInfo.ok === false && backupInfo.reasonCode) {
-      showSearchToast(`Backup failed: ${backupInfo.reasonCode}`);
+      const message = `Backup failed: ${backupInfo.reasonCode}`;
+      showSearchToast(message, 'error');
       return;
     }
     if (reasonCode === 'capture_failed' || reasonCode === 'db_insert_failed') {
-      showSearchToast(`Backup failed: ${reasonCode}`);
+      const message = `Backup failed: ${reasonCode}`;
+      showSearchToast(message, 'error');
       return;
     }
     if (!backupInfo || backupInfo.ok !== true) {
+      if (reasonCode) {
+        MiniToast.info(`Runner update: ${reasonCode}`);
+      }
       return;
     }
     if (reasonCode === 'dry_run') {
-      showSearchToast('Dry run: konverzácia zostala zachovaná.');
+      const message = 'Dry run: konverzácia zostala zachovaná.';
+      showSearchToast(message, 'info');
       return;
     }
     if (reasonCode === 'list_only') {
-      showSearchToast('Delete preskočený (List only mód).');
+      const message = 'Delete preskočený (List only mód).';
+      showSearchToast(message, 'info');
       return;
     }
     if (reasonCode === 'confirm_required') {
-      showSearchToast('Mazanie vyžaduje potvrdenie v nastaveniach.');
+      const message = 'Mazanie vyžaduje potvrdenie v nastaveniach.';
+      showSearchToast(message, 'info');
       return;
     }
     if (payload.didDelete) {
-      showSearchToast('Delete OK');
+      const message = `Delete OK${matchHint}`;
+      showSearchToast(message, 'success');
       return;
     }
     const uiReason = payload.ui && payload.ui.reason ? payload.ui.reason : reasonCode;
     if (uiReason) {
-      showSearchToast(`Delete failed: ${uiReason}`);
+      const message = `Delete failed: ${uiReason}${matchHint}`;
+      showSearchToast(message, 'error');
     }
   }
 
@@ -303,7 +391,7 @@
       return;
     }
     if (payload.backup && payload.backup.ok) {
-      showSearchToast('Backup saved');
+      showSearchToast('Backup saved', 'success');
     }
     const searchesApi = getSearchesApi();
     if (searchesApi && typeof searchesApi.loadAndRenderRecent === 'function') {

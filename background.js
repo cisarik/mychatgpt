@@ -341,6 +341,25 @@ async function captureAndPersistBackup(activeTab, settings, traceId, { fallbackC
       id: null
     }
   };
+  const timings = { captureMs: 0, dbMs: 0 };
+  const runWithTimer = typeof Logger === 'object' && typeof Logger.withTimer === 'function'
+    ? Logger.withTimer
+    : async (_label, fn) => {
+        const started = Date.now();
+        if (typeof fn !== 'function') {
+          return { ok: false, value: null, elapsedMs: 0, error: new Error('Timer callback missing') };
+        }
+        try {
+          const value = await fn();
+          return { ok: true, value, elapsedMs: Date.now() - started };
+        } catch (error) {
+          return { ok: false, value: null, elapsedMs: Date.now() - started, error };
+        }
+      };
+  const snapshotTimings = () => ({
+    captureMs: Number.isFinite(timings.captureMs) ? timings.captureMs : 0,
+    dbMs: Number.isFinite(timings.dbMs) ? timings.dbMs : 0
+  });
 
   if (!tabId) {
     return {
@@ -350,30 +369,36 @@ async function captureAndPersistBackup(activeTab, settings, traceId, { fallbackC
       logMeta: {
         ...resultBase.logMeta,
         error: 'no_tab_id'
-      }
+      },
+      timings: snapshotTimings()
     };
   }
 
-  let capturePayload = null;
-  try {
-    capturePayload = await sendCaptureRequest(tabId, traceId);
-  } catch (error) {
-    const message = error && error.message ? error.message : String(error);
+  const captureAttempt = await runWithTimer(`capture:${traceId}`, () => sendCaptureRequest(tabId, traceId));
+  if (Number.isFinite(captureAttempt.elapsedMs)) {
+    timings.captureMs += captureAttempt.elapsedMs;
+  }
+  if (!captureAttempt.ok) {
+    const captureError = captureAttempt.error;
+    const message = captureError && captureError.message ? captureError.message : String(captureError);
     return {
       ...resultBase,
       message,
       logMeta: {
         ...resultBase.logMeta,
         error: message
-      }
+      },
+      timings: snapshotTimings()
     };
   }
+  const capturePayload = captureAttempt.value;
 
   if (!capturePayload || !capturePayload.ok) {
     const message = capturePayload && capturePayload.error ? capturePayload.error : 'Capture unavailable.';
     return {
       ...resultBase,
-      message
+      message,
+      timings: snapshotTimings()
     };
   }
 
@@ -421,22 +446,12 @@ async function captureAndPersistBackup(activeTab, settings, traceId, { fallbackC
   };
 
   if (!dryRun && backupRecord.convoId) {
-    try {
-      const existingRecord = await Database.getBackupByConvoId(backupRecord.convoId);
-      if (existingRecord) {
-        return {
-          ok: false,
-          reasonCode: 'backup_duplicate',
-          message: 'Conversation already backed up.',
-          record: existingRecord,
-          dryRun,
-          logMeta: {
-            ...logMeta,
-            duplicateId: existingRecord.id || null
-          }
-        };
-      }
-    } catch (lookupError) {
+    const lookupAttempt = await runWithTimer('db:getBackupByConvoId', () => Database.getBackupByConvoId(backupRecord.convoId));
+    if (Number.isFinite(lookupAttempt.elapsedMs)) {
+      timings.dbMs += lookupAttempt.elapsedMs;
+    }
+    if (!lookupAttempt.ok) {
+      const lookupError = lookupAttempt.error;
       const message = lookupError && lookupError.message ? lookupError.message : String(lookupError);
       return {
         ok: false,
@@ -447,7 +462,23 @@ async function captureAndPersistBackup(activeTab, settings, traceId, { fallbackC
         logMeta: {
           ...logMeta,
           error: message
-        }
+        },
+        timings: snapshotTimings()
+      };
+    }
+    const existingRecord = lookupAttempt.value;
+    if (existingRecord) {
+      return {
+        ok: false,
+        reasonCode: 'backup_duplicate',
+        message: 'Conversation already backed up.',
+        record: existingRecord,
+        dryRun,
+        logMeta: {
+          ...logMeta,
+          duplicateId: existingRecord.id || null
+        },
+        timings: snapshotTimings()
       };
     }
   }
@@ -459,13 +490,17 @@ async function captureAndPersistBackup(activeTab, settings, traceId, { fallbackC
       message: 'Dry run: not persisted.',
       record: backupRecord,
       dryRun,
-      logMeta
+      logMeta,
+      timings: snapshotTimings()
     };
   }
 
-  try {
-    await Database.insertBackup(backupRecord);
-  } catch (writeError) {
+  const insertAttempt = await runWithTimer('db:insertBackup', () => Database.insertBackup(backupRecord));
+  if (Number.isFinite(insertAttempt.elapsedMs)) {
+    timings.dbMs += insertAttempt.elapsedMs;
+  }
+  if (!insertAttempt.ok) {
+    const writeError = insertAttempt.error;
     const message = writeError && writeError.message ? writeError.message : String(writeError);
     return {
       ok: false,
@@ -476,7 +511,8 @@ async function captureAndPersistBackup(activeTab, settings, traceId, { fallbackC
       logMeta: {
         ...logMeta,
         error: message
-      }
+      },
+      timings: snapshotTimings()
     };
   }
 
@@ -505,7 +541,8 @@ async function captureAndPersistBackup(activeTab, settings, traceId, { fallbackC
     message: 'Backup stored successfully.',
     record: backupRecord,
     dryRun: false,
-    logMeta
+    logMeta,
+    timings: snapshotTimings()
   };
 }
 
@@ -1259,14 +1296,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const stepsTemplate = { sidebar: false, select: false, menu: false, item: false, confirm: false };
       let logLevel = 'info';
       let activeTab = null;
+      const runWithTimer = typeof Logger === 'object' && typeof Logger.withTimer === 'function'
+        ? Logger.withTimer
+        : async (_label, fn) => {
+            const started = Date.now();
+            if (typeof fn !== 'function') {
+              return { ok: false, value: null, elapsedMs: 0, error: new Error('Timer callback missing') };
+            }
+            try {
+              const value = await fn();
+              return { ok: true, value, elapsedMs: Date.now() - started };
+            } catch (error) {
+              return { ok: false, value: null, elapsedMs: Date.now() - started, error };
+            }
+          };
       const summary = {
         ok: false,
         didDelete: false,
         reasonCode: 'runtime_error',
         candidate: false,
         dryRun: null,
+        captureMs: 0,
+        dbMs: 0,
+        uiMs: 0,
         backup: { ok: false, recordId: null, reasonCode: null },
-        ui: { ok: false, reason: 'not_attempted', steps: { ...stepsTemplate }, attempts: 0 },
+        ui: { ok: false, reason: 'not_attempted', steps: { ...stepsTemplate }, attempts: 0, matchSource: null },
         retryCount: 0,
         traceId,
         tab: { url: null, title: null },
@@ -1352,9 +1406,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
 
-        const captureResult = await captureAndPersistBackup(activeTab, settings, traceId, {
+        const captureAttempt = await runWithTimer('runner.capture', () => captureAndPersistBackup(activeTab, settings, traceId, {
           fallbackConvoId: evaluation.convoId || null
-        });
+        }));
+        if (Number.isFinite(captureAttempt.elapsedMs)) {
+          summary.captureMs = captureAttempt.elapsedMs;
+        }
+        const captureResult = captureAttempt.value;
+        if (captureResult && captureResult.timings) {
+          const captureMs = Number(captureResult.timings.captureMs);
+          if (Number.isFinite(captureMs)) {
+            summary.captureMs = captureMs;
+          }
+          const dbMs = Number(captureResult.timings.dbMs);
+          if (Number.isFinite(dbMs)) {
+            summary.dbMs = dbMs;
+          }
+        }
 
         if (!captureResult) {
           summary.backup = { ok: false, recordId: null, reasonCode: 'backup_capture_error' };
@@ -1431,23 +1499,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         let attempt = 0;
         let uiResponse = null;
         let lastError = null;
+        let uiElapsedTotal = 0;
         while (attempt < 2) {
           attempt += 1;
           summary.ui.attempts = attempt;
-          try {
-            uiResponse = await sendWithEnsureCS(
-              activeTab.id,
-              {
-                type: 'ui_delete_by_title',
-                title: primaryTitle,
-                alternatives,
-                traceId
-              },
-              { timeoutMs: 5000 }
-            );
+          const uiAttempt = await runWithTimer('runner.ui_delete', () => sendWithEnsureCS(
+            activeTab.id,
+            {
+              type: 'ui_delete_by_title',
+              title: primaryTitle,
+              alternatives,
+              traceId
+            },
+            { timeoutMs: 5000 }
+          ));
+          if (Number.isFinite(uiAttempt.elapsedMs)) {
+            uiElapsedTotal += uiAttempt.elapsedMs;
+            summary.uiMs = uiElapsedTotal;
+          }
+          if (uiAttempt.ok) {
+            uiResponse = uiAttempt.value;
             lastError = null;
-          } catch (uiError) {
-            lastError = uiError;
+          } else {
+            lastError = uiAttempt.error || null;
             uiResponse = null;
           }
 
@@ -1480,6 +1554,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           summary.ui.steps = { ...stepsTemplate };
           summary.didDelete = false;
           summary.lastError = lastError && lastError.message ? lastError.message : null;
+          summary.ui.matchSource = null;
           logLevel = 'error';
           return;
         }
@@ -1493,6 +1568,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         };
         summary.ui.steps = steps;
         summary.ui.ok = Boolean(uiResponse.ok);
+        summary.ui.matchSource = typeof uiResponse.matchSource === 'string' ? uiResponse.matchSource : null;
 
         const uiReasonRaw = typeof uiResponse.reason === 'string'
           ? uiResponse.reason
