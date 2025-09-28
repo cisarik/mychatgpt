@@ -247,4 +247,83 @@
       }
     });
   }
+
+  function getSearchesApi() {
+    if (globalTarget && typeof globalTarget === 'object' && globalTarget.SearchesPage) {
+      return globalTarget.SearchesPage;
+    }
+    return null;
+  }
+
+  function showDeleteToast(payload) {
+    if (!payload || typeof payload !== 'object') {
+      return;
+    }
+    const reasonCode = payload.reasonCode;
+    const backupInfo = payload.backup && typeof payload.backup === 'object' ? payload.backup : null;
+    if (backupInfo && backupInfo.ok === false && backupInfo.reasonCode) {
+      showSearchToast(`Backup failed: ${backupInfo.reasonCode}`);
+      return;
+    }
+    if (reasonCode === 'capture_failed' || reasonCode === 'db_insert_failed') {
+      showSearchToast(`Backup failed: ${reasonCode}`);
+      return;
+    }
+    if (!backupInfo || backupInfo.ok !== true) {
+      return;
+    }
+    if (reasonCode === 'dry_run') {
+      showSearchToast('Dry run: konverzácia zostala zachovaná.');
+      return;
+    }
+    if (reasonCode === 'list_only') {
+      showSearchToast('Delete preskočený (List only mód).');
+      return;
+    }
+    if (reasonCode === 'confirm_required') {
+      showSearchToast('Mazanie vyžaduje potvrdenie v nastaveniach.');
+      return;
+    }
+    if (payload.didDelete) {
+      showSearchToast('Delete OK');
+      return;
+    }
+    const uiReason = payload.ui && payload.ui.reason ? payload.ui.reason : reasonCode;
+    if (uiReason) {
+      showSearchToast(`Delete failed: ${uiReason}`);
+    }
+  }
+
+  function handleRunnerUpdate(message) {
+    if (!message || typeof message !== 'object') {
+      return;
+    }
+    const payload = message.payload && typeof message.payload === 'object' ? message.payload : message;
+    if (!payload || typeof payload !== 'object') {
+      return;
+    }
+    if (payload.backup && payload.backup.ok) {
+      showSearchToast('Backup saved');
+    }
+    const searchesApi = getSearchesApi();
+    if (searchesApi && typeof searchesApi.loadAndRenderRecent === 'function') {
+      try {
+        const maybePromise = searchesApi.loadAndRenderRecent();
+        if (maybePromise && typeof maybePromise.then === 'function') {
+          maybePromise.catch((error) => {
+            console.warn('Failed to refresh searches after runner update', error);
+          });
+        }
+      } catch (error) {
+        console.warn('Failed to refresh searches after runner update', error);
+      }
+    }
+    showDeleteToast(payload);
+  }
+
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message && message.type === 'runner_update') {
+      handleRunnerUpdate(message.payload || message);
+    }
+  });
 })();

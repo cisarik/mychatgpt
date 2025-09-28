@@ -39,27 +39,11 @@ function createDefaultSettingsSnapshot() {
 /* Slovensky komentar: Ziska platnu aktivnu kategoriu zo storage ak existuje. */
 async function resolveActiveCategoryId() {
   try {
-    const stored = await chrome.storage.local.get({ [ACTIVE_CATEGORY_STORAGE_KEY]: null });
-    const rawId = stored && typeof stored[ACTIVE_CATEGORY_STORAGE_KEY] === 'string'
-      ? stored[ACTIVE_CATEGORY_STORAGE_KEY].trim()
-      : '';
-    if (!rawId) {
-      return null;
-    }
-    try {
-      const category = await Database.getCategoryById(rawId);
-      return category && category.id ? category.id : null;
-    } catch (lookupError) {
-      const message = lookupError && lookupError.message ? lookupError.message : String(lookupError);
-      await Logger.log('warn', 'db', 'Active category lookup failed', {
-        categoryId: rawId,
-        message
-      });
-      return null;
-    }
+    const resolved = await Database.getActiveCategoryId();
+    return resolved || null;
   } catch (error) {
     const message = error && error.message ? error.message : String(error);
-    await Logger.log('warn', 'settings', 'Active category read failed', { message });
+    await Logger.log('warn', 'settings', 'Active category resolve failed', { message });
     return null;
   }
 }
@@ -480,7 +464,7 @@ async function captureAndPersistBackup(activeTab, settings, traceId, { fallbackC
   }
 
   try {
-    await Database.saveBackup(backupRecord);
+    await Database.insertBackup(backupRecord);
   } catch (writeError) {
     const message = writeError && writeError.message ? writeError.message : String(writeError);
     return {
@@ -1282,32 +1266,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         candidate: false,
         dryRun: null,
         backup: { ok: false, recordId: null, reasonCode: null },
-        ui: { ok: false, reason: undefined, steps: { ...stepsTemplate } },
+        ui: { ok: false, reason: 'not_attempted', steps: { ...stepsTemplate }, attempts: 0 },
+        retryCount: 0,
+        traceId,
+        tab: { url: null, title: null },
         timestamp: Date.now()
       };
 
       const finalize = async () => {
         summary.timestamp = Date.now();
-        const stepsMeta = summary.ui && summary.ui.steps ? summary.ui.steps : { ...stepsTemplate };
-        const logMeta = {
-          didDelete: summary.didDelete,
-          dryRun: summary.dryRun,
-          url: activeTab && activeTab.url ? activeTab.url : null,
-          title: activeTab && activeTab.title ? activeTab.title : null,
-          steps: stepsMeta,
-          recordId: summary.backup && summary.backup.recordId ? summary.backup.recordId : null,
-          candidate: summary.candidate
-        };
         try {
-          await Logger.log(logLevel, 'ui', summary.reasonCode, logMeta);
+          await Logger.log(logLevel, 'runner', 'Backup+Delete outcome', summary);
         } catch (logError) {
           console.warn('backup_and_delete_active log failed', logError);
+        }
+        try {
+          chrome.runtime.sendMessage({ type: 'runner_update', payload: summary });
+        } catch (_broadcastError) {
+          // Slovensky komentar: Popup nemusi byt pripojeny.
         }
         sendResponse(summary);
       };
 
       try {
         activeTab = await getActiveTab();
+        if (activeTab) {
+          summary.tab.url = activeTab.url || null;
+          summary.tab.title = activeTab.title || null;
+        }
         if (!activeTab) {
           summary.reasonCode = 'no_active_tab';
           summary.ui.reason = 'no_active_tab';
@@ -1320,23 +1306,44 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           summary.reasonCode = 'not_chatgpt';
           summary.ui.reason = 'not_chatgpt';
           summary.dryRun = false;
-          logLevel = 'warn';
+          logLevel = 'info';
           return;
         }
 
         const settings = await getSettingsFresh();
-        const settingsDryRun = typeof settings?.DRY_RUN === 'boolean' ? settings.DRY_RUN : null;
-        summary.dryRun = settingsDryRun;
+        const isDryRun = Boolean(settings && settings.DRY_RUN);
+        summary.dryRun = isDryRun;
+        summary.candidate = false;
 
-        let probePayload = null;
-        try {
-          probePayload = await sendProbeRequest(activeTab.id, traceId);
-        } catch (probeError) {
-          console.warn('probe metadata failed for backup-delete', probeError);
+        if (settings && urlMatchesAnyPattern(activeTab.url, settings.SAFE_URL_PATTERNS)) {
+          summary.reasonCode = 'safe_url';
+          summary.ui.reason = 'safe_url';
+          logLevel = 'info';
+          return;
         }
 
-        const evaluation = evaluateCandidateFromProbe(probePayload, settings);
-        summary.candidate = Boolean(evaluation && evaluation.ok);
+        let probeResponse = null;
+        try {
+          probeResponse = await sendProbeRequest(activeTab.id, traceId);
+        } catch (probeError) {
+          const messageText = probeError && probeError.message ? probeError.message : String(probeError);
+          summary.reasonCode = 'probe_failed';
+          summary.ui.reason = 'probe_failed';
+          summary.errorMessage = messageText;
+          logLevel = 'warn';
+          return;
+        }
+
+        if (!probeResponse || !probeResponse.ok) {
+          summary.reasonCode = 'probe_failed';
+          summary.ui.reason = 'probe_failed';
+          logLevel = 'warn';
+          return;
+        }
+
+        const evaluation = evaluateCandidateFromProbe(probeResponse, settings);
+        summary.candidate = evaluation.ok;
+        summary.convoId = evaluation.convoId || null;
 
         if (!evaluation || !evaluation.ok) {
           summary.reasonCode = 'not_candidate';
@@ -1351,7 +1358,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         if (!captureResult) {
           summary.backup = { ok: false, recordId: null, reasonCode: 'backup_capture_error' };
-          summary.reasonCode = 'backup_capture_error';
+          summary.reasonCode = 'capture_failed';
+          summary.ui.reason = 'capture_failed';
           logLevel = 'error';
           return;
         }
@@ -1372,16 +1380,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         if (!backupOk) {
-          summary.reasonCode = captureResult.reasonCode || 'backup_capture_error';
-          logLevel = 'error';
+          const mappedReason = captureResult.reasonCode === 'backup_write_error'
+            ? 'db_insert_failed'
+            : 'capture_failed';
+          summary.reasonCode = mappedReason;
+          summary.ui.reason = mappedReason;
+          logLevel = mappedReason === 'db_insert_failed' ? 'error' : 'warn';
           return;
         }
 
-        if (summary.dryRun === true || settingsDryRun === true) {
+        if (summary.dryRun === true) {
           summary.ok = true;
           summary.didDelete = false;
           summary.reasonCode = 'dry_run';
-          summary.dryRun = true;
           summary.ui.reason = 'dry_run';
           logLevel = 'info';
           return;
@@ -1390,41 +1401,85 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (settings && settings.LIST_ONLY) {
           summary.ok = true;
           summary.didDelete = false;
-          summary.reasonCode = 'blocked_by_list_only';
-          summary.ui.reason = 'blocked_by_list_only';
+          summary.reasonCode = 'list_only';
+          summary.ui.reason = 'list_only';
           logLevel = 'info';
           return;
         }
 
+        if (settings && settings.CONFIRM_BEFORE_DELETE) {
+          summary.ok = false;
+          summary.didDelete = false;
+          summary.reasonCode = 'confirm_required';
+          summary.ui.reason = 'confirm_required';
+          logLevel = 'info';
+          return;
+        }
+
+        const primaryTitle = captureResult.record && typeof captureResult.record.title === 'string'
+          ? captureResult.record.title
+          : null;
+        const questionCandidate = captureResult.record && typeof captureResult.record.questionText === 'string'
+          ? captureResult.record.questionText
+          : null;
+        const alternatives = [];
+        if (questionCandidate && (!primaryTitle || questionCandidate.trim() !== primaryTitle.trim())) {
+          alternatives.push(questionCandidate);
+        }
+
+        const retriableReasons = new Set(['menu_not_found', 'convo_not_found', 'select_load_timeout']);
+        let attempt = 0;
         let uiResponse = null;
-        try {
-          const primaryTitle = captureResult.record && typeof captureResult.record.title === 'string'
-            ? captureResult.record.title
-            : null;
-          const questionCandidate = captureResult.record && typeof captureResult.record.questionText === 'string'
-            ? captureResult.record.questionText
-            : null;
-          const alternatives = [];
-          if (questionCandidate && (!primaryTitle || questionCandidate.trim() !== primaryTitle.trim())) {
-            alternatives.push(questionCandidate);
+        let lastError = null;
+        while (attempt < 2) {
+          attempt += 1;
+          summary.ui.attempts = attempt;
+          try {
+            uiResponse = await sendWithEnsureCS(
+              activeTab.id,
+              {
+                type: 'ui_delete_by_title',
+                title: primaryTitle,
+                alternatives,
+                traceId
+              },
+              { timeoutMs: 5000 }
+            );
+            lastError = null;
+          } catch (uiError) {
+            lastError = uiError;
+            uiResponse = null;
           }
-          uiResponse = await sendWithEnsureCS(
-            activeTab.id,
-            {
-              type: 'ui_delete_by_title',
-              title: primaryTitle,
-              alternatives,
-              traceId
-            },
-            { timeoutMs: 4000 }
-          );
-        } catch (uiError) {
-          console.warn('ui delete dispatch failed', uiError);
+
+          const reasonRaw = uiResponse && typeof uiResponse.reason === 'string'
+            ? uiResponse.reason
+            : uiResponse && uiResponse.ok
+            ? 'ui_delete_ok'
+            : 'ui_click_failed';
+
+          if (uiResponse && (uiResponse.ok || !retriableReasons.has(reasonRaw))) {
+            break;
+          }
+
+          if (!uiResponse && attempt >= 2) {
+            break;
+          }
+
+          if (attempt < 2 && retriableReasons.has(reasonRaw)) {
+            summary.retryCount += 1;
+            await wait(180);
+            continue;
+          }
+          break;
         }
 
         if (!uiResponse) {
           summary.reasonCode = 'ui_click_failed';
           summary.ui.reason = 'ui_click_failed';
+          summary.ui.ok = false;
+          summary.ui.steps = { ...stepsTemplate };
+          summary.didDelete = false;
+          summary.lastError = lastError && lastError.message ? lastError.message : null;
           logLevel = 'error';
           return;
         }
@@ -1444,42 +1499,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           : uiResponse.ok
           ? 'ui_delete_ok'
           : 'ui_click_failed';
-        const knownReasons = [
-          'missing_title',
-          'sidebar_toggle_not_found',
-          'sidebar_open_failed',
-          'sidebar_not_visible',
-          'convo_not_found',
-          'select_failed',
-          'select_load_timeout',
-          'menu_not_found',
-          'delete_item_not_found',
-          'confirm_dialog_not_found',
-          'ui_click_failed',
-          'ui_delete_ok'
-        ];
-        const uiReason = knownReasons.includes(uiReasonRaw)
-          ? uiReasonRaw
-          : uiResponse.ok
-          ? 'ui_delete_ok'
-          : 'ui_click_failed';
+        const reasonMap = {
+          missing_title: 'ui_click_failed',
+          sidebar_toggle_not_found: 'sidebar_open_failed',
+          sidebar_open_failed: 'sidebar_open_failed',
+          sidebar_not_visible: 'sidebar_open_failed',
+          convo_not_found: 'convo_not_found',
+          select_failed: 'select_failed',
+          select_load_timeout: 'select_load_timeout',
+          menu_not_found: 'menu_not_found',
+          delete_item_not_found: 'menu_not_found',
+          confirm_dialog_not_found: 'confirm_dialog_not_found',
+          ui_click_failed: 'ui_click_failed',
+          ui_delete_ok: 'ui_delete_ok'
+        };
+        const mappedUiReason = reasonMap[uiReasonRaw] || (summary.ui.ok ? 'ui_delete_ok' : 'ui_click_failed');
 
-        summary.ui.reason = uiReason;
+        summary.ui.reason = uiReasonRaw;
         summary.didDelete = summary.ui.ok;
         summary.ok = summary.ui.ok;
-        summary.reasonCode = summary.ui.ok ? 'ui_delete_ok' : uiReason;
+        summary.reasonCode = summary.ui.ok ? 'ui_delete_ok' : mappedUiReason;
 
         if (summary.ok) {
           logLevel = 'info';
         } else if ([
           'menu_not_found',
-          'delete_item_not_found',
           'confirm_dialog_not_found',
           'convo_not_found',
-          'sidebar_not_visible',
-          'sidebar_toggle_not_found',
-          'select_load_timeout'
-        ].includes(uiReason)) {
+          'sidebar_open_failed',
+          'select_load_timeout',
+          'select_failed'
+        ].includes(mappedUiReason)) {
           logLevel = 'warn';
         } else {
           logLevel = 'error';
@@ -1487,9 +1537,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } catch (error) {
         console.error('backup_and_delete_active crashed', error);
         summary.ok = false;
-        if (summary.reasonCode === 'runtime_error') {
-          summary.reasonCode = 'ui_click_failed';
-        }
+        summary.reasonCode = summary.reasonCode === 'runtime_error' ? 'ui_click_failed' : summary.reasonCode;
+        summary.ui.reason = summary.ui.reason || 'ui_click_failed';
+        summary.lastError = error && error.message ? error.message : String(error);
         logLevel = 'error';
       } finally {
         await finalize();

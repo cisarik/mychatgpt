@@ -365,7 +365,7 @@ function findConversationNodeByTitles(normalizedTargets) {
 }
 
 /* Slovensky komentar: Caka na zosuladenie titulku dokumentu s cielom. */
-async function waitForDocumentTitleMatch(normalizedTargets, timeoutMs = 3500) {
+async function waitForDocumentTitleMatch(normalizedTargets, timeoutMs = 3600) {
   const safeTargets = Array.isArray(normalizedTargets) ? normalizedTargets : [];
   if (!safeTargets.length) {
     return false;

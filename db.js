@@ -133,6 +133,38 @@ const Database = {
       throw error;
     }
   },
+  /* Slovensky komentar: Alias pre insert zalohy, aby background nemusel riesit sanitizaciu. */
+  insertBackup: async (record) => {
+    return await Database.saveBackup(record);
+  },
+  /* Slovensky komentar: Nacita a overi aktivnu kategoriu z chrome.storage. */
+  getActiveCategoryId: async () => {
+    try {
+      const stored = await chrome.storage.local.get({ [ACTIVE_CATEGORY_STORAGE_KEY]: null });
+      const rawId = stored && typeof stored[ACTIVE_CATEGORY_STORAGE_KEY] === 'string'
+        ? stored[ACTIVE_CATEGORY_STORAGE_KEY].trim()
+        : '';
+      if (!rawId) {
+        return null;
+      }
+      try {
+        const category = await Database.getCategoryById(rawId);
+        return category && category.id ? category.id : null;
+      } catch (lookupError) {
+        const message = lookupError && lookupError.message ? lookupError.message : String(lookupError);
+        await Logger.log('warn', 'db', 'Active category reference invalid', {
+          id: rawId,
+          message
+        });
+        return null;
+      }
+    } catch (error) {
+      await Logger.log('warn', 'settings', 'Active category read failed', {
+        message: error && error.message ? error.message : String(error)
+      });
+      return null;
+    }
+  },
   /* Slovensky komentar: Vyhlada kategoriu podla ID. */
   getCategoryById: async (id) => {
     if (!id) {
