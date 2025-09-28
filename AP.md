@@ -1,19 +1,19 @@
 # Analytic Programming Protocol
 
-> **Purpose.** Make collaboration between **Owner** (you), **Orchestrator** (me), and **Worker** (Codex Agent) smooth, deterministic, and reviewable. This document standardizes task prompts, responses, scope control, and quality gates while staying lightweight.
+> **Purpose.** Make collaboration between **Owner** (user), **Orchestrator** (ChatGPT), and **Worker** (Codex Agent) smooth, deterministic, and reviewable. This document standardizes task prompts, responses, scope control, and quality gates while staying lightweight.
 
 ---
 
 ## 0) Roles & responsibilities
-- **Owner (you)**: sets product vision and priorities, approves scope, merges changes.
-- **Orchestrator (ChatGPT)**: decomposes objectives into atomic tasks, drafts precise prompts and acceptance criteria, curates scope & constraints, reviews Worker results.
-- **Worker (Codex Agent)**: applies focused code diffs; follows scope, tests, and style; reports back in the exact response format.
+- **Owner (user)**: sets product vision and priorities, approves scope, merges changes & test code
+- **Orchestrator (ChatGPT)**: decomposes objectives into atomic tasks, drafts precise prompts and acceptance criteria, curates scope & constraints, reviews Worker results and describe how should Owner test the code in each step of the development.
+- **Worker (Codex Agent)**: follows instructions of the Orchestrator and implements changes; reports back in the exact response format.
 
 **Guiding principles**
 - Small, reversible diffs; deterministic behavior; strict interfaces; no surprises.
 - Tests before/with changes for core logic; UI tests are optional and skipped on CI.
 - Minimize dependencies; never touch secrets; zero flakiness.
-- Be explicit about **what may be edited** (SCOPE) and **what is forbidden**.
+- Be explicit about **how the code should be edited** and **what is forbidden**.
 
 ---
 
@@ -37,8 +37,6 @@ Then use the fields below (plain text; order fixed). Empty fields may be omitted
 ```
 STEP=<free-form step identifier>
 TITLE=<short task title>
-SCOPE_TOUCH=<files/dirs allowed to edit, comma-separated>
-SCOPE_FORBID=<files/dirs forbidden to edit, comma-separated>
 CONTEXT:
 - <concise background bullets, optional>
 CONSTRAINTS:
@@ -47,8 +45,6 @@ CONSTRAINTS:
 ACCEPTANCE:
 - <criterion 1>
 - <criterion 2>
-DELIVERABLES:
-- Change Summary
 NOTES:
 - Comments/docstrings in Slovak; report in English
 - Determinism; no network in tests; skip UI/Qt tests on CI
@@ -57,7 +53,6 @@ NOTES:
 ```
 
 **Rationale**
-- `SCOPE_TOUCH` and `SCOPE_FORBID` prevent collateral edits.
 - `CONSTRAINTS` and `ACCEPTANCE` are the contract.
 - `STEP` are free‑form labels (no hard numbering needed).
 
@@ -66,16 +61,12 @@ NOTES:
 #! Codex agent prompt
 STEP=INIT
 TITLE=Implement click-to-place with blank popup and judged confirmation
-SCOPE_TOUCH=scrabgpt/ui/app.py,scrabgpt/ai/client.py
-SCOPE_FORBID=scrabgpt/core/,tests/
 CONSTRAINTS:
 - Keep UI resizable; no breaking existing interactions
 - Log OpenAI requests/responses with masked key
 ACCEPTANCE:
 - Blank popup A–Z; ghost score; judge batch; DW on center; bingo +50
 - ruff/mypy --strict/pytest all green
-DELIVERABLES:
-- Change Summary
 NOTES:
 - No new deps; no git commands; Slovak comments
 ```
@@ -93,12 +84,6 @@ Worker must respond in the following order. When something doesn’t apply, the 
 3) **Migration notes** (if any): config/env/data migrations, one-liners.
 4) **Known limitations & edge cases** (bullet list).
 5) **Rollback plan** (how to revert the change set safely).
-6) **Proposed Conventional Commit** (one line).
-7) **Exactly one** terminal section:
-```
-### Change Summary
-- What changed and why (short, plain English)
-```
 
 **If acceptance cannot be fully met**
 - Produce partial diffs **or** no diffs, plus a concise **Failure Report**:
@@ -109,7 +94,6 @@ Worker must respond in the following order. When something doesn’t apply, the 
 **Hard requirements**
 - No secrets in diffs or logs.
 - Do not run git or system package managers.
-- Respect `SCOPE_FORBID`. If a change is needed there, stop and request scope expansion.
 
 ---
 
@@ -133,13 +117,7 @@ Worker must respond in the following order. When something doesn’t apply, the 
 
 ---
 
-## 6) Versioning & compatibility
-- This spec is **AP1.0**. Include `AP1.0` in AGENTS.md so Worker knows the contract version.
-- Future updates will be AP1.1, AP1.2, …; prompts may reference `AP_VERSION=AP1.0` explicitly.
-
----
-
-## 7) Boot Prompt (to include in AGENTS.md)
+## 6) Boot Prompt (to include in AGENTS.md)
 > Use this exact section verbatim inside **AGENTS.md** so Codex Agent has a stable operating mode.
 
 ```

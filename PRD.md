@@ -4,12 +4,11 @@
 **Owner**: Michal  
 **Orchestrator**: ChatGPT (GPT‑5 Thinking)  
 **Worker**: GPT-5-Codex  
-**Version**: 0.1
 
 ---
 
 ## 1) Účel a „one‑liner“
-Rozšírenie pre Chrome/Brave, ktoré **udrží účet ChatGPT čistý**: heuristicky deteguje **krátke „search‑like“ konverzácie** vytvorené *oficiálnym ChatGPT Chrome/Brave rozšírením*, **lokálne ich zazálohuje** (IndexedDB ako HTML snapshot) a podľa nastavení ich **jemne skryje** cez `PATCH conversation/{id} {is_visible:false}` (tzv. soft‑delete). Všetko **lokálne**, bez cloudu.
+Rozšírenie pre Chrome/Brave, ktoré **udrží účet ChatGPT čistý**: heuristicky deteguje **krátke „search‑like“ konverzácie** vytvorené *oficiálnym ChatGPT Chrome/Brave rozšírením*, **lokálne ich zazálohuje** (IndexedDB ako HTML snapshot) a zmaže ich z chatgpt.com účtu ktorým je user prihlásený
 
 ---
 
@@ -44,9 +43,10 @@ Rozšírenie pre Chrome/Brave, ktoré **udrží účet ChatGPT čistý**: heuris
 
 ## 6) Personas & Scenáre
 **Michal (power‑user, dev)**  
-- Otvorí ChatGPT, položí krátku otázku („convert png→webp“), dostane odpoveď, zavrie/prepne na iný tab.  
-- MyChatGPT rozpozná „short“ chat, **uloží** lokálnu kópiu a podľa nastavení navrhne vymazanie  
-- Michal si neskôr otvorí popup, **vyhľadá** „webp“, zobrazi sa mu „convert png→webp“ link ktorým otvorí zálohu
+- Otvorí MyChatGPT a vyberie s dropdownu **kategóriu**
+- Otvorí chatgpt.com, položí krátku otázku („convert png→webp“), dostane odpoveď, zavrie/prepne na iný tab.  
+- MyChatGPT rozpozná „short“ **search-like** chat, **uloží** lokálnu kópiu, pridelí jej vybratú **kategóriu** a konverzáciu vymaže z prihláseného účtu chatgpt.com: urobí to tak, ŽE SI INTERNE OTVORÍ chatgpt.com V SIDEBARE JU NÁJDE PODĽA TITLE, KTORÉ SI MYCHATGPT ULOŽIL PRI ROZPOZNANÍ A SIMULOVANÍM KLIKU NA DELETE A POTVRDENIE KLIKU NA DELETE JU Z ÚČTU VYMAŽE A ZMAZANIE SIGNALIZUJE USEROVI
+- Michal si neskôr otvorí popup MyChatGPT, **vyhľadá** „webp“, zobrazi sa mu „convert png→webp“ link ktorým otvorí zálohu. **search-like** konverzácia sa už nenáchádza v jeho účte chatgpt.com 
 
 ---
 
@@ -79,13 +79,12 @@ Rozšírenie pre Chrome/Brave, ktoré **udrží účet ChatGPT čistý**: heuris
 
 ### 8.4 UI (popup + pages)
 **Popup (default)**
-- Pole **Search** (full‑text nad `title` + `questionText`).  
-- Tab **BacSearcheskup** (tabuľkový zoznam záloh ktorým sa dá otvoriť náhľad záznamu + tlačidlá Export/Set category/Delete from local DB).  
+- Pole **Search** (zoznam záloh ktorým sa dá otvoriť záznam kliknutím na `questionText` zálohy).    
 - Tab **Settings** (prepínače & parametre).  
-- Tab **Debug** (živé logy, „Scan now“).  
+- Tab **Debug** („Scan now“ a priestor na debug tlačidlá - debug výpisy sú v javascript console browsera).  
 
 **Settings** (detaily v §10)
-- LIST_ONLY, DRY_RUN, CONFIRM_BEFORE_DELETE, AUTO_SCAN, MAX_MESSAGES, USER_MESSAGES_MAX
+- DRY_RUN, AUTO_SCAN, MAX_MESSAGES
 - Správa kategórií (CRUD).
 
 **Backup viewer**
@@ -106,7 +105,7 @@ Rozšírenie pre Chrome/Brave, ktoré **udrží účet ChatGPT čistý**: heuris
 - **Bezpečnosť**: sandboxované rendrovanie HTML; minimálne host permissions (iba `https://chatgpt.com/*`).
 - **Výkon**: scan s cooldownom; žiadne ephemerálne okná; bez ťažkých DOM operácií.
 - **Stabilita**: limiter PATCH volaní, retry s backoff (max 2×).  
-- **DX/Údržba**: čistý modulárny kód; bohaté komentáre v EN; README/Agent.md.
+- **DX/Údržba**: čistý modulárny kód; bohaté komentáre v EN; README/AGENTS.md.
 
 ---
 
