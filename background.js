@@ -1565,6 +1565,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (Array.isArray(legacy.snapshot)) {
               legacy.snapshot = legacy.snapshot.slice(0, 25);
             }
+            if (Array.isArray(legacy.deleteIgnoredByText)) {
+              legacy.deleteIgnoredByText = legacy.deleteIgnoredByText.slice(0, 10);
+            }
             clone.legacyDebug = legacy;
           }
           return clone;

@@ -455,15 +455,60 @@ async function waitForDocumentTitleMatch(normalizedTargets, timeoutMs = 3600) {
   return false;
 }
 
-const DELETE_SELECTORS = [
+const MENU_ROOT_SELECTORS = [
+  '[role="menu"]',
+  '[data-testid*="menu"]',
+  '[id*="radix-portal"] [role="menu"]',
+  '.chakra-portal [role="menu"]',
+  '[data-overlay-container] [role="menu"]',
+  '[class*="popover"] [role="menu"]'
+];
+
+const DELETE_IN_MENU = [
   '[data-testid="delete-conversation"]',
   '[role="menuitem"][data-testid*="delete"]',
   '[role="menuitem"][aria-label*="Delete" i]',
-  'button[aria-label*="Delete" i]',
-  '[role="menuitem"]:has(svg[data-icon*="trash"])'
+  '[role="menuitem"]:has(svg[data-icon*="trash"])',
+  '[role="menuitem"]'
 ];
 
-const DELETE_TEXT_TOKENS = ['delete', 'remove', 'vymazať', 'zmazať', 'odstrániť'];
+const DELETE_IGNORE_TEXT = [
+  'search, click to remove',
+  'search',
+  'clear search',
+  'remove pin',
+  'unpin',
+  'remove from pinned',
+  'remove filter',
+  'remove label',
+  'odstrániť pripnutie',
+  'odstranit pripnutie',
+  'zrušiť vyhľadávanie',
+  'zrusit vyhladavanie',
+  'zrušiť filtr',
+  'zrusit filtr',
+  'odstrániť filter',
+  'odstranit filter',
+  'odstrániť filtr',
+  'odstranit filtr',
+  'odstrániť štítok',
+  'odstranit stitok',
+  'odstrániť značku',
+  'odstranit znacku'
+];
+
+const DELETE_TEXT_KEYS = [
+  'delete conversation',
+  'delete chat',
+  'delete',
+  'vymazať konverzáciu',
+  'zmazať konverzáciu',
+  'vymazať',
+  'zmazať',
+  'odstrániť'
+];
+
+const INLINE_CONFIRM_TEXT_KEYS = ['yes', 'confirm', 'delete', 'áno', 'potvrdiť', 'vymazať', 'zmazať'];
 
 const MORE_ACTIONS_BUTTON_SELECTORS = [
   'button[aria-label="More actions"]',
@@ -476,10 +521,9 @@ function collectMenuContainers(root = document) {
   if (!root || typeof root.querySelectorAll !== 'function') {
     return [];
   }
-  const selectors = ['[role="menu"]', '[data-testid*="menu"]'];
   const seen = new Set();
   const containers = [];
-  selectors.forEach((selector) => {
+  MENU_ROOT_SELECTORS.forEach((selector) => {
     let matches = [];
     try {
       matches = Array.from(root.querySelectorAll(selector));
@@ -584,6 +628,323 @@ function dumpMenuSnapshot(root = document) {
     });
   });
   return snapshot;
+}
+
+/* Slovensky komentar: Bezpecne vrati rect elementu vrátane sirky a vysky. */
+function getElementRect(node) {
+  if (!node || typeof node.getBoundingClientRect !== 'function') {
+    return null;
+  }
+  try {
+    const raw = node.getBoundingClientRect();
+    if (!raw) {
+      return null;
+    }
+    const width = Number(raw.width);
+    const height = Number(raw.height);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width === 0 || height === 0) {
+      return null;
+    }
+    const rawX = 'x' in raw ? raw.x : raw.left;
+    const rawY = 'y' in raw ? raw.y : raw.top;
+    const x = Number.isFinite(rawX) ? Number(rawX) : 0;
+    const y = Number.isFinite(rawY) ? Number(rawY) : 0;
+    return {
+      x,
+      y,
+      width,
+      height,
+      left: x,
+      top: y
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+/* Slovensky komentar: Spocita stred rect-u pre meranie vzdialenosti. */
+function rectCenter(rect) {
+  if (!rect || typeof rect !== 'object') {
+    return null;
+  }
+  const x = Number.isFinite(rect.x) ? rect.x : Number.isFinite(rect.left) ? rect.left : null;
+  const y = Number.isFinite(rect.y) ? rect.y : Number.isFinite(rect.top) ? rect.top : null;
+  const width = Number.isFinite(rect.width) ? rect.width : Number.isFinite(rect.w) ? rect.w : null;
+  const height = Number.isFinite(rect.height) ? rect.height : Number.isFinite(rect.h) ? rect.h : null;
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
+    return null;
+  }
+  return { x: x + width / 2, y: y + height / 2 };
+}
+
+/* Slovensky komentar: Vrati euklidovsku vzdialenost stredov dvoch rectov. */
+function rectDistance(a, b) {
+  const centerA = rectCenter(a);
+  const centerB = rectCenter(b);
+  if (!centerA || !centerB) {
+    return null;
+  }
+  return Math.hypot(centerA.x - centerB.x, centerA.y - centerB.y);
+}
+
+/* Slovensky komentar: Vyberie najlepsieho kandidata delete podla textu a polohy. */
+function pickBestDeleteCandidate(candidates, kebabRect) {
+  if (!Array.isArray(candidates) || !candidates.length) {
+    return null;
+  }
+  const kebabCenter = kebabRect ? rectCenter(kebabRect) : null;
+  const scored = candidates.map((candidate) => {
+    const rect = candidate.rect || getElementRect(candidate.node);
+    const center = rectCenter(rect);
+    const textLength = candidate.text ? candidate.text.length : candidate.ariaNormalized ? candidate.ariaNormalized.length : 999;
+    const horizontalDelta = kebabCenter && center ? center.x - kebabCenter.x : null;
+    const preferRight = horizontalDelta !== null && horizontalDelta >= 0 ? 0 : 1;
+    const horizontalDistance = horizontalDelta !== null ? Math.abs(horizontalDelta) : Number.POSITIVE_INFINITY;
+    return {
+      candidate,
+      textLength,
+      preferRight,
+      horizontalDistance
+    };
+  });
+  scored.sort((a, b) => {
+    if (a.preferRight !== b.preferRight) {
+      return a.preferRight - b.preferRight;
+    }
+    if (a.textLength !== b.textLength) {
+      return a.textLength - b.textLength;
+    }
+    if (a.horizontalDistance !== b.horizontalDistance) {
+      return a.horizontalDistance - b.horizontalDistance;
+    }
+    return 0;
+  });
+  return scored[0].candidate;
+}
+
+/* Slovensky komentar: Najde najblizsi koren menu podla rectu kebabu s observerom. */
+async function findMenuRootForButton(menuButton, { timeoutMs = 600 } = {}) {
+  const kebabRect = getElementRect(menuButton);
+  const startedAt = Date.now();
+
+  const evaluate = () => {
+    const seen = new Set();
+    const candidates = [];
+    MENU_ROOT_SELECTORS.forEach((selector) => {
+      const nodes = safeQueryAll(selector);
+      nodes.forEach((node) => {
+        if (!node || seen.has(node) || !node.isConnected) {
+          return;
+        }
+        if (!isNodeVisible(node)) {
+          return;
+        }
+        const rect = getElementRect(node);
+        if (!rect) {
+          return;
+        }
+        const items = collectMenuItems(node);
+        if (!items.length) {
+          return;
+        }
+        const distance = rectDistance(rect, kebabRect);
+        candidates.push({
+          node,
+          selector,
+          rect,
+          itemsCount: items.length,
+          distance: Number.isFinite(distance) ? distance : null
+        });
+        seen.add(node);
+      });
+    });
+    if (!candidates.length) {
+      return null;
+    }
+    candidates.sort((a, b) => {
+      const aDist = Number.isFinite(a.distance) ? a.distance : Number.POSITIVE_INFINITY;
+      const bDist = Number.isFinite(b.distance) ? b.distance : Number.POSITIVE_INFINITY;
+      if (aDist !== bDist) {
+        return aDist - bDist;
+      }
+      return (b.itemsCount || 0) - (a.itemsCount || 0);
+    });
+    return candidates[0];
+  };
+
+  const immediate = evaluate();
+  if (immediate) {
+    return { ...immediate, kebabRect };
+  }
+
+  return new Promise((resolve) => {
+    const observers = [];
+    let finished = false;
+    const finish = (value) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      observers.forEach((observer) => {
+        try {
+          observer.disconnect();
+        } catch (_error) {
+          // Slovensky komentar: Ignorujeme chybu pri odpojeni.
+        }
+      });
+      resolve(value);
+    };
+
+    try {
+      const observer = new MutationObserver(() => {
+        const candidate = evaluate();
+        if (candidate) {
+          finish({ ...candidate, kebabRect });
+        }
+      });
+      if (document && document.body) {
+        observer.observe(document.body, { childList: true, subtree: true });
+        observers.push(observer);
+      }
+    } catch (_error) {
+      // Slovensky komentar: Observer je best-effort.
+    }
+
+    const poll = async () => {
+      while (!finished && Date.now() - startedAt < timeoutMs) {
+        await waitHelper(70);
+        const candidate = evaluate();
+        if (candidate) {
+          finish({ ...candidate, kebabRect });
+          return;
+        }
+      }
+      finish(null);
+    };
+
+    poll();
+  });
+}
+
+/* Slovensky komentar: Sleduje, ci menu ostalo a ci pribudol inline confirm. */
+async function waitForConfirmPattern(menuRoot, ignoreNode, { timeoutMs = 1200 } = {}) {
+  if (!menuRoot || !menuRoot.isConnected) {
+    return { pattern: 'modal', node: null };
+  }
+  const tokens = INLINE_CONFIRM_TEXT_KEYS.map((token) => token.toLowerCase());
+  const startedAt = Date.now();
+
+  const evaluateInline = () => {
+    if (!menuRoot.isConnected || !isNodeVisible(menuRoot)) {
+      return { pattern: 'modal', node: null };
+    }
+    const items = collectMenuItems(menuRoot);
+    for (const item of items) {
+      if (!item || item === ignoreNode || !isNodeEnabled(item) || !isNodeVisible(item)) {
+        continue;
+      }
+      const text = readNormalized(item);
+      const ariaRaw = item && typeof item.getAttribute === 'function' ? item.getAttribute('aria-label') : '';
+      const ariaNormalized = typeof ariaRaw === 'string' ? ariaRaw.trim().toLowerCase() : '';
+      const bundle = `${text} ${ariaNormalized}`.trim();
+      if (!bundle) {
+        continue;
+      }
+      const hit = tokens.find((token) => bundle.includes(token));
+      if (hit) {
+        return {
+          pattern: 'inline',
+          node: item,
+          text,
+          token: hit
+        };
+      }
+    }
+    return null;
+  };
+
+  const immediateInline = evaluateInline();
+  if (immediateInline) {
+    return immediateInline;
+  }
+  if (!menuRoot.isConnected || !isNodeVisible(menuRoot)) {
+    return { pattern: 'modal', node: null };
+  }
+
+  return new Promise((resolve) => {
+    const observers = [];
+    let finished = false;
+    const finish = (value) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      observers.forEach((observer) => {
+        try {
+          observer.disconnect();
+        } catch (_error) {
+          // Slovensky komentar: Ignorujeme chybu pri odpojeni.
+        }
+      });
+      resolve(value);
+    };
+
+    const watchTarget = (target, options) => {
+      if (!target) {
+        return;
+      }
+      try {
+        const observer = new MutationObserver(() => {
+          if (!menuRoot.isConnected || !isNodeVisible(menuRoot)) {
+            finish({ pattern: 'modal', node: null });
+            return;
+          }
+          const inlineCandidate = evaluateInline();
+          if (inlineCandidate) {
+            finish(inlineCandidate);
+          }
+        });
+        observer.observe(target, options);
+        observers.push(observer);
+      } catch (_error) {
+        // Slovensky komentar: Ak observer zlyha, pokracujeme v poole.
+      }
+    };
+
+    watchTarget(menuRoot, { childList: true, subtree: true });
+    if (document && document.body) {
+      watchTarget(document.body, { childList: true, subtree: true });
+    }
+
+    const poll = async () => {
+      while (!finished && Date.now() - startedAt < timeoutMs) {
+        await waitHelper(80);
+        if (!menuRoot.isConnected || !isNodeVisible(menuRoot)) {
+          finish({ pattern: 'modal', node: null });
+          return;
+        }
+        const inlineCandidate = evaluateInline();
+        if (inlineCandidate) {
+          finish(inlineCandidate);
+          return;
+        }
+      }
+      if (!finished) {
+        if (!menuRoot.isConnected || !isNodeVisible(menuRoot)) {
+          finish({ pattern: 'modal', node: null });
+          return;
+        }
+        const inlineCandidate = evaluateInline();
+        if (inlineCandidate) {
+          finish(inlineCandidate);
+          return;
+        }
+        finish({ pattern: 'timeout', node: null });
+      }
+    };
+
+    poll();
+  });
 }
 
 /* Slovensky komentar: Vrati popis prvkov v dialógu pre debugovanie. */
@@ -853,58 +1214,166 @@ async function clickConfirmButton(btn) {
   }
 }
 
-function resolveDeleteMenuItem() {
+function resolveDeleteMenuItem(menuRoot, kebabRect, debug) {
+  const scope = menuRoot && menuRoot.isConnected ? menuRoot : document;
   const selectorsTried = [];
-  for (const selector of DELETE_SELECTORS) {
-    selectorsTried.push(selector);
-    let candidate = null;
-    try {
-      candidate = document.querySelector(selector);
-    } catch (_error) {
-      candidate = null;
-    }
-    if (candidate && isNodeEnabled(candidate)) {
-      return {
-        node: candidate,
-        selector,
-        strategy: 'selector',
-        selectorsTried: [...selectorsTried],
-        menuSnapshotCount: countMenuItems(document),
-        textToken: null,
-        ariaLabel: candidate.getAttribute ? candidate.getAttribute('aria-label') || null : null,
-        role: candidate.getAttribute ? candidate.getAttribute('role') || null : null
-      };
-    }
-  }
+  const ignoreTokens = DELETE_IGNORE_TEXT.map((token) => token.toLowerCase());
+  const allowedTokens = DELETE_TEXT_KEYS.map((token) => token.toLowerCase());
+  const seen = new Set();
+  const stageBuckets = {
+    testid: [],
+    aria: [],
+    icon: [],
+    text: []
+  };
+  const ignoredTexts = [];
 
-  const menuItems = collectMenuItems();
-  const lowerTokens = DELETE_TEXT_TOKENS.map((token) => token.toLowerCase());
-  for (const node of menuItems) {
-    const normalizedText = readNormalized(node);
-    const ariaLabel = node && node.getAttribute ? node.getAttribute('aria-label') : null;
-    for (const token of lowerTokens) {
-      const ariaMatch = ariaLabel && ariaLabel.toLowerCase().includes(token);
-      if (normalizedText.includes(token) || ariaMatch) {
-        return {
-          node,
-          selector: null,
-          strategy: 'text',
-          selectorsTried: [...selectorsTried],
-          menuSnapshotCount: menuItems.length,
-          textToken: token,
-          ariaLabel: ariaLabel || null,
-          role: node && node.getAttribute ? node.getAttribute('role') || null : null
-        };
+  const rememberIgnored = (text) => {
+    if (!text) {
+      return;
+    }
+    const normalized = truncate(text, 160);
+    if (!ignoredTexts.includes(normalized)) {
+      ignoredTexts.push(normalized);
+    }
+  };
+
+  const shouldIgnore = (text, aria) => {
+    const bundle = [text || '', aria || '']
+      .map((value) => (typeof value === 'string' ? value.toLowerCase() : ''))
+      .join(' ')
+      .trim();
+    if (!bundle) {
+      return false;
+    }
+    return ignoreTokens.some((token) => bundle.includes(token));
+  };
+
+  const matchDeleteToken = (text, aria) => {
+    const normalizedText = typeof text === 'string' ? text.toLowerCase() : '';
+    const normalizedAria = typeof aria === 'string' ? aria.toLowerCase() : '';
+    for (const token of allowedTokens) {
+      if (normalizedText.includes(token) || normalizedAria.includes(token)) {
+        return token;
       }
     }
+    return null;
+  };
+
+  const registerCandidate = (node, selector, stage, matchToken = null) => {
+    if (!node || seen.has(node) || !isNodeEnabled(node) || !isNodeVisible(node)) {
+      return;
+    }
+    const text = readNormalized(node);
+    const ariaLabelRaw = node && typeof node.getAttribute === 'function' ? node.getAttribute('aria-label') : null;
+    const ariaNormalized = typeof ariaLabelRaw === 'string' ? ariaLabelRaw.trim().toLowerCase() : '';
+    if (shouldIgnore(text, ariaNormalized)) {
+      rememberIgnored(text || ariaNormalized || '');
+      return;
+    }
+    const candidate = {
+      node,
+      selector,
+      via: stage,
+      text,
+      ariaLabel: ariaLabelRaw || null,
+      ariaNormalized,
+      textToken: matchToken,
+      rect: getElementRect(node),
+      role: node && typeof node.getAttribute === 'function' ? node.getAttribute('role') || null : null,
+      testid: node && typeof node.getAttribute === 'function' ? node.getAttribute('data-testid') || null : null
+    };
+    stageBuckets[stage].push(candidate);
+    seen.add(node);
+  };
+
+  const collectBySelector = (selector, stage, { requireTextMatch = false } = {}) => {
+    selectorsTried.push(selector);
+    let nodes = [];
+    try {
+      nodes = Array.from(scope.querySelectorAll(selector));
+    } catch (_error) {
+      nodes = [];
+    }
+    nodes.forEach((node) => {
+      const text = readNormalized(node);
+      const ariaLabelRaw = node && typeof node.getAttribute === 'function' ? node.getAttribute('aria-label') : null;
+      const ariaNormalized = typeof ariaLabelRaw === 'string' ? ariaLabelRaw.trim().toLowerCase() : '';
+      const ignore = shouldIgnore(text, ariaNormalized);
+      if (ignore) {
+        rememberIgnored(text || ariaNormalized || '');
+        return;
+      }
+      let matchToken = null;
+      if (requireTextMatch) {
+        matchToken = matchDeleteToken(text, ariaNormalized);
+        if (!matchToken) {
+          return;
+        }
+      }
+      registerCandidate(node, selector, stage, matchToken);
+    });
+  };
+
+  const selectorConfig = [
+    { selector: DELETE_IN_MENU[0], stage: 'testid' },
+    { selector: DELETE_IN_MENU[1], stage: 'testid' },
+    { selector: DELETE_IN_MENU[2], stage: 'aria' },
+    { selector: DELETE_IN_MENU[3], stage: 'icon' },
+    { selector: DELETE_IN_MENU[4], stage: 'text', requireTextMatch: true }
+  ];
+
+  selectorConfig.forEach(({ selector, stage, requireTextMatch }) => {
+    collectBySelector(selector, stage, { requireTextMatch: Boolean(requireTextMatch) });
+  });
+
+  const menuItems = collectMenuItems(scope);
+  const totalCandidates = Object.values(stageBuckets).reduce((acc, list) => acc + list.length, 0);
+  debug.deleteCandidatesTotal = totalCandidates;
+  debug.deleteIgnoredByText = ignoredTexts.slice(0, 8);
+
+  const stageOrder = ['testid', 'aria', 'icon', 'text'];
+  let chosenStage = null;
+  let chosenCandidate = null;
+  for (const stage of stageOrder) {
+    if (stageBuckets[stage].length) {
+      chosenStage = stage;
+      chosenCandidate = pickBestDeleteCandidate(stageBuckets[stage], kebabRect || null);
+      break;
+    }
   }
 
+  if (!chosenCandidate) {
+    return {
+      node: null,
+      selector: null,
+      strategy: null,
+      selectorsTried: [...selectorsTried],
+      menuSnapshotCount: menuItems.length,
+      menuRoot: scope,
+      via: null,
+      textToken: null,
+      ariaLabel: null,
+      role: null,
+      text: null
+    };
+  }
+
+  debug.deleteChosenVia = chosenStage || null;
+  debug.deleteChosenText = chosenCandidate.text || chosenCandidate.ariaNormalized || null;
+
   return {
-    node: null,
-    selector: null,
-    strategy: null,
+    node: chosenCandidate.node,
+    selector: chosenCandidate.selector,
+    strategy: chosenStage === 'text' ? 'text' : 'selector',
     selectorsTried: [...selectorsTried],
-    menuSnapshotCount: menuItems.length
+    menuSnapshotCount: menuItems.length,
+    menuRoot: scope,
+    via: chosenStage,
+    textToken: chosenCandidate.textToken || null,
+    ariaLabel: chosenCandidate.ariaLabel || null,
+    role: chosenCandidate.role || null,
+    text: chosenCandidate.text || null
   };
 }
 
@@ -916,19 +1385,47 @@ function makeDeleteGetter(resolution) {
     if (resolution.node && resolution.node.isConnected) {
       return resolution.node;
     }
-    if (resolution.selector) {
+    const scope = resolution.menuRoot && resolution.menuRoot.isConnected ? resolution.menuRoot : document;
+    if (resolution.selector && resolution.strategy !== 'text') {
       try {
-        const node = document.querySelector(resolution.selector);
-        if (node && isNodeEnabled(node)) {
-          return node;
+        const nodes = Array.from(scope.querySelectorAll(resolution.selector)).filter(
+          (node) => node && isNodeEnabled(node) && isNodeVisible(node)
+        );
+        if (nodes.length === 1) {
+          return nodes[0];
+        }
+        if (nodes.length > 1) {
+          const expectedText = typeof resolution.text === 'string' ? resolution.text : null;
+          if (expectedText) {
+            const textMatch = nodes.find((node) => readNormalized(node) === expectedText);
+            if (textMatch) {
+              return textMatch;
+            }
+          }
+          const expectedAria = typeof resolution.ariaLabel === 'string'
+            ? resolution.ariaLabel.toLowerCase()
+            : null;
+          if (expectedAria) {
+            const ariaMatch = nodes.find((node) => {
+              const aria = node && typeof node.getAttribute === 'function' ? node.getAttribute('aria-label') : null;
+              return aria && aria.toLowerCase() === expectedAria;
+            });
+            if (ariaMatch) {
+              return ariaMatch;
+            }
+          }
+          return nodes[0];
         }
       } catch (_error) {
         return null;
       }
     }
     if (resolution.strategy === 'text') {
-      const items = collectMenuItems();
+      const items = collectMenuItems(scope);
       for (const node of items) {
+        if (!isNodeEnabled(node) || !isNodeVisible(node)) {
+          continue;
+        }
         const normalizedText = readNormalized(node);
         const ariaLabel = node && node.getAttribute ? node.getAttribute('aria-label') : null;
         if (!resolution.textToken) {
@@ -938,7 +1435,8 @@ function makeDeleteGetter(resolution) {
           continue;
         }
         const token = resolution.textToken;
-        if (normalizedText.includes(token) || (ariaLabel && ariaLabel.toLowerCase().includes(token))) {
+        const ariaNormalized = ariaLabel && typeof ariaLabel === 'string' ? ariaLabel.toLowerCase() : '';
+        if (normalizedText.includes(token) || ariaNormalized.includes(token)) {
           return node;
         }
       }
@@ -979,9 +1477,12 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
   };
   const startedAt = Date.now();
   const debug = {
-    selectors: [...DELETE_SELECTORS]
+    selectors: [...DELETE_IN_MENU]
   };
-  ctx.selectorsTried.menu = Array.from(new Set([...ctx.selectorsTried.menu, ...MORE_ACTIONS_BUTTON_SELECTORS]));
+  debug.confirmSelectors = [];
+  ctx.selectorsTried.menu = Array.from(
+    new Set([...ctx.selectorsTried.menu, ...MORE_ACTIONS_BUTTON_SELECTORS, ...MENU_ROOT_SELECTORS])
+  );
 
   const finalize = (result) => {
     const elapsed = Date.now() - startedAt;
@@ -1027,31 +1528,59 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
   }
   steps.menu = true;
 
-  const containers = collectMenuContainers();
-  const firstContainer = containers.length ? containers[0] : null;
-  debug.menuContainerRole = firstContainer && firstContainer.getAttribute ? firstContainer.getAttribute('role') || null : null;
-  debug.menuContainerTestid = firstContainer && firstContainer.getAttribute ? firstContainer.getAttribute('data-testid') || null : null;
-  const menuItemsCount = countMenuItems();
+  const menuRootWaitStarted = Date.now();
+  const menuRootResolution = await findMenuRootForButton(menuButton, { timeoutMs: 600 });
+  const menuRootElapsed = Date.now() - menuRootWaitStarted;
+  ctx.timings.menuRootFindMs = menuRootElapsed;
+  debug.menuRootFindMs = menuRootElapsed;
+  debug.menuRootStrategy = 'proximity';
+  debug.menuRootSelectorMatched = null;
+  debug.menuRootDistance = null;
+  debug.menuRootItemsCount = null;
+
+  if (!menuRootResolution || !menuRootResolution.node) {
+    ctx.reason = 'menu_not_found';
+    CWARN('menu_not_found', { phase: 'menu_root', elapsedMs: menuRootElapsed });
+    return finalize({ ok: false, reason: 'menu_not_found', steps, debug, elapsedMs: Date.now() - startedAt });
+  }
+
+  const menuRootNode = menuRootResolution.node;
+  const menuItemsCount = countMenuItems(menuRootNode);
+  debug.menuRootSelectorMatched = menuRootResolution.selector || null;
+  debug.menuRootDistance = Number.isFinite(menuRootResolution.distance)
+    ? Math.round(menuRootResolution.distance * 10) / 10
+    : null;
+  debug.menuRootItemsCount = Number.isFinite(menuRootResolution.itemsCount)
+    ? menuRootResolution.itemsCount
+    : menuItemsCount;
+  debug.menuContainerRole = menuRootNode && menuRootNode.getAttribute ? menuRootNode.getAttribute('role') || null : null;
+  debug.menuContainerTestid = menuRootNode && menuRootNode.getAttribute ? menuRootNode.getAttribute('data-testid') || null : null;
   debug.menuItems = menuItemsCount;
-  const fullMenuSnapshot = dumpMenuSnapshot();
+
+  const fullMenuSnapshot = dumpMenuSnapshot(menuRootNode);
   ctx.menuSnapshot = fullMenuSnapshot;
   ctx.menuSnapshotCount = Array.isArray(fullMenuSnapshot) ? fullMenuSnapshot.length : 0;
   debug.menuSnapshotCount = ctx.menuSnapshotCount;
-  CINFO('menu opened', { items: menuItemsCount, containerRole: debug.menuContainerRole, elapsedMs: menuClickElapsed });
+  CINFO('menu opened', {
+    items: menuItemsCount,
+    containerRole: debug.menuContainerRole,
+    elapsedMs: menuClickElapsed,
+    rootSelector: debug.menuRootSelectorMatched
+  });
 
-  CDBG('probing delete selectors', [...DELETE_SELECTORS]);
-  const resolution = resolveDeleteMenuItem();
-  const triedSelectors = resolution.selectorsTried || [...DELETE_SELECTORS];
+  CDBG('probing delete selectors', [...DELETE_IN_MENU]);
+  const resolution = resolveDeleteMenuItem(menuRootNode, menuRootResolution.kebabRect || null, debug);
+  const triedSelectors = resolution.selectorsTried || [...DELETE_IN_MENU];
   debug.selectorsTried = triedSelectors;
   ctx.selectorsTried.delete = Array.from(new Set([...ctx.selectorsTried.delete, ...triedSelectors]));
 
   if (!resolution.node) {
     ctx.reason = 'delete_item_not_found';
-    const snapshot = Array.isArray(fullMenuSnapshot) ? fullMenuSnapshot : dumpMenuSnapshot();
+    const snapshot = Array.isArray(fullMenuSnapshot) ? fullMenuSnapshot : dumpMenuSnapshot(menuRootNode);
     debug.snapshot = snapshot.slice(0, 25);
     ctx.menuSnapshot = snapshot;
     ctx.menuSnapshotCount = Array.isArray(snapshot) ? snapshot.length : 0;
-    CERR('delete_item_not_found', { selectorsTried: [...DELETE_SELECTORS], snapshot: debug.snapshot });
+    CERR('delete_item_not_found', { selectorsTried: [...DELETE_IN_MENU], snapshot: debug.snapshot });
     return finalize({
       ok: false,
       reason: 'delete_item_not_found',
@@ -1067,7 +1596,8 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
     ariaLabel: resolution.ariaLabel || null,
     role: resolution.role || null,
     textToken: resolution.textToken || null,
-    text: resolution.node ? readNormalized(resolution.node) : null
+    text: resolution.text || (resolution.node ? readNormalized(resolution.node) : null),
+    via: resolution.via || null
   };
 
   const deleteGetter = makeDeleteGetter(resolution);
@@ -1077,6 +1607,7 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
   debug.deleteClickMs = deleteElapsed;
   debug.deleteClickOk = Boolean(itemResult.ok);
   ctx.timings.deleteMs = deleteElapsed;
+  ctx.timings.deleteClickMs = deleteElapsed;
   CDBG('click delete item', {
     selector: resolution.selector || null,
     strategy: resolution.strategy || null,
@@ -1089,14 +1620,82 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
   }
   steps.item = true;
 
+  let confirmFindTotal = 0;
+  const confirmDetectStarted = Date.now();
+  const confirmPatternResult = await waitForConfirmPattern(menuRootNode, resolution.node || null, { timeoutMs: 1200 });
+  const confirmDetectElapsed = Date.now() - confirmDetectStarted;
+  confirmFindTotal += confirmDetectElapsed;
+  const initialPattern = confirmPatternResult ? confirmPatternResult.pattern : null;
+  debug.confirmPattern = initialPattern || null;
+
+  if (confirmPatternResult && confirmPatternResult.pattern === 'inline' && confirmPatternResult.node) {
+    ctx.timings.confirmFindMs = confirmFindTotal;
+    const inlineNode = confirmPatternResult.node;
+    const inlineToken = confirmPatternResult.token || null;
+    const inlineText = confirmPatternResult.text || null;
+    const inlineGetter = () => {
+      if (inlineNode && inlineNode.isConnected) {
+        return inlineNode;
+      }
+      const scope = menuRootNode && menuRootNode.isConnected ? menuRootNode : document;
+      const items = collectMenuItems(scope);
+      for (const node of items) {
+        if (!isNodeEnabled(node) || !isNodeVisible(node)) {
+          continue;
+        }
+        const text = readNormalized(node);
+        const ariaRaw = node && typeof node.getAttribute === 'function' ? node.getAttribute('aria-label') : '';
+        const ariaNormalized = typeof ariaRaw === 'string' ? ariaRaw.trim().toLowerCase() : '';
+        if (inlineToken) {
+          if (text.includes(inlineToken) || ariaNormalized.includes(inlineToken)) {
+            return node;
+          }
+        } else if (inlineText && text === inlineText) {
+          return node;
+        }
+      }
+      return null;
+    };
+    const confirmActionStarted = Date.now();
+    const inlineResult = await clickAndWait(inlineGetter, { timeoutMs: 1200 });
+    const confirmElapsed = Date.now() - confirmActionStarted;
+    ctx.timings.confirmMs = confirmElapsed;
+    ctx.timings.confirmClickMs = confirmElapsed;
+    debug.confirmActionMs = confirmElapsed;
+    ctx.confirmVia = 'inline_menu';
+    debug.confirmVia = 'inline_menu';
+    const inlineElement = inlineResult && inlineResult.element ? inlineResult.element : inlineGetter();
+    debug.confirmButtonLabel = inlineElement ? readNormalized(inlineElement) : readNormalized(inlineNode);
+    ctx.dialogSnapshot = [];
+    ctx.dialogSnapshotCount = 0;
+    debug.dialogSnapshotCount = 0;
+    if (!inlineResult.ok) {
+      ctx.reason = 'ui_click_failed';
+      return finalize({ ok: false, reason: 'ui_click_failed', steps, debug, elapsedMs: Date.now() - startedAt });
+    }
+    steps.confirm = true;
+    const totalElapsedInline = Date.now() - startedAt;
+    debug.totalMs = totalElapsedInline;
+    ctx.reason = 'ok';
+    ctx.timings.totalUiMs = totalElapsedInline;
+    CINFO('delete flow completed', { elapsedMs: totalElapsedInline, confirmVia: 'inline_menu' });
+    return finalize({ ok: true, reason: 'ui_delete_ok', steps, debug, elapsedMs: totalElapsedInline });
+  }
+
+  debug.confirmPattern = 'modal';
+
   const dialogWaitStarted = Date.now();
   const dialog = await waitForConfirmDialogAppear(1200);
   const dialogElapsed = Date.now() - dialogWaitStarted;
+  confirmFindTotal += dialogElapsed;
   ctx.timings.dialogMs = dialogElapsed;
+  ctx.timings.confirmFindMs = confirmFindTotal;
   debug.dialogWaitMs = dialogElapsed;
   if (!dialog) {
     ctx.reason = 'confirm_dialog_not_found';
     ctx.dialogSnapshot = [];
+    ctx.dialogSnapshotCount = 0;
+    debug.dialogSnapshotCount = 0;
     ctx.selectorsTried.confirm = [...CONFIRM_SELECTORS, 'text'];
     CWARN('confirm_dialog_not_found', { elapsedMs: dialogElapsed });
     return finalize({ ok: false, reason: 'confirm_dialog_not_found', steps, debug, elapsedMs: Date.now() - startedAt });
@@ -1123,6 +1722,7 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
   await clickConfirmButton(confirmMatch.node);
   const confirmElapsed = Date.now() - confirmActionStarted;
   ctx.timings.confirmMs = confirmElapsed;
+  ctx.timings.confirmClickMs = confirmElapsed;
   debug.confirmActionMs = confirmElapsed;
   ctx.confirmVia = confirmMatch.via || null;
   debug.confirmVia = confirmMatch.via || null;
@@ -1323,7 +1923,17 @@ function makeOrchestratorReport(ctx) {
   };
   const rawTimings = source.timings && typeof source.timings === 'object' ? source.timings : {};
   const timings = {};
-  ['menuMs', 'deleteMs', 'dialogMs', 'confirmMs', 'totalUiMs'].forEach((key) => {
+  [
+    'menuMs',
+    'deleteMs',
+    'dialogMs',
+    'confirmMs',
+    'totalUiMs',
+    'menuRootFindMs',
+    'deleteClickMs',
+    'confirmFindMs',
+    'confirmClickMs'
+  ].forEach((key) => {
     const value = Number(rawTimings[key]);
     if (Number.isFinite(value)) {
       timings[key] = value;
