@@ -6,6 +6,26 @@ const COOLDOWN_KEY = typeof COOLDOWN_STORAGE_KEY !== 'undefined' ? COOLDOWN_STOR
 /* Slovensky komentar: Limit na velkost HTML odpovede pre zalohu. */
 const MAX_ANSWER_BYTES = 250 * 1024;
 
+/* Slovensky komentar: Lokalny prepínac pre verbose logovanie v runneri. */
+let RUNNER_VERBOSE_CONSOLE = false;
+try {
+  chrome.storage.local.get({ VERBOSE_CONSOLE: false }, (stored) => {
+    RUNNER_VERBOSE_CONSOLE = Boolean(stored && stored.VERBOSE_CONSOLE);
+  });
+} catch (_error) {
+  RUNNER_VERBOSE_CONSOLE = false;
+}
+if (chrome && chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes && changes.VERBOSE_CONSOLE) {
+      RUNNER_VERBOSE_CONSOLE = Boolean(changes.VERBOSE_CONSOLE.newValue);
+    }
+  });
+}
+
+/* Slovensky komentar: Strucny prehlad kodov pre runner log. */
+const RUNNER_REASON_CODES_HINT = 'ok|sidebar_open_failed|convo_not_found|select_load_timeout|menu_not_found|delete_item_not_found|confirm_dialog_not_found|ui_click_failed';
+
 /* Slovensky komentar: Vrati hlboku kopiu predvolenych nastaveni. */
 function createDefaultSettingsSnapshot() {
   const base = typeof SETTINGS_DEFAULTS === 'object' && SETTINGS_DEFAULTS
@@ -1526,6 +1546,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const retriableReasons = new Set(['menu_not_found', 'select_load_timeout', 'ui_click_failed']);
+        const sanitizeUiDebug = (payload) => {
+          if (!payload || typeof payload !== 'object') {
+            return null;
+          }
+          const clone = { ...payload };
+          if (Array.isArray(clone.menuSnapshot)) {
+            clone.menuSnapshot = clone.menuSnapshot.slice(0, 20);
+          }
+          if (Array.isArray(clone.dialogSnapshot)) {
+            clone.dialogSnapshot = clone.dialogSnapshot.slice(0, 20);
+          }
+          if (Array.isArray(clone.snapshot)) {
+            clone.snapshot = clone.snapshot.slice(0, 25);
+          }
+          if (clone.legacyDebug && typeof clone.legacyDebug === 'object') {
+            const legacy = { ...clone.legacyDebug };
+            if (Array.isArray(legacy.snapshot)) {
+              legacy.snapshot = legacy.snapshot.slice(0, 25);
+            }
+            clone.legacyDebug = legacy;
+          }
+          return clone;
+        };
         let attempt = 0;
         let uiResponse = null;
         let lastError = null;
@@ -1560,12 +1603,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ? 'ui_delete_ok'
             : 'ui_click_failed';
 
-          const debugPayload = uiResponse && uiResponse.debug && typeof uiResponse.debug === 'object'
-            ? { ...uiResponse.debug }
+          const rawDebug = uiResponse && uiResponse.debug && typeof uiResponse.debug === 'object'
+            ? uiResponse.debug
             : null;
-          if (debugPayload && Array.isArray(debugPayload.snapshot)) {
-            debugPayload.snapshot = debugPayload.snapshot.slice(0, 25);
-          }
+          const debugPayload = sanitizeUiDebug(rawDebug);
+          const confirmVia = debugPayload && typeof debugPayload.confirmVia === 'string'
+            ? debugPayload.confirmVia
+            : debugPayload && debugPayload.legacyDebug && typeof debugPayload.legacyDebug.confirmVia === 'string'
+            ? debugPayload.legacyDebug.confirmVia
+            : null;
           const responseSteps = uiResponse && uiResponse.steps && typeof uiResponse.steps === 'object'
             ? {
                 sidebar: Boolean(uiResponse.steps.sidebar),
@@ -1585,6 +1631,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             matchSource: uiResponse && typeof uiResponse.matchSource === 'string' ? uiResponse.matchSource : null,
             debug: debugPayload
           };
+          if (RUNNER_VERBOSE_CONSOLE) {
+            const uiMsValue = Number.isFinite(summary.uiMs) ? summary.uiMs : (attemptDetail.elapsedMs || null);
+            const uiMsText = Number.isFinite(uiMsValue) ? uiMsValue : 'n/a';
+            const reasonText = reasonRaw || 'unknown';
+            const sourceText = attemptDetail.matchSource || 'null';
+            const confirmText = confirmVia || 'null';
+            console.info(`[MyChatGPT][runner] uiMs=${uiMsText}, reason=${reasonText}, matchSource=${sourceText}, confirmVia=${confirmText} | codes=${RUNNER_REASON_CODES_HINT}`);
+          }
           summary.ui.attempts.push(attemptDetail);
           summary.ui.attemptsCount = summary.ui.attempts.length;
           summary.ui.debug = attemptDetail.debug;
@@ -1628,12 +1682,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         summary.ui.steps = steps;
         summary.ui.ok = Boolean(uiResponse.ok);
         summary.ui.matchSource = typeof uiResponse.matchSource === 'string' ? uiResponse.matchSource : null;
-        summary.ui.debug = uiResponse && uiResponse.debug && typeof uiResponse.debug === 'object'
-          ? { ...uiResponse.debug }
-          : null;
-        if (summary.ui.debug && Array.isArray(summary.ui.debug.snapshot)) {
-          summary.ui.debug.snapshot = summary.ui.debug.snapshot.slice(0, 25);
-        }
+        summary.ui.debug = sanitizeUiDebug(
+          uiResponse && uiResponse.debug && typeof uiResponse.debug === 'object' ? uiResponse.debug : null
+        );
 
         if (!summary.ui.attempts.length) {
           summary.ui.attempts.push({

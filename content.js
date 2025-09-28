@@ -465,6 +465,13 @@ const DELETE_SELECTORS = [
 
 const DELETE_TEXT_TOKENS = ['delete', 'remove', 'vymazať', 'zmazať', 'odstrániť'];
 
+const MORE_ACTIONS_BUTTON_SELECTORS = [
+  'button[aria-label="More actions"]',
+  'button[aria-haspopup="menu"][aria-label*="More"]',
+  'button[aria-label="Options"]',
+  'button[aria-label="More"]'
+];
+
 function collectMenuContainers(root = document) {
   if (!root || typeof root.querySelectorAll !== 'function') {
     return [];
@@ -579,6 +586,273 @@ function dumpMenuSnapshot(root = document) {
   return snapshot;
 }
 
+/* Slovensky komentar: Vrati popis prvkov v dialógu pre debugovanie. */
+function dumpDialogSnapshot(dialog) {
+  if (!dialog || typeof dialog.querySelectorAll !== 'function') {
+    return [];
+  }
+  const nodes = Array.from(dialog.querySelectorAll('button, [role], [data-testid]'));
+  const snapshot = [];
+  nodes.forEach((node, index) => {
+    if (!node) {
+      return;
+    }
+    let rect = null;
+    try {
+      const box = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null;
+      if (box) {
+        rect = {
+          x: Number(box.x) || 0,
+          y: Number(box.y) || 0,
+          w: Number(box.width) || 0,
+          h: Number(box.height) || 0
+        };
+      }
+    } catch (_error) {
+      rect = null;
+    }
+    const role = typeof node.getAttribute === 'function' ? node.getAttribute('role') : null;
+    const testid = typeof node.getAttribute === 'function' ? node.getAttribute('data-testid') : null;
+    const ariaLabel = typeof node.getAttribute === 'function' ? node.getAttribute('aria-label') : null;
+    const classes = typeof node.className === 'string'
+      ? node.className
+      : typeof node.getAttribute === 'function'
+      ? node.getAttribute('class')
+      : '';
+    snapshot.push({
+      index,
+      text: readNormalized(node),
+      ariaLabel: ariaLabel || null,
+      role: role || null,
+      testid: testid || null,
+      classes: classes || '',
+      rect,
+      visible: isNodeVisible(node)
+    });
+  });
+  return snapshot;
+}
+
+/* Slovensky komentar: Zbiera kandidatske dialógy so sirokym pokrytím. */
+function collectDialogs(root = document) {
+  const selectors = [
+    '[role="dialog"]',
+    '[role="alertdialog"]',
+    '[data-state="open"]',
+    '[data-headlessui-state]',
+    '.ReactModalPortal .ReactModal__Content',
+    '[data-radix-portal] [role="dialog"]',
+    '.modal, .Modal, .chakra-modal__content',
+    '[data-overlay-container] [role="dialog"]',
+    '[data-testid*="confirm"]'
+  ];
+  const set = new Set();
+  selectors.forEach((selector) => {
+    let nodes = [];
+    try {
+      nodes = Array.from(root.querySelectorAll(selector));
+    } catch (_error) {
+      nodes = [];
+    }
+    nodes.forEach((node) => {
+      if (node) {
+        set.add(node);
+      }
+    });
+  });
+  return Array.from(set).filter((node) => isNodeVisible(node));
+}
+
+/* Slovensky komentar: Vrati najvrchnejsi dialóg podla z-index a poradia. */
+function getTopMostDialog() {
+  const dialogs = collectDialogs();
+  if (!dialogs.length) {
+    return null;
+  }
+  dialogs.sort((a, b) => {
+    const zDiff = numericZIndex(b) - numericZIndex(a);
+    if (zDiff !== 0) {
+      return zDiff;
+    }
+    if (a === b) {
+      return 0;
+    }
+    const position = a.compareDocumentPosition ? a.compareDocumentPosition(b) : 0;
+    if (position & Node.DOCUMENT_POSITION_FOLLOWING) {
+      return 1;
+    }
+    if (position & Node.DOCUMENT_POSITION_PRECEDING) {
+      return -1;
+    }
+    return 0;
+  });
+  return dialogs[0];
+}
+
+/* Slovensky komentar: Pocka na zobrazenie dialógu s progresivnym fallbackom. */
+async function waitForConfirmDialogAppear(timeoutMs = 1200) {
+  let dialog = getTopMostDialog();
+  if (dialog) {
+    return dialog;
+  }
+  let resolver = null;
+  let finished = false;
+  const waitPromise = new Promise((resolve) => {
+    resolver = (value) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      resolve(value);
+    };
+  });
+  const observer = new MutationObserver(() => {
+    const candidate = getTopMostDialog();
+    if (candidate) {
+      resolver(candidate);
+    }
+  });
+  try {
+    observer.observe(document.body, { childList: true, subtree: true });
+  } catch (_error) {
+    // Slovensky komentar: Ak nie je body, preskocime observer.
+    if (resolver) {
+      resolver(null);
+    }
+  }
+  const timer = setTimeout(() => resolver(null), timeoutMs);
+  dialog = await waitPromise;
+  clearTimeout(timer);
+  observer.disconnect();
+  if (dialog) {
+    return dialog;
+  }
+  const delays = [200, 350, 500];
+  for (const delay of delays) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    const retry = getTopMostDialog();
+    if (retry) {
+      return retry;
+    }
+  }
+  return null;
+}
+
+const CONFIRM_SELECTORS = [
+  '[data-testid="confirm-delete"]',
+  'button[data-testid*="confirm"]',
+  '[role="button"][data-testid*="confirm"]',
+  'button[aria-label*="Delete" i]',
+  'button',
+  '[role="button"]'
+];
+
+const CONFIRM_TEXT_KEYS = [
+  'delete',
+  'confirm',
+  'yes',
+  'ok',
+  'vymazať',
+  'zmazať',
+  'odstrániť',
+  'potvrdiť',
+  'áno',
+  'okej'
+];
+
+/* Slovensky komentar: Porovna text/aria s podporou lokalizacie. */
+function textMatches(node, keys = CONFIRM_TEXT_KEYS) {
+  if (!node) {
+    return false;
+  }
+  const label = typeof node.getAttribute === 'function' ? node.getAttribute('aria-label') || '' : '';
+  const raw = `${node.innerText || ''} ${label}`.toLowerCase();
+  return keys.some((key) => raw.includes(key));
+}
+
+/* Slovensky komentar: Najde potvrdenie v dialógu s logom pokusov. */
+function findConfirmButtonInDialog(dialog, trace = []) {
+  if (!dialog) {
+    return null;
+  }
+  for (const selector of CONFIRM_SELECTORS.slice(0, 4)) {
+    trace.push(selector);
+    let candidate = null;
+    try {
+      candidate = dialog.querySelector(selector);
+    } catch (_error) {
+      candidate = null;
+    }
+    if (candidate && isNodeVisible(candidate)) {
+      return { node: candidate, via: selector };
+    }
+  }
+  trace.push('text');
+  let textCandidates = [];
+  try {
+    textCandidates = Array.from(
+      dialog.querySelectorAll(`${CONFIRM_SELECTORS[4]}, ${CONFIRM_SELECTORS[5]}`)
+    );
+  } catch (_error) {
+    textCandidates = [];
+  }
+  for (const candidate of textCandidates) {
+    if (!isNodeVisible(candidate)) {
+      continue;
+    }
+    if (textMatches(candidate)) {
+      return { node: candidate, via: 'text' };
+    }
+  }
+  return null;
+}
+
+/* Slovensky komentar: Klikne na potvrdenie s fallbackom na klavesnicu. */
+async function clickConfirmButton(btn) {
+  if (!btn) {
+    return;
+  }
+  try {
+    btn.scrollIntoView({ block: 'center', inline: 'center' });
+  } catch (_scrollError) {
+    // Slovensky komentar: Scroll zlyhanie ignorujeme.
+  }
+  try {
+    if (typeof btn.focus === 'function') {
+      btn.focus({ preventScroll: true });
+    }
+  } catch (_focusError) {
+    // Slovensky komentar: Focus nie je kriticky.
+  }
+  const events = [
+    ['pointerdown', { bubbles: true }],
+    ['mousedown', { bubbles: true }],
+    ['pointerup', { bubbles: true }],
+    ['mouseup', { bubbles: true }]
+  ];
+  events.forEach(([type, init]) => {
+    try {
+      btn.dispatchEvent(new MouseEvent(type, init));
+    } catch (_eventError) {
+      // Slovensky komentar: Ak udalost zlyha, pokracujeme.
+    }
+  });
+  try {
+    btn.click();
+  } catch (_clickError) {
+    // Slovensky komentar: Klik nemusí byt podporeny (napr. inert shadow), pokracujeme.
+  }
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  if (document.body.contains(btn) && document.activeElement === btn) {
+    try {
+      btn.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      btn.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+    } catch (_keyboardError) {
+      // Slovensky komentar: Klavesnicovy fallback je best-effort.
+    }
+  }
+}
+
 function resolveDeleteMenuItem() {
   const selectorsTried = [];
   for (const selector of DELETE_SELECTORS) {
@@ -674,7 +948,28 @@ function makeDeleteGetter(resolution) {
 }
 
 /* Slovensky komentar: Spolocna cast mazania cez menu s rozsirenym logovanim. */
-async function executeMenuDeletionSteps(baseSteps = {}) {
+async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
+  const ctx = attemptCtx && typeof attemptCtx === 'object' ? attemptCtx : {};
+  if (!ctx.steps || typeof ctx.steps !== 'object') {
+    ctx.steps = {};
+  }
+  if (!ctx.timings || typeof ctx.timings !== 'object') {
+    ctx.timings = {};
+  }
+  if (!ctx.selectorsTried || typeof ctx.selectorsTried !== 'object') {
+    ctx.selectorsTried = { menu: [], delete: [], confirm: [] };
+  }
+  ctx.selectorsTried.menu = Array.isArray(ctx.selectorsTried.menu) ? ctx.selectorsTried.menu : [];
+  ctx.selectorsTried.delete = Array.isArray(ctx.selectorsTried.delete) ? ctx.selectorsTried.delete : [];
+  ctx.selectorsTried.confirm = Array.isArray(ctx.selectorsTried.confirm) ? ctx.selectorsTried.confirm : [];
+  if (!Array.isArray(ctx.menuSnapshot)) {
+    ctx.menuSnapshot = null;
+  }
+  if (!Array.isArray(ctx.dialogSnapshot)) {
+    ctx.dialogSnapshot = null;
+  }
+  ctx.confirmVia = ctx.confirmVia || null;
+
   const steps = {
     sidebar: Boolean(baseSteps.sidebar),
     select: Boolean(baseSteps.select),
@@ -686,14 +981,36 @@ async function executeMenuDeletionSteps(baseSteps = {}) {
   const debug = {
     selectors: [...DELETE_SELECTORS]
   };
+  ctx.selectorsTried.menu = Array.from(new Set([...ctx.selectorsTried.menu, ...MORE_ACTIONS_BUTTON_SELECTORS]));
+
+  const finalize = (result) => {
+    const elapsed = Date.now() - startedAt;
+    if (!Number.isFinite(result.elapsedMs)) {
+      result.elapsedMs = elapsed;
+    }
+    ctx.steps = {
+      sidebar: Boolean(steps.sidebar),
+      select: Boolean(steps.select),
+      menu: Boolean(steps.menu),
+      item: Boolean(steps.item),
+      confirm: Boolean(steps.confirm)
+    };
+    if (!ctx.reason) {
+      ctx.reason = result.reason || (result.ok ? 'ok' : null);
+    }
+    ctx.timings.totalUiMs = Number.isFinite(ctx.timings.totalUiMs) ? ctx.timings.totalUiMs : elapsed;
+    ctx.legacyDebug = { ...debug };
+    return result;
+  };
 
   const beforeMenuItems = countMenuItems();
   debug.menuItemsBefore = beforeMenuItems;
 
   const menuButton = findMoreActionsButton();
   if (!menuButton) {
+    ctx.reason = 'menu_not_found';
     CWARN('menu_not_found', { phase: 'more_actions_button' });
-    return { ok: false, reason: 'menu_not_found', steps, debug, elapsedMs: Date.now() - startedAt };
+    return finalize({ ok: false, reason: 'menu_not_found', steps, debug, elapsedMs: Date.now() - startedAt });
   }
 
   const menuClickStarted = Date.now();
@@ -702,9 +1019,11 @@ async function executeMenuDeletionSteps(baseSteps = {}) {
   debug.menuClickMs = menuClickElapsed;
   debug.menuClickOk = Boolean(menuClick.ok);
   debug.menuItemsAfterMenuClick = countMenuItems();
+  ctx.timings.menuMs = menuClickElapsed;
   CDBG('click menu button', { elapsedMs: menuClickElapsed, ok: menuClick.ok, items: debug.menuItemsAfterMenuClick });
   if (!menuClick.ok) {
-    return { ok: false, reason: 'ui_click_failed', steps, debug, elapsedMs: Date.now() - startedAt };
+    ctx.reason = 'ui_click_failed';
+    return finalize({ ok: false, reason: 'ui_click_failed', steps, debug, elapsedMs: Date.now() - startedAt });
   }
   steps.menu = true;
 
@@ -714,28 +1033,32 @@ async function executeMenuDeletionSteps(baseSteps = {}) {
   debug.menuContainerTestid = firstContainer && firstContainer.getAttribute ? firstContainer.getAttribute('data-testid') || null : null;
   const menuItemsCount = countMenuItems();
   debug.menuItems = menuItemsCount;
+  const fullMenuSnapshot = dumpMenuSnapshot();
+  ctx.menuSnapshot = fullMenuSnapshot;
+  ctx.menuSnapshotCount = Array.isArray(fullMenuSnapshot) ? fullMenuSnapshot.length : 0;
+  debug.menuSnapshotCount = ctx.menuSnapshotCount;
   CINFO('menu opened', { items: menuItemsCount, containerRole: debug.menuContainerRole, elapsedMs: menuClickElapsed });
 
   CDBG('probing delete selectors', [...DELETE_SELECTORS]);
   const resolution = resolveDeleteMenuItem();
-  debug.selectorsTried = resolution.selectorsTried || [...DELETE_SELECTORS];
-  debug.menuSnapshotCount = Number.isFinite(resolution.menuSnapshotCount)
-    ? resolution.menuSnapshotCount
-    : menuItemsCount;
+  const triedSelectors = resolution.selectorsTried || [...DELETE_SELECTORS];
+  debug.selectorsTried = triedSelectors;
+  ctx.selectorsTried.delete = Array.from(new Set([...ctx.selectorsTried.delete, ...triedSelectors]));
 
   if (!resolution.node) {
-    const snapshot = dumpMenuSnapshot();
-    const limited = snapshot.slice(0, 25);
-    debug.snapshot = limited;
-    debug.menuSnapshotCount = snapshot.length;
-    CERR('delete_item_not_found', { selectorsTried: [...DELETE_SELECTORS], snapshot: limited });
-    return {
+    ctx.reason = 'delete_item_not_found';
+    const snapshot = Array.isArray(fullMenuSnapshot) ? fullMenuSnapshot : dumpMenuSnapshot();
+    debug.snapshot = snapshot.slice(0, 25);
+    ctx.menuSnapshot = snapshot;
+    ctx.menuSnapshotCount = Array.isArray(snapshot) ? snapshot.length : 0;
+    CERR('delete_item_not_found', { selectorsTried: [...DELETE_SELECTORS], snapshot: debug.snapshot });
+    return finalize({
       ok: false,
       reason: 'delete_item_not_found',
       steps,
       debug,
       elapsedMs: Date.now() - startedAt
-    };
+    });
   }
 
   debug.deleteMatch = {
@@ -753,6 +1076,7 @@ async function executeMenuDeletionSteps(baseSteps = {}) {
   const deleteElapsed = Date.now() - deleteClickStarted;
   debug.deleteClickMs = deleteElapsed;
   debug.deleteClickOk = Boolean(itemResult.ok);
+  ctx.timings.deleteMs = deleteElapsed;
   CDBG('click delete item', {
     selector: resolution.selector || null,
     strategy: resolution.strategy || null,
@@ -760,31 +1084,58 @@ async function executeMenuDeletionSteps(baseSteps = {}) {
     ok: itemResult.ok
   });
   if (!itemResult.ok) {
-    const reason = itemResult.element ? 'ui_click_failed' : 'ui_click_failed';
-    return { ok: false, reason, steps, debug, elapsedMs: Date.now() - startedAt };
+    ctx.reason = 'ui_click_failed';
+    return finalize({ ok: false, reason: 'ui_click_failed', steps, debug, elapsedMs: Date.now() - startedAt });
   }
   steps.item = true;
 
-  const confirmClickStarted = Date.now();
-  const confirmResult = await clickAndWait(() => findDeleteConfirmButton(), { timeoutMs: 2500 });
-  const confirmElapsed = Date.now() - confirmClickStarted;
-  debug.confirmClickMs = confirmElapsed;
-  debug.confirmClickOk = Boolean(confirmResult.ok);
-  CDBG('click confirm delete', { elapsedMs: confirmElapsed, ok: confirmResult.ok });
-  if (!confirmResult.ok) {
-    const reason = confirmResult.element ? 'ui_click_failed' : 'confirm_dialog_not_found';
-    if (reason === 'confirm_dialog_not_found') {
-      CWARN('confirm_dialog_not_found', { elapsedMs: confirmElapsed });
-    }
-    return { ok: false, reason, steps, debug, elapsedMs: Date.now() - startedAt };
+  const dialogWaitStarted = Date.now();
+  const dialog = await waitForConfirmDialogAppear(1200);
+  const dialogElapsed = Date.now() - dialogWaitStarted;
+  ctx.timings.dialogMs = dialogElapsed;
+  debug.dialogWaitMs = dialogElapsed;
+  if (!dialog) {
+    ctx.reason = 'confirm_dialog_not_found';
+    ctx.dialogSnapshot = [];
+    ctx.selectorsTried.confirm = [...CONFIRM_SELECTORS, 'text'];
+    CWARN('confirm_dialog_not_found', { elapsedMs: dialogElapsed });
+    return finalize({ ok: false, reason: 'confirm_dialog_not_found', steps, debug, elapsedMs: Date.now() - startedAt });
   }
+
+  const dialogSnapshot = dumpDialogSnapshot(dialog);
+  ctx.dialogSnapshot = dialogSnapshot;
+  ctx.dialogSnapshotCount = Array.isArray(dialogSnapshot) ? dialogSnapshot.length : 0;
+  debug.dialogSnapshotCount = ctx.dialogSnapshotCount;
+
+  const confirmTrace = [];
+  const confirmMatch = findConfirmButtonInDialog(dialog, confirmTrace);
+  ctx.selectorsTried.confirm = Array.from(new Set([...ctx.selectorsTried.confirm, ...confirmTrace]));
+  debug.confirmSelectors = [...confirmTrace];
+
+  if (!confirmMatch || !confirmMatch.node) {
+    ctx.reason = 'confirm_dialog_not_found';
+    debug.dialogSnapshot = dialogSnapshot.slice(0, 25);
+    CERR('confirm_dialog_not_found', { selectorsTried: confirmTrace, snapshot: debug.dialogSnapshot });
+    return finalize({ ok: false, reason: 'confirm_dialog_not_found', steps, debug, elapsedMs: Date.now() - startedAt });
+  }
+
+  const confirmActionStarted = Date.now();
+  await clickConfirmButton(confirmMatch.node);
+  const confirmElapsed = Date.now() - confirmActionStarted;
+  ctx.timings.confirmMs = confirmElapsed;
+  debug.confirmActionMs = confirmElapsed;
+  ctx.confirmVia = confirmMatch.via || null;
+  debug.confirmVia = confirmMatch.via || null;
+  debug.confirmButtonLabel = readNormalized(confirmMatch.node);
+
   steps.confirm = true;
-  debug.confirmButtonLabel = confirmResult.element ? readNormalized(confirmResult.element) : null;
 
   const totalElapsed = Date.now() - startedAt;
   debug.totalMs = totalElapsed;
-  CINFO('delete flow completed', { elapsedMs: totalElapsed });
-  return { ok: true, reason: 'ui_delete_ok', steps, debug, elapsedMs: totalElapsed };
+  ctx.reason = 'ok';
+  ctx.timings.totalUiMs = totalElapsed;
+  CINFO('delete flow completed', { elapsedMs: totalElapsed, confirmVia: confirmMatch.via || null });
+  return finalize({ ok: true, reason: 'ui_delete_ok', steps, debug, elapsedMs: totalElapsed });
 }
 
 /* Slovensky komentar: Bezpecne vrati pole kandidatov podla selektora (ignoruje syntakticke chyby). */
@@ -827,6 +1178,55 @@ function readNormalized(node) {
     return window.normText(node);
   }
   return normalizeNodeText(node);
+}
+
+/* Slovensky komentar: Skontroluje viditelnost a interaktivnost prvku v UI. */
+function isNodeVisible(node) {
+  if (!node || !(node instanceof Element)) {
+    return false;
+  }
+  let style = null;
+  try {
+    style = getComputedStyle(node);
+  } catch (_error) {
+    return false;
+  }
+  if (!style) {
+    return false;
+  }
+  if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
+    return false;
+  }
+  if (style.pointerEvents === 'none') {
+    return false;
+  }
+  if (typeof node.closest === 'function' && node.closest('[inert]')) {
+    return false;
+  }
+  let rect = null;
+  try {
+    rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null;
+  } catch (_rectError) {
+    rect = null;
+  }
+  if (!rect || rect.width === 0 || rect.height === 0) {
+    return false;
+  }
+  return true;
+}
+
+/* Slovensky komentar: Vrati numericky z-index alebo nulu. */
+function numericZIndex(el) {
+  if (!el || !(el instanceof Element)) {
+    return 0;
+  }
+  try {
+    const raw = getComputedStyle(el).zIndex;
+    const num = Number(raw);
+    return Number.isFinite(num) ? num : 0;
+  } catch (_error) {
+    return 0;
+  }
 }
 
 /* Slovensky komentar: Overi, ci je element interaktivny a nie je zakazany. */
@@ -899,45 +1299,89 @@ async function clickAndWait(sel, { textEquals = null, timeoutMs = 1500 } = {}) {
   return { ok: true, element, elapsedMs: Date.now() - start };
 }
 
+/* Slovensky komentar: Skrati retazec na bezpecnu dlzku. */
+function truncate(value, max = 400) {
+  if (typeof value !== 'string') {
+    return value;
+  }
+  if (value.length <= max) {
+    return value;
+  }
+  return `${value.slice(0, max)}…`;
+}
+
+/* Slovensky komentar: Pripravi finalny report pre orchestrator konzolu. */
+function makeOrchestratorReport(ctx) {
+  const source = ctx && typeof ctx === 'object' ? ctx : {};
+  const rawSteps = source.steps && typeof source.steps === 'object' ? source.steps : {};
+  const steps = {
+    sidebar: Boolean(rawSteps.sidebar),
+    select: Boolean(rawSteps.select),
+    menu: Boolean(rawSteps.menu),
+    item: Boolean(rawSteps.item),
+    confirm: Boolean(rawSteps.confirm)
+  };
+  const rawTimings = source.timings && typeof source.timings === 'object' ? source.timings : {};
+  const timings = {};
+  ['menuMs', 'deleteMs', 'dialogMs', 'confirmMs', 'totalUiMs'].forEach((key) => {
+    const value = Number(rawTimings[key]);
+    if (Number.isFinite(value)) {
+      timings[key] = value;
+    }
+  });
+  const rawSelectors = source.selectorsTried && typeof source.selectorsTried === 'object' ? source.selectorsTried : {};
+  const selectorsTried = {
+    menu: Array.isArray(rawSelectors.menu) ? [...rawSelectors.menu] : [],
+    delete: Array.isArray(rawSelectors.delete) ? [...rawSelectors.delete] : [],
+    confirm: Array.isArray(rawSelectors.confirm) ? [...rawSelectors.confirm] : []
+  };
+  const menuSnapshot = Array.isArray(source.menuSnapshot) ? source.menuSnapshot.slice(0, 20) : null;
+  const dialogSnapshot = Array.isArray(source.dialogSnapshot) ? source.dialogSnapshot.slice(0, 20) : null;
+  const report = {
+    kind: 'MyChatGPT:UIDeleteAttempt',
+    ts: Date.now(),
+    url: typeof location !== 'undefined' && location ? location.href : null,
+    title: typeof source.title === 'string' ? truncate(source.title, 400) : source.title || null,
+    alternativesCount: Array.isArray(source.alternatives) ? source.alternatives.length : 0,
+    matchSource: source.matchSource || null,
+    steps,
+    timings,
+    selectorsTried,
+    menuSnapshot,
+    menuSnapshotCount: Number.isFinite(source.menuSnapshotCount) ? source.menuSnapshotCount : menuSnapshot ? menuSnapshot.length : 0,
+    dialogSnapshot,
+    dialogSnapshotCount: Number.isFinite(source.dialogSnapshotCount) ? source.dialogSnapshotCount : dialogSnapshot ? dialogSnapshot.length : 0,
+    confirmVia: source.confirmVia || null,
+    reason: source.reason || 'ok'
+  };
+  if (source.legacyDebug && typeof source.legacyDebug === 'object') {
+    const legacy = { ...source.legacyDebug };
+    if (Array.isArray(legacy.snapshot)) {
+      legacy.snapshot = legacy.snapshot.slice(0, 20);
+    }
+    report.legacyDebug = legacy;
+  }
+  return report;
+}
+
+/* Slovensky komentar: Zalogu report a vrati JSON pre runner. */
+function logOrchestratorReport(ctx) {
+  try {
+    const report = makeOrchestratorReport(ctx);
+    console.info('[OrchestratorReport]', JSON.stringify(report));
+    return report;
+  } catch (error) {
+    console.error('[MyChatGPT][content] report_error', error);
+    return null;
+  }
+}
+
 /* Slovensky komentar: Najde tlacidlo pre kebab menu dostupne vo view. */
 function findMoreActionsButton() {
-  const selectors = [
-    'button[aria-label="More actions"]',
-    'button[aria-haspopup="menu"][aria-label*="More"]',
-    'button[aria-label="Options"]',
-    'button[aria-label="More"]'
-  ];
-  for (const selector of selectors) {
+  for (const selector of MORE_ACTIONS_BUTTON_SELECTORS) {
     const candidates = safeQueryAll(`${selector}:not([disabled])`).filter((node) => isNodeEnabled(node));
     if (candidates.length) {
       return candidates[0];
-    }
-  }
-  return null;
-}
-
-/* Slovensky komentar: Najde tlacidlo Delete v potvrzovacom dialogu. */
-function findDeleteConfirmButton() {
-  const dialogs = safeQueryAll('[role="dialog"], [role="alertdialog"]');
-  for (const dialog of dialogs) {
-    const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]'));
-    for (const node of buttons) {
-      if (!isNodeEnabled(node)) {
-        continue;
-      }
-      if (readNormalized(node).includes('delete')) {
-        return node;
-      }
-    }
-  }
-
-  const fallbackButtons = safeQueryAll('button, [role="button"]');
-  for (const node of fallbackButtons) {
-    if (!isNodeEnabled(node)) {
-      continue;
-    }
-    if (readNormalized(node).includes('delete')) {
-      return node;
     }
   }
   return null;
@@ -1048,28 +1492,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const normalizedTargets = [];
       const seen = new Set();
       const targetMeta = new Map();
+      const sanitizedAlternatives = altInputs
+        .filter((value) => typeof value === 'string' && value.trim())
+        .map((value) => value.trim());
+      const orchestratorCtx = {
+        title: rawTitle || null,
+        alternatives: sanitizedAlternatives,
+        matchSource: null,
+        steps: { ...steps },
+        selectorsTried: { menu: [], delete: [], confirm: [] },
+        timings: {},
+        menuSnapshot: null,
+        dialogSnapshot: null,
+        confirmVia: null,
+        reason: null
+      };
       const respond = (payload) => {
         const baseSteps = payload && payload.steps ? payload.steps : steps;
+        const normalizedSteps = {
+          sidebar: Boolean(baseSteps.sidebar),
+          select: Boolean(baseSteps.select),
+          menu: Boolean(baseSteps.menu),
+          item: Boolean(baseSteps.item),
+          confirm: Boolean(baseSteps.confirm)
+        };
+        orchestratorCtx.steps = { ...normalizedSteps };
+        const inferredReason = payload && typeof payload.reason === 'string'
+          ? payload.reason
+          : payload && payload.ok
+          ? 'ok'
+          : orchestratorCtx.reason || null;
+        if (inferredReason) {
+          orchestratorCtx.reason = inferredReason === 'ui_delete_ok' ? 'ok' : inferredReason;
+        }
+        const resolvedMatchSource = payload && Object.prototype.hasOwnProperty.call(payload, 'matchSource')
+          ? payload.matchSource
+          : matchSource || orchestratorCtx.matchSource || null;
+        orchestratorCtx.matchSource = resolvedMatchSource;
+        if (!Number.isFinite(orchestratorCtx.timings.totalUiMs)) {
+          orchestratorCtx.timings.totalUiMs = Date.now() - startedAt;
+        }
+        const report = logOrchestratorReport(orchestratorCtx);
         const response = {
           ok: false,
-          steps: {
-            sidebar: Boolean(baseSteps.sidebar),
-            select: Boolean(baseSteps.select),
-            menu: Boolean(baseSteps.menu),
-            item: Boolean(baseSteps.item),
-            confirm: Boolean(baseSteps.confirm)
-          },
-          matchSource: matchSource || null,
+          steps: normalizedSteps,
           ts: Date.now(),
           ...payload
         };
-        if (!('matchSource' in payload)) {
-          response.matchSource = matchSource || null;
-        }
+        response.matchSource = resolvedMatchSource;
+        response.debug = report;
         if (typeof response.elapsedMs !== 'number') {
           response.elapsedMs = Date.now() - startedAt;
         }
-        sendResponse(response);
+        if (typeof response.ok !== 'boolean') {
+          response.ok = Boolean(payload && payload.ok);
+        }
+        return sendResponse(response);
       };
       const registerTarget = (value, source) => {
         const normalized = normalizeTitleValue(value);
@@ -1085,6 +1563,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       let matchSource = null;
 
       if (!normalizedTargets.length) {
+        orchestratorCtx.reason = 'missing_title';
         respond({ ok: false, reason: 'missing_title', matchSource: null });
         return;
       }
@@ -1101,6 +1580,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (ensureResult.reason === 'already_visible') {
               steps.sidebar = true;
             }
+            orchestratorCtx.reason = reason;
             respond({ ok: false, reason, steps });
             return;
           }
@@ -1108,25 +1588,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const { node: conversationNode, matchSource: nodeMatchSource } = findConversationNodeByTitles(normalizedTargets, targetMeta);
           if (nodeMatchSource) {
             matchSource = nodeMatchSource;
+            orchestratorCtx.matchSource = nodeMatchSource;
           }
           if (!conversationNode) {
+            orchestratorCtx.reason = 'convo_not_found';
             respond({ ok: false, reason: 'convo_not_found', steps });
             return;
           }
           const selectResult = await clickAndWait(() => conversationNode, { timeoutMs: 2000 });
           if (!selectResult.ok) {
+            orchestratorCtx.reason = 'ui_click_failed';
             respond({ ok: false, reason: 'ui_click_failed', steps });
             return;
           }
           steps.select = true;
           const loaded = await waitForDocumentTitleMatch(normalizedTargets, 3600);
           if (!loaded) {
+            orchestratorCtx.reason = 'select_load_timeout';
             respond({ ok: false, reason: 'select_load_timeout', steps });
             return;
           }
           const postLoadMatch = resolveMatchSource(getDocumentConversationTitle(), normalizedTargets, targetMeta);
           if (postLoadMatch) {
             matchSource = postLoadMatch;
+            orchestratorCtx.matchSource = postLoadMatch;
           }
         } else {
           steps.select = true;
@@ -1136,20 +1621,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const activeSource = resolveMatchSource(currentTitle, normalizedTargets, targetMeta);
           if (activeSource) {
             matchSource = activeSource;
+            orchestratorCtx.matchSource = activeSource;
           }
         }
 
-        const result = await executeMenuDeletionSteps(steps);
+        const result = await executeMenuDeletionSteps(steps, orchestratorCtx);
         respond({
           ok: result.ok,
           reason: result.reason,
           steps: result.steps,
           matchSource: matchSource || null,
-          debug: result.debug || null,
           elapsedMs: typeof result.elapsedMs === 'number' ? result.elapsedMs : undefined
         });
       } catch (error) {
         const messageText = error && error.message ? error.message : String(error);
+        orchestratorCtx.reason = 'ui_click_failed';
         respond({ ok: false, reason: 'ui_click_failed', steps, error: messageText });
       }
     })();
@@ -1166,23 +1652,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         confirm: false
       };
       const startedAt = Date.now();
+      const activeTitle = getDocumentConversationTitle() || document.title || '';
+      const orchestratorCtx = {
+        title: activeTitle || null,
+        alternatives: [],
+        matchSource: 'active_conversation',
+        steps: { ...steps },
+        selectorsTried: { menu: [], delete: [], confirm: [] },
+        timings: {},
+        menuSnapshot: null,
+        dialogSnapshot: null,
+        confirmVia: null,
+        reason: null
+      };
       try {
-        const result = await executeMenuDeletionSteps(steps);
+        const result = await executeMenuDeletionSteps(steps, orchestratorCtx);
+        orchestratorCtx.reason = result.ok ? 'ok' : result.reason || orchestratorCtx.reason;
+        const report = logOrchestratorReport(orchestratorCtx);
         sendResponse({
           ok: result.ok,
           reason: result.reason,
           steps: result.steps,
-          debug: result.debug || null,
+          debug: report,
           ts: Date.now(),
           elapsedMs: typeof result.elapsedMs === 'number' ? result.elapsedMs : Date.now() - startedAt
         });
       } catch (error) {
         const messageText = error && error.message ? error.message : String(error);
+        orchestratorCtx.reason = 'ui_click_failed';
+        orchestratorCtx.timings.totalUiMs = Date.now() - startedAt;
+        const report = logOrchestratorReport(orchestratorCtx);
         sendResponse({
           ok: false,
           reason: 'ui_click_failed',
           steps,
           error: messageText,
+          debug: report,
           ts: Date.now(),
           elapsedMs: Date.now() - startedAt
         });
