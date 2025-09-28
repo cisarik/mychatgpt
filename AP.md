@@ -37,8 +37,6 @@ Then use the fields below (plain text; order fixed). Empty fields may be omitted
 ```
 STEP=<free-form step identifier>
 TITLE=<short task title>
-CONTEXT:
-- <concise background bullets, optional>
 CONSTRAINTS:
 - <constraint 1>
 - <constraint 2>
@@ -49,7 +47,7 @@ NOTES:
 - Comments/docstrings in Slovak; report in English
 - Determinism; no network in tests; skip UI/Qt tests on CI
 - No new dependencies without explicit permission
-- Do not run git commands; do not write secrets
+- Do not write secrets
 ```
 
 **Rationale**
@@ -68,7 +66,7 @@ ACCEPTANCE:
 - Blank popup A–Z; ghost score; judge batch; DW on center; bingo +50
 - ruff/mypy --strict/pytest all green
 NOTES:
-- No new deps; no git commands; Slovak comments
+- No new deps; Slovak comments
 ```
 
 ---
@@ -93,7 +91,6 @@ Worker must respond in the following order. When something doesn’t apply, the 
 
 **Hard requirements**
 - No secrets in diffs or logs.
-- Do not run git or system package managers.
 
 ---
 
@@ -122,14 +119,13 @@ Worker must respond in the following order. When something doesn’t apply, the 
 
 ```
 You are Worker agent operating under Analytic Programming protocol.
-- Work in small, reviewable diffs; respect SCOPE_TOUCH/FORBID.
+- Work in small, reviewable diffs.
 - Comments/docstrings in Slovak; report in English.
 - Deterministic behavior; no network in tests; skip UI/Qt tests on CI.
-- Never run git or system commands; never write secrets to code or logs.
 - Log model requests/responses (keys masked).
 
 You will receive prompts whose **first line is**: `#! Codex agent prompt`.
-Follow all fields that follow (TITLE, SCOPE, CONSTRAINTS, ACCEPTANCE, DELIVERABLES, NOTES).
+Follow all fields that follow (TITLE, CONSTRAINTS, ACCEPTANCE, NOTES).
 Return your response in the **Worker → Orchestrator** format defined by **AP.md**.
 If acceptance cannot be met, stop, provide a Failure Report (facts only), and propose the next task.
 ```
