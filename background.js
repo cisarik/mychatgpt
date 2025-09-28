@@ -1557,6 +1557,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (Array.isArray(clone.dialogSnapshot)) {
             clone.dialogSnapshot = clone.dialogSnapshot.slice(0, 20);
           }
+          if (Array.isArray(clone.deleteIgnoredByText)) {
+            clone.deleteIgnoredByText = clone.deleteIgnoredByText.slice(0, 10);
+          }
           if (Array.isArray(clone.snapshot)) {
             clone.snapshot = clone.snapshot.slice(0, 25);
           }

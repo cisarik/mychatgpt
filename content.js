@@ -459,9 +459,18 @@ const MENU_ROOT_SELECTORS = [
   '[role="menu"]',
   '[data-testid*="menu"]',
   '[id*="radix-portal"] [role="menu"]',
+  '[data-radix-popper-content-wrapper]',
   '.chakra-portal [role="menu"]',
   '[data-overlay-container] [role="menu"]',
   '[class*="popover"] [role="menu"]'
+];
+
+const VISUAL_LAYER_CANDIDATE_SELECTORS = [
+  '[role="menu"]',
+  '[data-testid*="menu"]',
+  '[data-radix-popper-content-wrapper]',
+  '[data-radix-portal] *',
+  '.chakra-portal *'
 ];
 
 const DELETE_IN_MENU = [
@@ -469,7 +478,9 @@ const DELETE_IN_MENU = [
   '[role="menuitem"][data-testid*="delete"]',
   '[role="menuitem"][aria-label*="Delete" i]',
   '[role="menuitem"]:has(svg[data-icon*="trash"])',
-  '[role="menuitem"]'
+  'button[aria-label*="Delete" i]',
+  '[role="menuitem"]',
+  'button'
 ];
 
 const DELETE_IGNORE_TEXT = [
@@ -481,6 +492,8 @@ const DELETE_IGNORE_TEXT = [
   'remove from pinned',
   'remove filter',
   'remove label',
+  'close sidebar',
+  'open sidebar',
   'odstrániť pripnutie',
   'odstranit pripnutie',
   'zrušiť vyhľadávanie',
@@ -515,6 +528,14 @@ const MORE_ACTIONS_BUTTON_SELECTORS = [
   'button[aria-haspopup="menu"][aria-label*="More"]',
   'button[aria-label="Options"]',
   'button[aria-label="More"]'
+];
+
+const HEADER_MENU_BUTTON_SELECTORS = [
+  'header button[aria-label*="More" i]',
+  'main header button[aria-label*="More" i]',
+  'header button[aria-haspopup="menu"]',
+  'main [role="toolbar"] button[aria-haspopup="menu"]',
+  'main button[aria-haspopup="menu"][aria-label*="More" i]'
 ];
 
 function collectMenuContainers(root = document) {
@@ -687,6 +708,10 @@ function rectDistance(a, b) {
   return Math.hypot(centerA.x - centerB.x, centerA.y - centerB.y);
 }
 
+function centerDistance(a, b) {
+  return rectDistance(a, b);
+}
+
 /* Slovensky komentar: Vyberie najlepsieho kandidata delete podla textu a polohy. */
 function pickBestDeleteCandidate(candidates, kebabRect) {
   if (!Array.isArray(candidates) || !candidates.length) {
@@ -722,65 +747,276 @@ function pickBestDeleteCandidate(candidates, kebabRect) {
   return scored[0].candidate;
 }
 
-/* Slovensky komentar: Najde najblizsi koren menu podla rectu kebabu s observerom. */
-async function findMenuRootForButton(menuButton, { timeoutMs = 600 } = {}) {
-  const kebabRect = getElementRect(menuButton);
-  const startedAt = Date.now();
-
-  const evaluate = () => {
-    const seen = new Set();
-    const candidates = [];
-    MENU_ROOT_SELECTORS.forEach((selector) => {
-      const nodes = safeQueryAll(selector);
-      nodes.forEach((node) => {
-        if (!node || seen.has(node) || !node.isConnected) {
-          return;
-        }
-        if (!isNodeVisible(node)) {
-          return;
-        }
-        const rect = getElementRect(node);
-        if (!rect) {
-          return;
-        }
-        const items = collectMenuItems(node);
-        if (!items.length) {
-          return;
-        }
-        const distance = rectDistance(rect, kebabRect);
-        candidates.push({
-          node,
-          selector,
-          rect,
-          itemsCount: items.length,
-          distance: Number.isFinite(distance) ? distance : null
-        });
-        seen.add(node);
-      });
-    });
-    if (!candidates.length) {
-      return null;
-    }
-    candidates.sort((a, b) => {
-      const aDist = Number.isFinite(a.distance) ? a.distance : Number.POSITIVE_INFINITY;
-      const bDist = Number.isFinite(b.distance) ? b.distance : Number.POSITIVE_INFINITY;
-      if (aDist !== bDist) {
-        return aDist - bDist;
+function matchVisualLayerSelector(node) {
+  if (!node || typeof node.matches !== 'function') {
+    return null;
+  }
+  for (const selector of VISUAL_LAYER_CANDIDATE_SELECTORS) {
+    try {
+      if (node.matches(selector)) {
+        return selector;
       }
-      return (b.itemsCount || 0) - (a.itemsCount || 0);
-    });
-    return candidates[0];
+    } catch (_error) {
+      // Slovensky komentar: Neplatny selector ignorujeme.
+    }
+  }
+  return null;
+}
+
+function hasInteractiveMenuItems(node) {
+  if (!node || !(node instanceof Element)) {
+    return false;
+  }
+  try {
+    if (typeof node.matches === 'function' && node.matches('button, [role="menuitem"]')) {
+      return true;
+    }
+  } catch (_error) {
+    // Slovensky komentar: matches zlyhanie ignorujeme.
+  }
+  try {
+    const found = node.querySelector('button, [role="menuitem"]');
+    return Boolean(found);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function resolveMenuLayerCandidate(node) {
+  let current = node && node instanceof Element ? node : null;
+  while (current && current !== document.body) {
+    if (!isNodeVisible(current)) {
+      current = current.parentElement;
+      continue;
+    }
+    const rect = getElementRect(current);
+    if (!rect) {
+      current = current.parentElement;
+      continue;
+    }
+    let style = null;
+    try {
+      style = getComputedStyle(current);
+    } catch (_error) {
+      style = null;
+    }
+    const position = style ? style.position : '';
+    const zIndex = style ? Number(style.zIndex) : Number.NaN;
+    const selectorMatch = matchVisualLayerSelector(current);
+    const matchesLayer = selectorMatch
+      || position === 'fixed'
+      || position === 'absolute';
+    const zIndexOk = selectorMatch ? true : Number.isFinite(zIndex) ? zIndex >= 10 : numericZIndex(current) >= 10;
+    if (matchesLayer && zIndexOk && hasInteractiveMenuItems(current)) {
+      return {
+        node: current,
+        selector: selectorMatch,
+        rect,
+        zIndex: Number.isFinite(zIndex) ? zIndex : numericZIndex(current)
+      };
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+function gatherKebabMeta(button) {
+  if (!button || !(button instanceof Element)) {
+    return {
+      element: button || null,
+      rect: null,
+      ariaExpanded: null,
+      ariaControls: null
+    };
+  }
+  const rect = getElementRect(button);
+  const ariaExpanded = typeof button.getAttribute === 'function' ? button.getAttribute('aria-expanded') : null;
+  const ariaControls = typeof button.getAttribute === 'function' ? button.getAttribute('aria-controls') : null;
+  return {
+    element: button,
+    rect,
+    ariaExpanded: ariaExpanded || null,
+    ariaControls: ariaControls || null
+  };
+}
+
+function captureVisualLayerSnapshot(limit = 20) {
+  if (!document || !document.body) {
+    return [];
+  }
+  const nodes = [];
+  const elements = Array.from(document.body.getElementsByTagName('*'));
+  elements.forEach((node) => {
+    if (!(node instanceof Element)) {
+      return;
+    }
+    if (!isNodeVisible(node)) {
+      return;
+    }
+    let style = null;
+    try {
+      style = getComputedStyle(node);
+    } catch (_error) {
+      style = null;
+    }
+    if (!style) {
+      return;
+    }
+    if (style.position !== 'fixed' && style.position !== 'absolute') {
+      return;
+    }
+    const zIndex = Number(style.zIndex);
+    if (!Number.isFinite(zIndex) || zIndex < 10) {
+      return;
+    }
+    const rect = getElementRect(node);
+    if (!rect) {
+      return;
+    }
+    nodes.push({ node, rect, zIndex });
+  });
+  nodes.sort((a, b) => b.zIndex - a.zIndex);
+  return nodes.slice(0, limit).map(({ node, rect, zIndex }) => ({
+    className: typeof node.className === 'string' ? node.className : '',
+    role: typeof node.getAttribute === 'function' ? node.getAttribute('role') || null : null,
+    testid: typeof node.getAttribute === 'function' ? node.getAttribute('data-testid') || null : null,
+    rect,
+    zIndex,
+    text: truncate(readNormalized(node), 160)
+  }));
+}
+
+/* Slovensky komentar: Najde najblizsi koren menu podla rectu kebabu s observerom. */
+async function findMenuRootForButton(menuButton, { timeoutMs = 650 } = {}) {
+  const meta = gatherKebabMeta(menuButton);
+  const base = {
+    node: null,
+    selector: null,
+    rect: null,
+    itemsCount: null,
+    distance: null,
+    zIndex: null,
+    strategy: null,
+    kebabRect: meta.rect || null,
+    kebabEl: meta.element || null,
+    kebabAriaExpanded: meta.ariaExpanded,
+    kebabAriaControls: meta.ariaControls
   };
 
-  const immediate = evaluate();
+  if (meta.ariaControls) {
+    const ariaId = typeof meta.ariaControls === 'string' ? meta.ariaControls.trim() : '';
+    const target = ariaId ? document.getElementById(ariaId) : null;
+    if (target && target instanceof Element && isNodeVisible(target) && hasInteractiveMenuItems(target)) {
+      const rect = getElementRect(target);
+      if (rect) {
+        const itemsCount = countMenuItems(target);
+        if (itemsCount) {
+          const distance = meta.rect && rect ? centerDistance(meta.rect, rect) : null;
+          return {
+            ...base,
+            node: target,
+            selector: ariaId ? `#${ariaId}` : null,
+            rect,
+            itemsCount: Number.isFinite(itemsCount) ? itemsCount : countMenuItems(target),
+            distance: Number.isFinite(distance) ? distance : null,
+            zIndex: numericZIndex(target),
+            strategy: 'aria-controls'
+          };
+        }
+      }
+    }
+  }
+
+  const startedAt = Date.now();
+  const candidates = new Map();
+
+  const registerCandidate = (candidate) => {
+    if (!candidate || !candidate.node) {
+      return;
+    }
+    const container = candidate.node;
+    if (!container.isConnected) {
+      return;
+    }
+    const rect = candidate.rect || getElementRect(container);
+    if (!rect) {
+      return;
+    }
+    const itemsCount = countMenuItems(container);
+    if (!itemsCount) {
+      return;
+    }
+    const distance = meta.rect && rect ? centerDistance(meta.rect, rect) : null;
+    const selector = candidate.selector || matchVisualLayerSelector(container) || null;
+    const zIndex = Number.isFinite(candidate.zIndex) ? candidate.zIndex : numericZIndex(container);
+    const payload = {
+      node: container,
+      selector,
+      rect,
+      itemsCount,
+      distance: Number.isFinite(distance) ? distance : null,
+      zIndex,
+      strategy: 'visual-layer-proximity'
+    };
+    if (!candidates.has(container)) {
+      candidates.set(container, payload);
+    } else {
+      const existing = candidates.get(container);
+      const existingDist = Number.isFinite(existing.distance) ? existing.distance : Number.POSITIVE_INFINITY;
+      const nextDist = Number.isFinite(payload.distance) ? payload.distance : Number.POSITIVE_INFINITY;
+      const better = nextDist < existingDist
+        || payload.itemsCount > (existing.itemsCount || 0)
+        || payload.zIndex > (existing.zIndex || 0);
+      if (better) {
+        candidates.set(container, { ...existing, ...payload });
+      }
+    }
+  };
+
+  const considerNode = (node) => {
+    if (!node || !(node instanceof Element)) {
+      return;
+    }
+    const resolved = resolveMenuLayerCandidate(node);
+    if (resolved) {
+      registerCandidate(resolved);
+    }
+  };
+
+  VISUAL_LAYER_CANDIDATE_SELECTORS.forEach((selector) => {
+    const nodes = safeQueryAll(selector);
+    nodes.forEach((node) => considerNode(node));
+  });
+
+  const pickBest = () => {
+    if (!candidates.size) {
+      return null;
+    }
+    const list = Array.from(candidates.values());
+    list.sort((a, b) => {
+      const distA = Number.isFinite(a.distance) ? a.distance : Number.POSITIVE_INFINITY;
+      const distB = Number.isFinite(b.distance) ? b.distance : Number.POSITIVE_INFINITY;
+      if (distA !== distB) {
+        return distA - distB;
+      }
+      if ((b.itemsCount || 0) !== (a.itemsCount || 0)) {
+        return (b.itemsCount || 0) - (a.itemsCount || 0);
+      }
+      return (b.zIndex || 0) - (a.zIndex || 0);
+    });
+    return list[0];
+  };
+
+  const immediate = pickBest();
   if (immediate) {
-    return { ...immediate, kebabRect };
+    return { ...base, ...immediate };
   }
 
   return new Promise((resolve) => {
-    const observers = [];
     let finished = false;
-    const finish = (value) => {
+    const observers = [];
+
+    const finish = (candidate) => {
       if (finished) {
         return;
       }
@@ -789,17 +1025,38 @@ async function findMenuRootForButton(menuButton, { timeoutMs = 600 } = {}) {
         try {
           observer.disconnect();
         } catch (_error) {
-          // Slovensky komentar: Ignorujeme chybu pri odpojeni.
+          // Slovensky komentar: Odpojenie observera je best-effort.
         }
       });
-      resolve(value);
+      if (candidate) {
+        resolve({ ...base, ...candidate });
+      } else {
+        resolve({ ...base });
+      }
     };
 
     try {
-      const observer = new MutationObserver(() => {
-        const candidate = evaluate();
+      const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+          mutation.addedNodes.forEach((node) => {
+            if (!(node instanceof Element)) {
+              return;
+            }
+            considerNode(node);
+            VISUAL_LAYER_CANDIDATE_SELECTORS.forEach((selector) => {
+              let nodes = [];
+              try {
+                nodes = Array.from(node.querySelectorAll(selector));
+              } catch (_error) {
+                nodes = [];
+              }
+              nodes.forEach((match) => considerNode(match));
+            });
+          });
+        });
+        const candidate = pickBest();
         if (candidate) {
-          finish({ ...candidate, kebabRect });
+          finish(candidate);
         }
       });
       if (document && document.body) {
@@ -813,9 +1070,9 @@ async function findMenuRootForButton(menuButton, { timeoutMs = 600 } = {}) {
     const poll = async () => {
       while (!finished && Date.now() - startedAt < timeoutMs) {
         await waitHelper(70);
-        const candidate = evaluate();
+        const candidate = pickBest();
         if (candidate) {
-          finish({ ...candidate, kebabRect });
+          finish(candidate);
           return;
         }
       }
@@ -1319,8 +1576,10 @@ function resolveDeleteMenuItem(menuRoot, kebabRect, debug) {
     { selector: DELETE_IN_MENU[0], stage: 'testid' },
     { selector: DELETE_IN_MENU[1], stage: 'testid' },
     { selector: DELETE_IN_MENU[2], stage: 'aria' },
+    { selector: DELETE_IN_MENU[4], stage: 'aria' },
     { selector: DELETE_IN_MENU[3], stage: 'icon' },
-    { selector: DELETE_IN_MENU[4], stage: 'text', requireTextMatch: true }
+    { selector: DELETE_IN_MENU[5], stage: 'text', requireTextMatch: true },
+    { selector: DELETE_IN_MENU[6], stage: 'text', requireTextMatch: true }
   ];
 
   selectorConfig.forEach(({ selector, stage, requireTextMatch }) => {
@@ -1330,7 +1589,7 @@ function resolveDeleteMenuItem(menuRoot, kebabRect, debug) {
   const menuItems = collectMenuItems(scope);
   const totalCandidates = Object.values(stageBuckets).reduce((acc, list) => acc + list.length, 0);
   debug.deleteCandidatesTotal = totalCandidates;
-  debug.deleteIgnoredByText = ignoredTexts.slice(0, 8);
+  debug.deleteIgnoredByText = ignoredTexts.slice(0, 10);
 
   const stageOrder = ['testid', 'aria', 'icon', 'text'];
   let chosenStage = null;
@@ -1467,6 +1726,16 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
     ctx.dialogSnapshot = null;
   }
   ctx.confirmVia = ctx.confirmVia || null;
+  if (typeof ctx.fallbackHeaderPath !== 'boolean') {
+    ctx.fallbackHeaderPath = false;
+  }
+  ctx.menuRootStrategy = ctx.menuRootStrategy || null;
+  ctx.menuRootSelectorMatched = ctx.menuRootSelectorMatched || null;
+  ctx.menuRootDistance = Number.isFinite(ctx.menuRootDistance) ? ctx.menuRootDistance : null;
+  ctx.menuRootItemsCount = Number.isFinite(ctx.menuRootItemsCount) ? ctx.menuRootItemsCount : null;
+  ctx.deleteCandidatesTotal = Number.isFinite(ctx.deleteCandidatesTotal) ? ctx.deleteCandidatesTotal : null;
+  ctx.deleteIgnoredByText = Array.isArray(ctx.deleteIgnoredByText) ? ctx.deleteIgnoredByText.slice(0, 10) : [];
+  ctx.confirmPattern = ctx.confirmPattern || null;
 
   const steps = {
     sidebar: Boolean(baseSteps.sidebar),
@@ -1480,9 +1749,18 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
     selectors: [...DELETE_IN_MENU]
   };
   debug.confirmSelectors = [];
+  debug.headerMenuClickMs = null;
+  debug.headerMenuClickOk = null;
   ctx.selectorsTried.menu = Array.from(
-    new Set([...ctx.selectorsTried.menu, ...MORE_ACTIONS_BUTTON_SELECTORS, ...MENU_ROOT_SELECTORS])
+    new Set([
+      ...ctx.selectorsTried.menu,
+      ...MORE_ACTIONS_BUTTON_SELECTORS,
+      ...HEADER_MENU_BUTTON_SELECTORS,
+      ...MENU_ROOT_SELECTORS,
+      ...VISUAL_LAYER_CANDIDATE_SELECTORS
+    ])
   );
+  debug.fallbackHeaderPath = false;
 
   const finalize = (result) => {
     const elapsed = Date.now() - startedAt;
@@ -1514,13 +1792,20 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
     return finalize({ ok: false, reason: 'menu_not_found', steps, debug, elapsedMs: Date.now() - startedAt });
   }
 
+  const menuButtonMeta = gatherKebabMeta(menuButton);
+  debug.menuButtonRect = menuButtonMeta.rect;
+  debug.menuButtonAriaExpanded = menuButtonMeta.ariaExpanded;
+  debug.menuButtonAriaControls = menuButtonMeta.ariaControls;
+
   const menuClickStarted = Date.now();
   const menuClick = await clickAndWait(() => menuButton, { timeoutMs: 1000 });
   const menuClickElapsed = Date.now() - menuClickStarted;
-  debug.menuClickMs = menuClickElapsed;
+  let menuClickTotal = menuClickElapsed;
+  debug.sidebarMenuClickMs = menuClickElapsed;
+  debug.menuClickMs = menuClickTotal;
   debug.menuClickOk = Boolean(menuClick.ok);
   debug.menuItemsAfterMenuClick = countMenuItems();
-  ctx.timings.menuMs = menuClickElapsed;
+  ctx.timings.menuMs = menuClickTotal;
   CDBG('click menu button', { elapsedMs: menuClickElapsed, ok: menuClick.ok, items: debug.menuItemsAfterMenuClick });
   if (!menuClick.ok) {
     ctx.reason = 'ui_click_failed';
@@ -1529,40 +1814,115 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
   steps.menu = true;
 
   const menuRootWaitStarted = Date.now();
-  const menuRootResolution = await findMenuRootForButton(menuButton, { timeoutMs: 600 });
+  let menuRootResolution = await findMenuRootForButton(menuButton, { timeoutMs: 650 });
+  if (!menuRootResolution || !menuRootResolution.node) {
+    ctx.fallbackHeaderPath = true;
+    debug.fallbackHeaderPath = true;
+    const headerMenuButton = findHeaderMoreActionsButton();
+    if (!headerMenuButton) {
+      const menuRootElapsedFallback = Date.now() - menuRootWaitStarted;
+      ctx.timings.menuRootFindMs = menuRootElapsedFallback;
+      debug.menuRootFindMs = menuRootElapsedFallback;
+      debug.menuRootStrategy = menuRootResolution ? menuRootResolution.strategy || null : null;
+      debug.menuRootSelectorMatched = null;
+      debug.menuRootDistance = null;
+      debug.menuRootItemsCount = null;
+      ctx.menuRootStrategy = null;
+      ctx.menuRootSelectorMatched = null;
+      ctx.menuRootDistance = null;
+      ctx.menuRootItemsCount = null;
+      const snapshotFallback = captureVisualLayerSnapshot(20);
+      ctx.menuSnapshot = snapshotFallback;
+      ctx.menuSnapshotCount = Array.isArray(snapshotFallback) ? snapshotFallback.length : 0;
+      debug.menuSnapshot = Array.isArray(snapshotFallback) ? snapshotFallback.slice(0, 20) : null;
+      debug.menuSnapshotCount = ctx.menuSnapshotCount;
+      ctx.reason = 'menu_not_found';
+      CWARN('menu_not_found', { phase: 'menu_root_fallback', elapsedMs: menuRootElapsedFallback });
+      return finalize({ ok: false, reason: 'menu_not_found', steps, debug, elapsedMs: Date.now() - startedAt });
+    }
+    const headerMenuClickStarted = Date.now();
+    const headerMenuClick = await clickAndWait(() => headerMenuButton, { timeoutMs: 1000 });
+    const headerMenuClickElapsed = Date.now() - headerMenuClickStarted;
+    debug.headerMenuClickMs = headerMenuClickElapsed;
+    debug.headerMenuClickOk = Boolean(headerMenuClick.ok);
+    menuClickTotal += headerMenuClickElapsed;
+    ctx.timings.menuMs = menuClickTotal;
+    debug.menuClickMs = menuClickTotal;
+    debug.menuClickOk = Boolean(menuClick.ok || headerMenuClick.ok);
+    if (!headerMenuClick.ok) {
+      const menuRootElapsedFallback = Date.now() - menuRootWaitStarted;
+      ctx.timings.menuRootFindMs = menuRootElapsedFallback;
+      debug.menuRootFindMs = menuRootElapsedFallback;
+      debug.menuRootStrategy = menuRootResolution ? menuRootResolution.strategy || null : null;
+      debug.menuRootSelectorMatched = null;
+      debug.menuRootDistance = null;
+      debug.menuRootItemsCount = null;
+      ctx.menuRootStrategy = null;
+      ctx.menuRootSelectorMatched = null;
+      ctx.menuRootDistance = null;
+      ctx.menuRootItemsCount = null;
+      const snapshotClickFail = captureVisualLayerSnapshot(20);
+      ctx.menuSnapshot = snapshotClickFail;
+      ctx.menuSnapshotCount = Array.isArray(snapshotClickFail) ? snapshotClickFail.length : 0;
+      debug.menuSnapshot = Array.isArray(snapshotClickFail) ? snapshotClickFail.slice(0, 20) : null;
+      debug.menuSnapshotCount = ctx.menuSnapshotCount;
+      ctx.reason = 'ui_click_failed';
+      return finalize({ ok: false, reason: 'ui_click_failed', steps, debug, elapsedMs: Date.now() - startedAt });
+    }
+    menuRootResolution = await findMenuRootForButton(headerMenuButton, { timeoutMs: 650 });
+  } else {
+    debug.menuClickOk = Boolean(menuClick.ok);
+  }
+
   const menuRootElapsed = Date.now() - menuRootWaitStarted;
   ctx.timings.menuRootFindMs = menuRootElapsed;
   debug.menuRootFindMs = menuRootElapsed;
-  debug.menuRootStrategy = 'proximity';
-  debug.menuRootSelectorMatched = null;
-  debug.menuRootDistance = null;
-  debug.menuRootItemsCount = null;
 
-  if (!menuRootResolution || !menuRootResolution.node) {
+  const menuRootNode = menuRootResolution && menuRootResolution.node ? menuRootResolution.node : null;
+  const menuRootStrategy = menuRootResolution ? menuRootResolution.strategy || null : null;
+  const menuRootSelectorMatched = menuRootResolution ? menuRootResolution.selector || null : null;
+  const menuRootDistanceRounded = menuRootResolution && Number.isFinite(menuRootResolution.distance)
+    ? Math.round(menuRootResolution.distance * 10) / 10
+    : null;
+
+  debug.menuRootStrategy = menuRootStrategy;
+  debug.menuRootSelectorMatched = menuRootSelectorMatched;
+  debug.menuRootDistance = menuRootDistanceRounded;
+  ctx.menuRootStrategy = menuRootStrategy;
+  ctx.menuRootSelectorMatched = menuRootSelectorMatched;
+  ctx.menuRootDistance = menuRootDistanceRounded;
+
+  let menuItemsCount = 0;
+  if (menuRootNode) {
+    menuItemsCount = countMenuItems(menuRootNode);
+  }
+  const resolvedItemsCount = menuRootResolution && Number.isFinite(menuRootResolution.itemsCount)
+    ? menuRootResolution.itemsCount
+    : menuItemsCount;
+  debug.menuRootItemsCount = menuRootNode ? resolvedItemsCount : null;
+  ctx.menuRootItemsCount = menuRootNode ? resolvedItemsCount : null;
+
+  if (!menuRootNode) {
+    const snapshotFinal = captureVisualLayerSnapshot(20);
+    ctx.menuSnapshot = snapshotFinal;
+    ctx.menuSnapshotCount = Array.isArray(snapshotFinal) ? snapshotFinal.length : 0;
+    debug.menuSnapshot = Array.isArray(snapshotFinal) ? snapshotFinal.slice(0, 20) : null;
+    debug.menuSnapshotCount = ctx.menuSnapshotCount;
     ctx.reason = 'menu_not_found';
     CWARN('menu_not_found', { phase: 'menu_root', elapsedMs: menuRootElapsed });
     return finalize({ ok: false, reason: 'menu_not_found', steps, debug, elapsedMs: Date.now() - startedAt });
   }
 
-  const menuRootNode = menuRootResolution.node;
-  const menuItemsCount = countMenuItems(menuRootNode);
-  debug.menuRootSelectorMatched = menuRootResolution.selector || null;
-  debug.menuRootDistance = Number.isFinite(menuRootResolution.distance)
-    ? Math.round(menuRootResolution.distance * 10) / 10
-    : null;
-  debug.menuRootItemsCount = Number.isFinite(menuRootResolution.itemsCount)
-    ? menuRootResolution.itemsCount
-    : menuItemsCount;
   debug.menuContainerRole = menuRootNode && menuRootNode.getAttribute ? menuRootNode.getAttribute('role') || null : null;
   debug.menuContainerTestid = menuRootNode && menuRootNode.getAttribute ? menuRootNode.getAttribute('data-testid') || null : null;
-  debug.menuItems = menuItemsCount;
+  debug.menuItems = resolvedItemsCount;
 
   const fullMenuSnapshot = dumpMenuSnapshot(menuRootNode);
   ctx.menuSnapshot = fullMenuSnapshot;
   ctx.menuSnapshotCount = Array.isArray(fullMenuSnapshot) ? fullMenuSnapshot.length : 0;
   debug.menuSnapshotCount = ctx.menuSnapshotCount;
   CINFO('menu opened', {
-    items: menuItemsCount,
+    items: resolvedItemsCount,
     containerRole: debug.menuContainerRole,
     elapsedMs: menuClickElapsed,
     rootSelector: debug.menuRootSelectorMatched
@@ -1573,6 +1933,12 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
   const triedSelectors = resolution.selectorsTried || [...DELETE_IN_MENU];
   debug.selectorsTried = triedSelectors;
   ctx.selectorsTried.delete = Array.from(new Set([...ctx.selectorsTried.delete, ...triedSelectors]));
+  ctx.deleteCandidatesTotal = Number.isFinite(debug.deleteCandidatesTotal)
+    ? debug.deleteCandidatesTotal
+    : null;
+  ctx.deleteIgnoredByText = Array.isArray(debug.deleteIgnoredByText)
+    ? debug.deleteIgnoredByText.slice(0, 10)
+    : [];
 
   if (!resolution.node) {
     ctx.reason = 'delete_item_not_found';
@@ -1627,9 +1993,11 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
   confirmFindTotal += confirmDetectElapsed;
   const initialPattern = confirmPatternResult ? confirmPatternResult.pattern : null;
   debug.confirmPattern = initialPattern || null;
+  ctx.confirmPattern = initialPattern || null;
 
   if (confirmPatternResult && confirmPatternResult.pattern === 'inline' && confirmPatternResult.node) {
     ctx.timings.confirmFindMs = confirmFindTotal;
+    ctx.confirmPattern = 'inline';
     const inlineNode = confirmPatternResult.node;
     const inlineToken = confirmPatternResult.token || null;
     const inlineText = confirmPatternResult.text || null;
@@ -1683,6 +2051,7 @@ async function executeMenuDeletionSteps(baseSteps = {}, attemptCtx = null) {
   }
 
   debug.confirmPattern = 'modal';
+  ctx.confirmPattern = 'modal';
 
   const dialogWaitStarted = Date.now();
   const dialog = await waitForConfirmDialogAppear(1200);
@@ -1962,6 +2331,14 @@ function makeOrchestratorReport(ctx) {
     dialogSnapshot,
     dialogSnapshotCount: Number.isFinite(source.dialogSnapshotCount) ? source.dialogSnapshotCount : dialogSnapshot ? dialogSnapshot.length : 0,
     confirmVia: source.confirmVia || null,
+    confirmPattern: typeof source.confirmPattern === 'string' ? source.confirmPattern : null,
+    menuRootStrategy: typeof source.menuRootStrategy === 'string' ? source.menuRootStrategy : null,
+    menuRootSelectorMatched: typeof source.menuRootSelectorMatched === 'string' ? source.menuRootSelectorMatched : null,
+    menuRootDistance: Number.isFinite(source.menuRootDistance) ? source.menuRootDistance : null,
+    menuRootItemsCount: Number.isFinite(source.menuRootItemsCount) ? source.menuRootItemsCount : null,
+    fallbackHeaderPath: Boolean(source.fallbackHeaderPath),
+    deleteCandidatesTotal: Number.isFinite(source.deleteCandidatesTotal) ? source.deleteCandidatesTotal : null,
+    deleteIgnoredByText: Array.isArray(source.deleteIgnoredByText) ? source.deleteIgnoredByText.slice(0, 10) : [],
     reason: source.reason || 'ok'
   };
   if (source.legacyDebug && typeof source.legacyDebug === 'object') {
@@ -1992,6 +2369,45 @@ function findMoreActionsButton() {
     const candidates = safeQueryAll(`${selector}:not([disabled])`).filter((node) => isNodeEnabled(node));
     if (candidates.length) {
       return candidates[0];
+    }
+  }
+  return null;
+}
+
+function findHeaderMoreActionsButton() {
+  const scopes = [];
+  const mainHeader = document.querySelector('main header');
+  if (mainHeader) {
+    scopes.push(mainHeader);
+  }
+  const toolbar = document.querySelector('main [role="toolbar"]');
+  if (toolbar && !scopes.includes(toolbar)) {
+    scopes.push(toolbar);
+  }
+  const globalHeader = document.querySelector('header');
+  if (globalHeader && !scopes.includes(globalHeader)) {
+    scopes.push(globalHeader);
+  }
+  scopes.push(document);
+  const seen = new Set();
+  for (const scope of scopes) {
+    for (const selector of HEADER_MENU_BUTTON_SELECTORS) {
+      let nodes = [];
+      try {
+        nodes = Array.from(scope.querySelectorAll(selector));
+      } catch (_error) {
+        nodes = [];
+      }
+      for (const node of nodes) {
+        if (!node || seen.has(node)) {
+          continue;
+        }
+        seen.add(node);
+        if (!isNodeEnabled(node) || !isNodeVisible(node)) {
+          continue;
+        }
+        return node;
+      }
     }
   }
   return null;
