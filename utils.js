@@ -28,7 +28,10 @@ const SETTINGS_DEFAULTS = Object.freeze({
   CAPTURE_ONLY_CANDIDATES: true,
   SAFE_URL_PATTERNS: SAFE_URL_DEFAULTS,
   searchHintDelayMs: 2500,
-  verboseConsole: true
+  verboseConsole: true,
+  miniWindow: false,
+  autoOffer: true,
+  deleteBatchLimit: 5
 });
 
 /* Slovensky komentar: Ziska referenciu na globalny objekt pre rozne prostredia. */
@@ -174,7 +177,9 @@ function sanitizeSettings(rawSettings) {
     'AUTO_SCAN',
     'CAPTURE_ONLY_CANDIDATES',
     'SHOW_CANDIDATE_BADGE',
-    'verboseConsole'
+    'verboseConsole',
+    'miniWindow',
+    'autoOffer'
   ];
   boolFields.forEach((key) => {
     if (typeof rawSettings[key] === 'boolean') {
@@ -190,7 +195,8 @@ function sanitizeSettings(rawSettings) {
     { key: 'SCAN_COOLDOWN_MIN', min: 1 },
     { key: 'MIN_AGE_MINUTES', min: 0 },
     { key: 'DELETE_LIMIT', min: 1 },
-    { key: 'searchHintDelayMs', min: 0 }
+    { key: 'searchHintDelayMs', min: 0 },
+    { key: 'deleteBatchLimit', min: 1 }
   ];
   intFields.forEach(({ key, min }) => {
     const value = rawSettings[key];

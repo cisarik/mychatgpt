@@ -51,6 +51,36 @@ function CERR(...args) {
   console.error('[MyChatGPT][content][ui-delete]', ...args);
 }
 
+/* Slovensky komentar: Pomocny logger s rozsahom a respektovanim verbose flagu. */
+function logScoped(level, scope, message, meta, { force = false } = {}) {
+  const prefix = `[${scope}] ${message}`;
+  const hasMeta = meta !== undefined;
+  if (level === 'error') {
+    if (hasMeta) {
+      console.error('[MyChatGPT][content][ui-delete]', prefix, meta);
+    } else {
+      console.error('[MyChatGPT][content][ui-delete]', prefix);
+    }
+    return;
+  }
+  if (level === 'warn') {
+    if (hasMeta) {
+      console.warn('[MyChatGPT][content][ui-delete]', prefix, meta);
+    } else {
+      console.warn('[MyChatGPT][content][ui-delete]', prefix);
+    }
+    return;
+  }
+  if (!force && !__VERBOSE) {
+    return;
+  }
+  if (hasMeta) {
+    console.info('[MyChatGPT][content][ui-delete]', prefix, meta);
+  } else {
+    console.info('[MyChatGPT][content][ui-delete]', prefix);
+  }
+}
+
 /* Slovensky komentar: Sleduje udalosti na jemne potvrdenie aktivity skriptu. */
 const announcementState = { pageShow: false, visibility: false };
 
@@ -477,6 +507,398 @@ async function waitForDocumentTitleMatch(normalizedTargets, timeoutMs = 3600) {
   return false;
 }
 
+/* Slovensky komentar: Najde menu tlacidlo pre polozku sidebara. */
+function findSidebarMenuButton(item) {
+  if (!item || typeof item.querySelectorAll !== 'function') {
+    return null;
+  }
+  const selectors = [...SIDEBAR_MENU_BUTTON_SELECTORS, ...MORE_ACTIONS_BUTTON_SELECTORS];
+  const seen = new Set();
+  for (const selector of selectors) {
+    let matches = [];
+    try {
+      matches = Array.from(item.querySelectorAll(selector));
+    } catch (_error) {
+      matches = [];
+    }
+    for (const node of matches) {
+      if (!node || seen.has(node)) {
+        continue;
+      }
+      seen.add(node);
+      const control = node.closest('button, [role="button"]') || node;
+      if (!control) {
+        continue;
+      }
+      if (!isNodeEnabled(control) || !isNodeVisible(control)) {
+        continue;
+      }
+      return control;
+    }
+  }
+  const siblingButton = item.parentElement
+    ? item.parentElement.querySelector('button[aria-haspopup="menu"], button[aria-label*="menu" i]')
+    : null;
+  if (siblingButton && isNodeEnabled(siblingButton) && isNodeVisible(siblingButton)) {
+    return siblingButton;
+  }
+  return null;
+}
+
+/* Slovensky komentar: Otvori sidebar ak je skryty. */
+async function openSidebarIfClosed({ timeoutMs = UI_DELETE_DEFAULT_TIMEOUTS.sidebar } = {}) {
+  if (isSidebarVisible()) {
+    logScoped('info', 'ui', 'sidebar_open: already_open');
+    return { ok: true, reason: 'already_open' };
+  }
+  const toggle = findSidebarToggleButton();
+  if (!toggle) {
+    logScoped('warn', 'ui', 'sidebar_open: fail:sidebar_button_not_found');
+    return { ok: false, reason: 'sidebar_button_not_found' };
+  }
+  try {
+    toggle.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+    toggle.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+  } catch (_error) {
+    /* Slovensky komentar: Ignoruje chybu pri syntetickom evente. */
+  }
+  const clickResult = await clickAndWait(() => toggle, { timeoutMs: Math.min(timeoutMs, 500) });
+  if (!clickResult || !clickResult.ok) {
+    logScoped('warn', 'ui', 'sidebar_open: fail:sidebar_open_timeout');
+    return { ok: false, reason: 'sidebar_open_timeout' };
+  }
+  const deadline = Date.now() + Math.max(200, timeoutMs);
+  while (Date.now() < deadline) {
+    if (isSidebarVisible()) {
+      logScoped('info', 'ui', 'sidebar_open: ok');
+      return { ok: true, reason: 'opened' };
+    }
+    await waitHelper(80);
+  }
+  logScoped('warn', 'ui', 'sidebar_open: fail:sidebar_open_timeout');
+  return { ok: false, reason: 'sidebar_open_timeout' };
+}
+
+/* Slovensky komentar: Vyhlada polozku sidebara a vrati statistiky zhody. */
+function findConversationInSidebar(title, { log = true } = {}) {
+  const normalized = normalizeTitleValue(title);
+  if (!normalized) {
+    if (log) {
+      logScoped('warn', 'ui', 'find_convo: title_missing', { title: title || null });
+    }
+    return { ok: false, reason: 'convo_not_found', node: null, count: 0 };
+  }
+  const targets = [normalized];
+  const metaMap = new Map([[normalized, 'title']]);
+  const candidates = collectSidebarCandidates();
+  let newestMatch = null;
+  let matchSource = null;
+  let count = 0;
+  for (const candidate of candidates) {
+    const tokens = collectNodeTitleTokens(candidate);
+    if (!tokens.length) {
+      continue;
+    }
+    const matched = tokens.find((token) => titlesMatchNormalized(token, normalized));
+    if (!matched) {
+      continue;
+    }
+    count += 1;
+    if (!newestMatch) {
+      newestMatch = candidate;
+      matchSource = metaMap.get(normalized) || 'title';
+    }
+  }
+  if (log) {
+    const logMessage = newestMatch
+      ? `find_convo: title="${title}" result=found count=${count}`
+      : `find_convo: title="${title}" result=not_found count=${count}`;
+    logScoped(newestMatch ? 'info' : 'warn', 'ui', logMessage, { normalized, matchSource: matchSource || null });
+  }
+  if (!newestMatch) {
+    return { ok: false, reason: 'convo_not_found', node: null, count: 0 };
+  }
+  return { ok: true, reason: 'found', node: newestMatch, count, matchSource: matchSource || null };
+}
+
+/* Slovensky komentar: Otvori kebab menu pre danu polozku. */
+async function openKebabMenuForItem(item, { timeoutMs = UI_DELETE_DEFAULT_TIMEOUTS.menu } = {}) {
+  if (!item) {
+    logScoped('warn', 'ui', 'kebab_open: fail:kebab_not_found');
+    return { ok: false, reason: 'kebab_not_found' };
+  }
+  const beforeCount = countMenuItems();
+  const button = findSidebarMenuButton(item);
+  if (!button) {
+    logScoped('warn', 'ui', 'kebab_open: fail:kebab_not_found');
+    return { ok: false, reason: 'kebab_not_found' };
+  }
+  try {
+    item.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+    button.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+  } catch (_hoverError) {
+    /* Slovensky komentar: Ignoruje hover chybu. */
+  }
+  const clickResult = await clickAndWait(() => button, { timeoutMs: Math.min(timeoutMs, 500) });
+  if (!clickResult || !clickResult.ok) {
+    logScoped('warn', 'ui', 'kebab_open: fail:menu_not_found');
+    return { ok: false, reason: 'menu_not_found' };
+  }
+  const deadline = Date.now() + Math.max(300, timeoutMs);
+  while (Date.now() < deadline) {
+    if (countMenuItems() > beforeCount) {
+      logScoped('info', 'ui', 'kebab_open: ok');
+      return { ok: true, reason: 'menu_opened' };
+    }
+    await waitHelper(60);
+  }
+  logScoped('warn', 'ui', 'kebab_open: fail:menu_not_found');
+  return { ok: false, reason: 'menu_not_found' };
+}
+
+/* Slovensky komentar: Najde delete akciu v menu. */
+function findDeleteMenuCandidate() {
+  const items = collectMenuItems();
+  let candidate = null;
+  for (const item of items) {
+    const text = readNormalized(item);
+    if (!text) {
+      continue;
+    }
+    if (DELETE_IGNORE_TEXT.some((ignore) => text.includes(ignore))) {
+      continue;
+    }
+    if (DELETE_TEXT_KEYS.some((needle) => text.includes(needle))) {
+      candidate = item;
+      break;
+    }
+    const aria = typeof item.getAttribute === 'function' ? item.getAttribute('aria-label') : null;
+    const ariaNormalized = aria ? aria.trim().toLowerCase() : '';
+    if (ariaNormalized && DELETE_TEXT_KEYS.some((needle) => ariaNormalized.includes(needle))) {
+      candidate = item;
+      break;
+    }
+  }
+  return candidate;
+}
+
+/* Slovensky komentar: Klikne na delete polozku v menu. */
+async function clickDeleteInMenu({ timeoutMs = UI_DELETE_DEFAULT_TIMEOUTS.menu } = {}) {
+  const deadline = Date.now() + Math.max(200, timeoutMs);
+  while (Date.now() < deadline) {
+    const candidate = findDeleteMenuCandidate();
+    if (candidate) {
+      const clickResult = await clickAndWait(() => candidate, { timeoutMs: 400 });
+      if (!clickResult || !clickResult.ok) {
+        await waitHelper(80);
+        continue;
+      }
+      logScoped('info', 'ui', 'menu_delete_click: ok');
+      return { ok: true, reason: 'clicked' };
+    }
+    await waitHelper(80);
+  }
+  logScoped('warn', 'ui', 'menu_delete_click: fail:menu_delete_missing');
+  return { ok: false, reason: 'menu_delete_missing' };
+}
+
+/* Slovensky komentar: Vyberie najvyssi dialog pre potvrdenie. */
+function getTopmostDialog() {
+  const dialogs = [];
+  CONFIRM_DIALOG_SELECTORS.forEach((selector) => {
+    const found = safeQueryAll(selector);
+    found.forEach((node) => {
+      if (node && isNodeVisible(node)) {
+        dialogs.push(node);
+      }
+    });
+  });
+  if (!dialogs.length) {
+    return null;
+  }
+  dialogs.sort((a, b) => numericZIndex(b) - numericZIndex(a));
+  return dialogs[0];
+}
+
+/* Slovensky komentar: Potvrdi mazanie v dialogu. */
+async function confirmDeletionDialog({ timeoutMs = UI_DELETE_DEFAULT_TIMEOUTS.confirm } = {}) {
+  const deadline = Date.now() + Math.max(300, timeoutMs);
+  let dialog = null;
+  while (Date.now() < deadline) {
+    dialog = getTopmostDialog();
+    if (dialog) {
+      break;
+    }
+    await waitHelper(80);
+  }
+  if (!dialog) {
+    logScoped('warn', 'ui', 'confirm_delete: fail:confirm_dialog_missing');
+    return { ok: false, reason: 'confirm_dialog_missing' };
+  }
+  const confirmSelectors = [
+    '[data-testid="confirm-delete"]',
+    'button[data-testid*="delete" i]',
+    'button[aria-label*="delete" i]',
+    'button',
+    '[role="button"]'
+  ];
+  let confirmButton = null;
+  for (const selector of confirmSelectors) {
+    const matches = Array.from(dialog.querySelectorAll(selector));
+    for (const node of matches) {
+      if (!node) {
+        continue;
+      }
+      const normalized = readNormalized(node);
+      const aria = typeof node.getAttribute === 'function' ? node.getAttribute('aria-label') : '';
+      const ariaNormalized = typeof aria === 'string' ? aria.trim().toLowerCase() : '';
+      if (
+        DELETE_TEXT_KEYS.some((needle) => normalized.includes(needle))
+        || (ariaNormalized && DELETE_TEXT_KEYS.some((needle) => ariaNormalized.includes(needle)))
+      ) {
+        if (isNodeEnabled(node) && isNodeVisible(node)) {
+          confirmButton = node;
+          break;
+        }
+      }
+    }
+    if (confirmButton) {
+      break;
+    }
+  }
+  if (!confirmButton) {
+    logScoped('warn', 'ui', 'confirm_delete: fail:confirm_click_failed');
+    return { ok: false, reason: 'confirm_click_failed' };
+  }
+  const clickResult = await clickAndWait(() => confirmButton, { timeoutMs: 500 });
+  if (!clickResult || !clickResult.ok) {
+    logScoped('warn', 'ui', 'confirm_delete: fail:confirm_click_failed');
+    return { ok: false, reason: 'confirm_click_failed' };
+  }
+  const closeDeadline = Date.now() + Math.max(200, timeoutMs);
+  while (Date.now() < closeDeadline) {
+    if (!getTopmostDialog()) {
+      logScoped('info', 'ui', 'confirm_delete: ok');
+      return { ok: true, reason: 'confirmed' };
+    }
+    await waitHelper(80);
+  }
+  logScoped('warn', 'ui', 'confirm_delete: fail:confirm_click_failed');
+  return { ok: false, reason: 'confirm_click_failed' };
+}
+
+/* Slovensky komentar: Overi odstranenie polozky zo sidebara. */
+async function verifyRemoved(title, { timeoutMs = UI_DELETE_DEFAULT_TIMEOUTS.verify } = {}) {
+  const normalized = normalizeTitleValue(title);
+  const deadline = Date.now() + Math.max(200, timeoutMs);
+  while (Date.now() < deadline) {
+    const result = findConversationInSidebar(title, { log: false });
+    if (!result.ok) {
+      logScoped('info', 'verify', 'removed: ok', { title: title || null, normalized });
+      return { ok: true, reason: 'removed' };
+    }
+    await waitHelper(120);
+  }
+  logScoped('warn', 'verify', 'removed: still_present', { title: title || null, normalized });
+  return { ok: false, reason: 'verify_still_present' };
+}
+
+/* Slovensky komentar: Vykona sekvenciu mazania podla titulku. */
+async function deleteByTitle(payload) {
+  const { title, id, retries = 2 } = payload || {};
+  const timeouts = {
+    ...UI_DELETE_DEFAULT_TIMEOUTS,
+    ...(payload && typeof payload.timeouts === 'object' ? payload.timeouts : {})
+  };
+  const safeTitle = typeof title === 'string' ? title : '(untitled)';
+  logScoped('info', 'run', `delete_start title="${safeTitle}"`, { id: id || null }, { force: true });
+
+  const runStep = async (name, fn) => {
+    let attempt = 0;
+    let result = null;
+    while (attempt <= retries) {
+      try {
+        result = await fn(attempt);
+      } catch (error) {
+        logScoped('error', 'run', `${name}_step_error`, { message: error && error.message ? error.message : String(error) });
+        result = { ok: false, reason: 'error' };
+      }
+      if (result && result.ok) {
+        return result;
+      }
+      if (attempt >= retries) {
+        return result || { ok: false, reason: 'error' };
+      }
+      const reason = result && result.reason ? result.reason : 'unknown';
+      logScoped('info', 'run', `retry step=${name} attempt=${attempt + 1} reason=${reason}`, undefined, { force: true });
+      await waitHelper(140);
+      attempt += 1;
+    }
+    return result || { ok: false, reason: 'error' };
+  };
+
+  const sidebarResult = await runStep('sidebar', () => openSidebarIfClosed({ timeoutMs: timeouts.sidebar }));
+  if (!sidebarResult || !sidebarResult.ok) {
+    const reason = sidebarResult && sidebarResult.reason ? sidebarResult.reason : 'sidebar_open_timeout';
+    logScoped('warn', 'run', `delete_done title="${safeTitle}" status=failed:${reason}`, { id: id || null }, { force: true });
+    return { ok: false, reasonCode: reason };
+  }
+
+  let sidebarItem = null;
+  const findResult = await runStep('find', () => {
+    const result = findConversationInSidebar(safeTitle, { log: true });
+    if (result.ok) {
+      sidebarItem = result.node;
+    }
+    return result;
+  });
+  if (!findResult || !findResult.ok || !sidebarItem) {
+    const reason = findResult && findResult.reason ? findResult.reason : 'convo_not_found';
+    logScoped('warn', 'run', `delete_done title="${safeTitle}" status=failed:${reason}`, { id: id || null }, { force: true });
+    return { ok: false, reasonCode: reason };
+  }
+
+  const kebabResult = await runStep('kebab', async () => {
+    if (!sidebarItem || !document.contains(sidebarItem)) {
+      const refresh = findConversationInSidebar(safeTitle, { log: true });
+      if (!refresh.ok) {
+        return refresh;
+      }
+      sidebarItem = refresh.node;
+    }
+    return openKebabMenuForItem(sidebarItem, { timeoutMs: timeouts.menu });
+  });
+  if (!kebabResult || !kebabResult.ok) {
+    const reason = kebabResult && kebabResult.reason ? kebabResult.reason : 'menu_not_found';
+    logScoped('warn', 'run', `delete_done title="${safeTitle}" status=failed:${reason}`, { id: id || null }, { force: true });
+    return { ok: false, reasonCode: reason };
+  }
+
+  const deleteResult = await runStep('delete', () => clickDeleteInMenu({ timeoutMs: timeouts.menu }));
+  if (!deleteResult || !deleteResult.ok) {
+    const reason = deleteResult && deleteResult.reason ? deleteResult.reason : 'menu_delete_missing';
+    logScoped('warn', 'run', `delete_done title="${safeTitle}" status=failed:${reason}`, { id: id || null }, { force: true });
+    return { ok: false, reasonCode: reason };
+  }
+
+  const confirmResult = await runStep('confirm', () => confirmDeletionDialog({ timeoutMs: timeouts.confirm }));
+  if (!confirmResult || !confirmResult.ok) {
+    const reason = confirmResult && confirmResult.reason ? confirmResult.reason : 'confirm_click_failed';
+    logScoped('warn', 'run', `delete_done title="${safeTitle}" status=failed:${reason}`, { id: id || null }, { force: true });
+    return { ok: false, reasonCode: reason };
+  }
+
+  const verifyResult = await runStep('verify', () => verifyRemoved(safeTitle, { timeoutMs: timeouts.verify }));
+  if (!verifyResult || !verifyResult.ok) {
+    const reason = verifyResult && verifyResult.reason ? verifyResult.reason : 'verify_still_present';
+    logScoped('warn', 'run', `delete_done title="${safeTitle}" status=failed:${reason}`, { id: id || null }, { force: true });
+    return { ok: false, reasonCode: reason };
+  }
+
+  logScoped('info', 'run', `delete_done title="${safeTitle}" status=deleted`, { id: id || null }, { force: true });
+  return { ok: true };
+}
+
 const MENU_ROOT_SELECTORS = [
   '[role="menu"]',
   '[data-testid*="menu"]',
@@ -551,6 +973,19 @@ const MORE_ACTIONS_BUTTON_SELECTORS = [
   'button[aria-label="Options"]',
   'button[aria-label="More"]'
 ];
+
+const SIDEBAR_MENU_BUTTON_SELECTORS = [
+  '[data-testid="conversation-item-menu"]',
+  'button[aria-haspopup="menu"]',
+  'button[aria-label*="menu" i]',
+  'button[aria-label*="more" i]',
+  'button[aria-label*="options" i]',
+  '[role="button"][aria-haspopup="menu"]'
+];
+
+const CONFIRM_DIALOG_SELECTORS = ['[role="dialog"]', '[role="alertdialog"]'];
+
+const UI_DELETE_DEFAULT_TIMEOUTS = Object.freeze({ sidebar: 1500, menu: 1200, confirm: 1500, verify: 1500 });
 
 const HEADER_MENU_BUTTON_SELECTORS = [
   'header button[aria-label*="More" i]',
@@ -2460,6 +2895,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'debug_console_log') {
     console.info('[MyChatGPT] Test log (page)', message.payload || {});
     return undefined;
+  }
+
+  if (message.type === 'phase2_delete_by_title') {
+    (async () => {
+      const payload = message.payload && typeof message.payload === 'object' ? message.payload : message;
+      try {
+        const result = await deleteByTitle(payload);
+        if (result && result.ok) {
+          sendResponse({ ok: true });
+        } else {
+          const reasonCode = result && result.reasonCode ? result.reasonCode : 'error';
+          sendResponse({ ok: false, reasonCode });
+        }
+      } catch (error) {
+        const reasonCode = error && error.reasonCode ? error.reasonCode : 'error';
+        sendResponse({
+          ok: false,
+          reasonCode,
+          error: error && error.message ? error.message : String(error)
+        });
+      }
+    })();
+    return true;
   }
 
   if (message.type === 'probe_metadata') {

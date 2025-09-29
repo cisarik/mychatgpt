@@ -13,11 +13,14 @@
     SHOW_CANDIDATE_BADGE: { sel: '#SHOW_CANDIDATE_BADGE', type: 'bool' },
     CAPTURE_ONLY_CANDIDATES: { sel: '#CAPTURE_ONLY_CANDIDATES', type: 'bool' },
     verboseConsole: { sel: '#verboseConsole', type: 'bool' },
+    miniWindow: { sel: '#miniWindow', type: 'bool' },
+    autoOffer: { sel: '#autoOffer', type: 'bool' },
     MAX_MESSAGES: { sel: '#MAX_MESSAGES', type: 'int', min: 1 },
     USER_MESSAGES_MAX: { sel: '#USER_MESSAGES_MAX', type: 'int', min: 1 },
     SCAN_COOLDOWN_MIN: { sel: '#SCAN_COOLDOWN_MIN', type: 'int', min: 1 },
     MIN_AGE_MINUTES: { sel: '#MIN_AGE_MINUTES', type: 'int', min: 0 },
     DELETE_LIMIT: { sel: '#DELETE_LIMIT', type: 'int', min: 1 },
+    deleteBatchLimit: { sel: '#deleteBatchLimit', type: 'int', min: 1 },
     searchHintDelayMs: { sel: '#searchHintDelayMs', type: 'int', min: 0 },
     SAFE_URL_PATTERNS: { sel: '#SAFE_URL_PATTERNS', type: 'multiline' }
   };
@@ -84,6 +87,9 @@
           DELETE_LIMIT: 10,
           CAPTURE_ONLY_CANDIDATES: true,
           verboseConsole: true,
+          miniWindow: false,
+          autoOffer: true,
+          deleteBatchLimit: 5,
           searchHintDelayMs: 2500,
           SAFE_URL_PATTERNS: [
             '/workspaces',
@@ -159,7 +165,9 @@
         'AUTO_SCAN',
         'SHOW_CANDIDATE_BADGE',
         'CAPTURE_ONLY_CANDIDATES',
-        'verboseConsole'
+        'verboseConsole',
+        'miniWindow',
+        'autoOffer'
       ].forEach((key) => {
         if (typeof raw[key] === 'boolean') {
           merged[key] = raw[key];
@@ -173,6 +181,7 @@
         { key: 'SCAN_COOLDOWN_MIN', min: 1 },
         { key: 'MIN_AGE_MINUTES', min: 0 },
         { key: 'DELETE_LIMIT', min: 1 },
+        { key: 'deleteBatchLimit', min: 1 },
         { key: 'searchHintDelayMs', min: 0 }
       ].forEach(({ key, min }) => {
         const value = Number(raw[key]);

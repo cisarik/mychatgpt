@@ -9,6 +9,11 @@
   const toastHost = document.getElementById('popup-toast-stack');
   const queueCountElement = document.getElementById('queue-count');
   const deleteQueuedButton = document.getElementById('delete-queued-btn');
+  const deleteBadge = document.getElementById('delete-queued-badge');
+  let settingsSnapshot = null;
+  let autoOfferShown = false;
+  let currentQueueCount = 0;
+  let batchInFlight = false;
 
   /* Slovensky komentar: Mini toast API pre jednotny vizualny feedback. */
   function spawnMiniToast(type, message, options = {}) {
@@ -91,26 +96,153 @@
     });
   }
 
-  if (deleteQueuedButton) {
-    deleteQueuedButton.disabled = true;
-    deleteQueuedButton.title = 'Available after Phase 2';
+  async function ensureSettingsSnapshot() {
+    try {
+      const loaded = await SettingsStore.load();
+      settingsSnapshot = loaded && loaded.settings ? loaded.settings : null;
+    } catch (error) {
+      console.warn('Failed to load settings snapshot', error);
+      settingsSnapshot = null;
+    }
+  }
+
+  function updateDeleteUi(count) {
+    if (typeof count === 'number' && count >= 0) {
+      currentQueueCount = count;
+      if (queueCountElement) {
+        queueCountElement.textContent = `Queued: ${count}`;
+      }
+      if (deleteBadge) {
+        deleteBadge.textContent = String(count);
+        deleteBadge.hidden = false;
+      }
+      if (!batchInFlight && deleteQueuedButton) {
+        deleteQueuedButton.disabled = count === 0;
+      }
+      if (count === 0) {
+        autoOfferShown = false;
+      }
+      const allowOffer = !settingsSnapshot || settingsSnapshot.autoOffer !== false;
+      if (count > 0 && allowOffer && !autoOfferShown) {
+        showRunOfferToast(count);
+        autoOfferShown = true;
+      }
+    } else {
+      if (queueCountElement) {
+        queueCountElement.textContent = 'Queued: –';
+      }
+      if (deleteBadge) {
+        deleteBadge.textContent = '–';
+        deleteBadge.hidden = true;
+      }
+      if (!batchInFlight && deleteQueuedButton) {
+        deleteQueuedButton.disabled = true;
+      }
+    }
+  }
+
+  function setBatchInFlight(nextState) {
+    batchInFlight = Boolean(nextState);
+    if (!deleteQueuedButton) {
+      return;
+    }
+    const label = deleteQueuedButton.querySelector('.button-label');
+    if (batchInFlight) {
+      deleteQueuedButton.disabled = true;
+      if (label) {
+        label.textContent = 'Running batch…';
+      }
+    } else {
+      deleteQueuedButton.disabled = currentQueueCount === 0;
+      if (label) {
+        label.textContent = 'Delete queued (UI automation)';
+      }
+    }
+  }
+
+  function showRunOfferToast(count) {
+    if (!toastHost) {
+      return;
+    }
+    const existing = toastHost.querySelector('.mini-toast--offer');
+    if (existing && existing.parentElement === toastHost) {
+      toastHost.removeChild(existing);
+    }
+    const toast = document.createElement('div');
+    toast.className = 'mini-toast mini-toast--info mini-toast--offer';
+    const text = document.createElement('span');
+    text.textContent = `${count} queued — Run delete now?`;
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'mini-toast__action';
+    action.textContent = 'Run';
+    const removeToast = () => {
+      if (toast.parentElement === toastHost) {
+        toastHost.removeChild(toast);
+      }
+    };
+    action.addEventListener('click', () => {
+      removeToast();
+      triggerDeletionBatch();
+    });
+    toast.addEventListener('click', (event) => {
+      if (event.target === action) {
+        return;
+      }
+      removeToast();
+    });
+    toast.append(text, action);
+    toastHost.prepend(toast);
+    if (typeof globalTarget.setTimeout === 'function') {
+      globalTarget.setTimeout(removeToast, 7000);
+    }
   }
 
   async function refreshQueueCount() {
-    if (!queueCountElement) {
-      return;
-    }
     try {
       const response = await sendRuntimeMessage({ type: 'deletion_queue_count' });
-      if (response && response.ok) {
-        queueCountElement.textContent = `Queued: ${response.count}`;
-      } else {
-        queueCountElement.textContent = 'Queued: –';
+      if (response && response.ok && typeof response.count === 'number') {
+        updateDeleteUi(response.count);
+        return;
       }
     } catch (error) {
       console.warn('Failed to fetch deletion queue count', error);
-      queueCountElement.textContent = 'Queued: –';
     }
+    updateDeleteUi(null);
+  }
+
+  async function triggerDeletionBatch() {
+    if (batchInFlight || !deleteQueuedButton) {
+      return;
+    }
+    setBatchInFlight(true);
+    try {
+      const response = await sendRuntimeMessage({ type: 'run_ui_deletion_batch', trigger: 'popup_button' });
+      if (response && response.ok) {
+        const summary = response.summary || {};
+        const successes = Number.isFinite(summary.successes) ? summary.successes : 0;
+        const failures = Number.isFinite(summary.failures) ? summary.failures : 0;
+        const total = Number.isFinite(summary.total) ? summary.total : successes + failures;
+        const mode = summary.mode ? summary.mode.replace('_', ' ') : 'active tab';
+        const message = `${successes}/${total} deleted · ${failures} failed (${mode})`;
+        MiniToast.success(`Batch completed: ${message}`);
+      } else {
+        const message = response && response.error ? response.error : 'Batch failed.';
+        MiniToast.error(message);
+      }
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      MiniToast.error(`Batch error: ${message}`);
+    } finally {
+      setBatchInFlight(false);
+      refreshQueueCount();
+    }
+  }
+
+  if (deleteQueuedButton) {
+    deleteQueuedButton.addEventListener('click', () => {
+      triggerDeletionBatch();
+    });
   }
 
   function getDebugAPI() {
@@ -258,7 +390,13 @@
     syncFromHash({ focus: false, ensureHash: true });
   }
 
-  refreshQueueCount();
+  (async () => {
+    await ensureSettingsSnapshot();
+    await refreshQueueCount();
+  })().catch((error) => {
+    console.warn('Queue bootstrap failed', error);
+    updateDeleteUi(null);
+  });
 
   document.addEventListener('mychatgpt:debug-panel-ready', () => {
     if (activeTabName === 'debug') {
@@ -462,11 +600,12 @@
       return;
     }
     if (message.type === 'deletion_queue_updated') {
-      if (queueCountElement && typeof message.count === 'number') {
-        queueCountElement.textContent = `Queued: ${message.count}`;
+      if (typeof message.count === 'number') {
+        updateDeleteUi(message.count);
       } else {
         refreshQueueCount();
       }
+      return;
     }
   });
 })();

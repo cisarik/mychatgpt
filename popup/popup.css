@@ -55,6 +55,40 @@ body {
   background: rgba(248, 113, 113, 0.18);
 }
 
+.mini-toast--offer {
+  border-color: var(--accent);
+}
+
+.mini-toast__action {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mini-toast__action:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
+
+.button-with-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.button-with-badge .badge {
+  font-size: 0.75rem;
+  padding: 2px 10px;
+}
+
 .popup-root {
   box-sizing: border-box;
   width: clamp(var(--popup-min-w), 92vw, var(--popup-max-w));

@@ -69,12 +69,11 @@
           <p id="queue-count" class="stat-value">Queued: …</p>
           <button
             id="delete-queued-btn"
-            class="button-sub"
+            class="button-sub button-with-badge"
             type="button"
-            disabled
-            title="Available after Phase 2"
           >
-            Delete queued (UI automation)
+            <span class="button-label">Delete queued (UI automation)</span>
+            <span id="delete-queued-badge" class="badge" aria-live="polite">0</span>
           </button>
         </div>
 
@@ -186,6 +185,20 @@
                 <span class="heal-hint" data-field="verboseConsole" hidden>(opravené)</span>
               </span>
             </label>
+            <label class="setting-row">
+              <span class="label-text">Mini okno (UI mazanie)</span>
+              <span class="setting-control">
+                <input type="checkbox" id="miniWindow" name="miniWindow" />
+                <span class="heal-hint" data-field="miniWindow" hidden>(opravené)</span>
+              </span>
+            </label>
+            <label class="setting-row">
+              <span class="label-text">Ponúknuť spustenie batchu</span>
+              <span class="setting-control">
+                <input type="checkbox" id="autoOffer" name="autoOffer" />
+                <span class="heal-hint" data-field="autoOffer" hidden>(opravené)</span>
+              </span>
+            </label>
           </section>
 
           <section class="panel settings-card">
@@ -223,6 +236,13 @@
               <span class="setting-control">
                 <input type="number" id="DELETE_LIMIT" name="DELETE_LIMIT" min="1" />
                 <span class="heal-hint" data-field="DELETE_LIMIT" hidden>(opravené)</span>
+              </span>
+            </label>
+            <label class="setting-row">
+              <span class="label-text">Batch limit mazania</span>
+              <span class="setting-control">
+                <input type="number" id="deleteBatchLimit" name="deleteBatchLimit" min="1" />
+                <span class="heal-hint" data-field="deleteBatchLimit" hidden>(opravené)</span>
               </span>
             </label>
             <label class="setting-row">

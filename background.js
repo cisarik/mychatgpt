@@ -5,6 +5,15 @@ importScripts('utils.js', 'db.js');
 const COOLDOWN_KEY = typeof COOLDOWN_STORAGE_KEY !== 'undefined' ? COOLDOWN_STORAGE_KEY : 'cooldown_v1';
 /* Slovensky komentar: Limit na velkost HTML odpovede pre zalohu. */
 const MAX_ANSWER_BYTES = 250 * 1024;
+/* Slovensky komentar: Predvolene timeouty pre UI mazanie. */
+const UI_DELETE_TIMEOUTS = Object.freeze({
+  sidebar: 1500,
+  menu: 1200,
+  confirm: 1500,
+  verify: 1500
+});
+/* Slovensky komentar: Pocet opakovani pre jednotlive kroky. */
+const UI_DELETE_RETRIES = 2;
 
 /* Slovensky komentar: Vrati hlboku kopiu predvolenych nastaveni. */
 function createDefaultSettingsSnapshot() {
@@ -23,6 +32,9 @@ function createDefaultSettingsSnapshot() {
         DELETE_LIMIT: 10,
         CAPTURE_ONLY_CANDIDATES: true,
         verboseConsole: true,
+        miniWindow: false,
+        autoOffer: true,
+        deleteBatchLimit: 5,
         searchHintDelayMs: 2500,
         SAFE_URL_PATTERNS: [
           '/workspaces',
@@ -84,7 +96,9 @@ async function getSettingsFresh() {
       'AUTO_SCAN',
       'SHOW_CANDIDATE_BADGE',
       'CAPTURE_ONLY_CANDIDATES',
-      'verboseConsole'
+      'verboseConsole',
+      'miniWindow',
+      'autoOffer'
     ].forEach((key) => {
       if (typeof raw[key] === 'boolean') {
         merged[key] = raw[key];
@@ -98,6 +112,7 @@ async function getSettingsFresh() {
       { key: 'SCAN_COOLDOWN_MIN', min: 1 },
       { key: 'MIN_AGE_MINUTES', min: 0 },
       { key: 'DELETE_LIMIT', min: 1 },
+      { key: 'deleteBatchLimit', min: 1 },
       { key: 'searchHintDelayMs', min: 0 }
     ].forEach(({ key, min }) => {
       const value = Number(raw[key]);
@@ -260,6 +275,179 @@ async function sendCaptureRequest(tabId, traceId) {
   return response || null;
 }
 
+/* Slovensky komentar: Notifikacia popupu o pocte poloziek vo fronte. */
+async function broadcastQueueCount() {
+  let count = null;
+  try {
+    count = await Database.countQueued();
+  } catch (_error) {
+    count = null;
+  }
+  try {
+    chrome.runtime.sendMessage({
+      type: 'deletion_queue_updated',
+      count
+    });
+  } catch (_notifyError) {
+    /* Slovensky komentar: Ignoruje pripadnu chybu pri odoslani. */
+  }
+  return count;
+}
+
+/* Slovensky komentar: Spusti spracovanie fronty mazania cez UI automatizaciu. */
+async function runDeletionBatch(trigger = 'manual') {
+  let settings = null;
+  try {
+    settings = await getSettingsFresh();
+  } catch (_error) {
+    settings = createDefaultSettingsSnapshot();
+  }
+  const limitValue = Number.isFinite(settings.deleteBatchLimit) && settings.deleteBatchLimit > 0
+    ? settings.deleteBatchLimit
+    : 5;
+  const useMiniWindow = Boolean(settings.miniWindow);
+  let queuedItems = [];
+  try {
+    queuedItems = await Database.listQueued(limitValue);
+  } catch (error) {
+    console.error('[batch] listQueued_failed', { message: error && error.message });
+    queuedItems = [];
+  }
+  const mode = useMiniWindow ? 'mini_window' : 'active_tab';
+  console.info(`[batch] start total=${queuedItems.length} mode=${mode}`);
+  await broadcastQueueCount();
+  if (!queuedItems.length) {
+    try {
+      await Logger.log('info', 'batch', 'UI delete batch skipped (empty)', { trigger, total: 0, mode });
+    } catch (_logError) {
+      /* Slovensky komentar: Pokracuje aj bez zapisu logu. */
+    }
+    console.info('[batch] done successes=0 failures=0');
+    return { ok: true, total: 0, successes: 0, failures: 0, mode };
+  }
+
+  let context = null;
+  let successes = 0;
+  let failures = 0;
+  try {
+    context = await ensureUiAutomationContext(useMiniWindow);
+    const tabId = context && typeof context.tabId === 'number' ? context.tabId : null;
+    if (typeof tabId !== 'number') {
+      throw new Error('tab_unavailable');
+    }
+    try {
+      await Logger.log('info', 'batch', 'UI delete batch start', {
+        trigger,
+        total: queuedItems.length,
+        mode,
+        limit: limitValue
+      });
+    } catch (_logError) {
+      /* Slovensky komentar: Tichy pokracujuci rezim pri chybe logu. */
+    }
+
+    for (let index = 0; index < queuedItems.length; index += 1) {
+      const item = queuedItems[index];
+      const titleText = item && typeof item.title === 'string' && item.title ? item.title : '(untitled)';
+      let response = null;
+      try {
+        response = await sendWithEnsureCS(
+          tabId,
+          {
+            type: 'phase2_delete_by_title',
+            payload: {
+              id: item && item.id ? item.id : null,
+              title: item ? item.title : null,
+              retries: UI_DELETE_RETRIES,
+              timeouts: UI_DELETE_TIMEOUTS
+            }
+          },
+          { timeoutMs: 25000 }
+        );
+      } catch (error) {
+        const reasonCode = error && error.message === 'timeout' ? 'timeout' : 'send_failed';
+        response = {
+          ok: false,
+          reasonCode,
+          error: error && error.message ? error.message : String(error)
+        };
+        console.warn('[batch] send_step_failed', { id: item && item.id ? item.id : null, reasonCode, message: response.error });
+      }
+
+      let statusLabel = '';
+      if (response && response.ok) {
+        successes += 1;
+        try {
+          const markOk = await Database.markDeleted(item && item.id ? item.id : null);
+          if (!markOk) {
+            console.warn('[batch] mark_deleted_noop', { id: item && item.id ? item.id : null });
+          }
+        } catch (markError) {
+          console.warn('[batch] mark_deleted_failed', {
+            id: item && item.id ? item.id : null,
+            message: markError && markError.message
+          });
+        }
+        statusLabel = 'deleted';
+      } else {
+        failures += 1;
+        const reasonCode = response && typeof response.reasonCode === 'string' ? response.reasonCode : 'error';
+        try {
+          const marked = await Database.markFailed(item && item.id ? item.id : null, reasonCode);
+          if (!marked) {
+            console.warn('[batch] mark_failed_noop', { id: item && item.id ? item.id : null, reasonCode });
+          }
+        } catch (markError) {
+          console.warn('[batch] mark_failed_error', {
+            id: item && item.id ? item.id : null,
+            reasonCode,
+            message: markError && markError.message
+          });
+        }
+        statusLabel = `failed:${reasonCode}`;
+      }
+
+      console.info(`[batch] item ${index + 1}/${queuedItems.length} title="${titleText}" result=${statusLabel}`);
+      await broadcastQueueCount();
+    }
+
+    console.info(`[batch] done successes=${successes} failures=${failures}`);
+    try {
+      await Logger.log('info', 'batch', 'UI delete batch done', {
+        trigger,
+        total: queuedItems.length,
+        mode,
+        successes,
+        failures
+      });
+    } catch (_logError) {
+      /* Slovensky komentar: Ignoruje chybu pri zapise summary. */
+    }
+    return { ok: true, total: queuedItems.length, successes, failures, mode };
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    console.error('[batch] orchestration_error', { message });
+    try {
+      await Logger.log('error', 'batch', 'UI delete batch failed', { trigger, mode, message });
+    } catch (_logError) {
+      /* Slovensky komentar: Chybu pri logu ignoruje. */
+    }
+    return { ok: false, error: message, total: queuedItems.length, successes, failures, mode };
+  } finally {
+    if (useMiniWindow && context && typeof context.windowId === 'number') {
+      try {
+        await removeWindow(context.windowId);
+      } catch (closeError) {
+        console.warn('[batch] mini_window_close_failed', {
+          windowId: context.windowId,
+          message: closeError && closeError.message
+        });
+      }
+    }
+    await broadcastQueueCount();
+  }
+}
+
 /* Slovensky komentar: Ziska zoznam chatgpt.com tabov v deterministickom poradi. */
 function queryChatgptTabs() {
   return new Promise((resolve, reject) => {
@@ -272,6 +460,233 @@ function queryChatgptTabs() {
       resolve(Array.isArray(tabs) ? tabs : []);
     });
   });
+}
+
+/* Slovensky komentar: Pocka na dokoncene nacitanie tabu. */
+function waitForTabComplete(tabId, timeoutMs = 12000) {
+  if (typeof tabId !== 'number') {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      try {
+        chrome.tabs.onUpdated.removeListener(listener);
+      } catch (_error) {
+        /* Slovensky komentar: Ignoruje chybu pri odhlaseni. */
+      }
+      clearTimeout(timerId);
+    };
+    const timerId = setTimeout(() => {
+      cleanup();
+      reject(new Error('tab_load_timeout'));
+    }, Math.max(1000, timeoutMs));
+    const listener = (updatedTabId, changeInfo, tab) => {
+      if (updatedTabId === tabId && changeInfo && changeInfo.status === 'complete') {
+        cleanup();
+        resolve(tab || null);
+      }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId, (tab) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        cleanup();
+        reject(new Error(runtimeError.message || 'tabs.get failed'));
+        return;
+      }
+      if (!tab) {
+        cleanup();
+        resolve(null);
+        return;
+      }
+      if (tab.status === 'complete') {
+        cleanup();
+        resolve(tab);
+      }
+    });
+  });
+}
+
+/* Slovensky komentar: Aktivuje tab s danou konfiguraciou. */
+function updateTab(tabId, updateProperties) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.update(tabId, updateProperties, (tab) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message || 'tabs.update failed'));
+        return;
+      }
+      resolve(tab || null);
+    });
+  });
+}
+
+/* Slovensky komentar: Zameria okno pre lepsi UX. */
+function focusWindow(windowId) {
+  if (typeof windowId !== 'number') {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve, reject) => {
+    chrome.windows.update(windowId, { focused: true }, (win) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message || 'windows.update failed'));
+        return;
+      }
+      resolve(win || null);
+    });
+  });
+}
+
+/* Slovensky komentar: Vytvori novy tab so strankou chatgpt.com. */
+function createChatgptTab(windowId = null) {
+  return new Promise((resolve, reject) => {
+    const createOptions = windowId && typeof windowId === 'number'
+      ? { url: 'https://chatgpt.com/', windowId }
+      : { url: 'https://chatgpt.com/' };
+    chrome.tabs.create(createOptions, (tab) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message || 'tabs.create failed'));
+        return;
+      }
+      resolve(tab || null);
+    });
+  });
+}
+
+/* Slovensky komentar: Otvori mini popup okno s chatgpt.com. */
+function createMiniWindow() {
+  return new Promise((resolve, reject) => {
+    chrome.windows.create(
+      {
+        url: 'https://chatgpt.com/',
+        type: 'popup',
+        focused: true,
+        width: 480,
+        height: 720
+      },
+      (win) => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          reject(new Error(runtimeError.message || 'windows.create failed'));
+          return;
+        }
+        resolve(win || null);
+      }
+    );
+  });
+}
+
+/* Slovensky komentar: Zatvori okno ak existuje. */
+function removeWindow(windowId) {
+  if (typeof windowId !== 'number') {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve, reject) => {
+    chrome.windows.remove(windowId, () => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message || 'windows.remove failed'));
+        return;
+      }
+      resolve(true);
+    });
+  });
+}
+
+/* Slovensky komentar: Najde alebo otvori tab na chatgpt.com pre aktivny rezim. */
+async function ensureActiveChatgptTab() {
+  let activeTab = null;
+  try {
+    activeTab = await getActiveTab();
+  } catch (_error) {
+    activeTab = null;
+  }
+  if (activeTab && activeTab.id && activeTab.url && activeTab.url.startsWith('https://chatgpt.com/')) {
+    try {
+      if (typeof activeTab.windowId === 'number') {
+        await focusWindow(activeTab.windowId);
+      }
+      await updateTab(activeTab.id, { active: true });
+    } catch (_focusError) {
+      /* Slovensky komentar: Ignoruje chybu pri fokusovani. */
+    }
+    try {
+      await waitForTabComplete(activeTab.id, 12000);
+    } catch (waitError) {
+      console.warn('[batch] active_tab_wait_failed', { message: waitError && waitError.message });
+    }
+    return { tabId: activeTab.id, windowId: activeTab.windowId || null, created: false };
+  }
+
+  let candidateTab = null;
+  try {
+    const tabs = await queryChatgptTabs();
+    candidateTab = tabs.find((tab) => tab && typeof tab.id === 'number') || null;
+  } catch (_queryError) {
+    candidateTab = null;
+  }
+  if (candidateTab && candidateTab.id) {
+    try {
+      if (typeof candidateTab.windowId === 'number') {
+        await focusWindow(candidateTab.windowId);
+      }
+      await updateTab(candidateTab.id, { active: true });
+    } catch (_activateError) {
+      /* Slovensky komentar: Pokracuje aj pri neuspechu. */
+    }
+    try {
+      await waitForTabComplete(candidateTab.id, 12000);
+    } catch (waitError) {
+      console.warn('[batch] existing_tab_wait_failed', { message: waitError && waitError.message });
+    }
+    return { tabId: candidateTab.id, windowId: candidateTab.windowId || null, created: false };
+  }
+
+  const createdTab = await createChatgptTab();
+  const tabId = createdTab && typeof createdTab.id === 'number' ? createdTab.id : null;
+  const windowId = createdTab && typeof createdTab.windowId === 'number' ? createdTab.windowId : null;
+  if (tabId) {
+    try {
+      await waitForTabComplete(tabId, 15000);
+    } catch (waitError) {
+      console.warn('[batch] new_tab_wait_failed', { message: waitError && waitError.message });
+    }
+  }
+  return { tabId, windowId, created: true };
+}
+
+/* Slovensky komentar: Podla rezimu pripravi tab pre UI mazanie. */
+async function ensureUiAutomationContext(useMiniWindow) {
+  if (useMiniWindow) {
+    const createdWindow = await createMiniWindow();
+    const windowId = createdWindow && typeof createdWindow.id === 'number' ? createdWindow.id : null;
+    let tabId = null;
+    if (createdWindow && Array.isArray(createdWindow.tabs)) {
+      const firstTab = createdWindow.tabs.find((tab) => tab && typeof tab.id === 'number');
+      tabId = firstTab ? firstTab.id : null;
+    }
+    if (typeof tabId !== 'number') {
+      const fallbackTab = await createChatgptTab(windowId);
+      tabId = fallbackTab && typeof fallbackTab.id === 'number' ? fallbackTab.id : null;
+    }
+    if (typeof tabId === 'number') {
+      try {
+        await waitForTabComplete(tabId, 15000);
+      } catch (waitError) {
+        console.warn('[batch] mini_window_wait_failed', { message: waitError && waitError.message });
+      }
+    }
+    return { tabId, windowId, createdWindow: true };
+  }
+  const context = await ensureActiveChatgptTab();
+  return { tabId: context.tabId, windowId: context.windowId || null, createdWindow: false };
 }
 
 /* Slovensky komentar: Vyhodnoti kandidat status z metadata probe. */
@@ -748,6 +1163,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         responsePayload.forwardError = forwardReport.reason;
       }
       sendResponse(responsePayload);
+    })();
+    return true;
+  }
+  if (message && message.type === 'run_ui_deletion_batch') {
+    (async () => {
+      try {
+        const summary = await runDeletionBatch(message.trigger || 'popup_button');
+        const ok = summary && summary.ok !== false;
+        sendResponse({ ok, summary });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: error && error.message ? error.message : String(error)
+        });
+      }
     })();
     return true;
   }
