@@ -80,9 +80,13 @@
 
   /* Slovensky komentar: Promise wrapper pre runtime spravy. */
   function sendRuntimeMessage(payload) {
+    const message = { ...payload };
+    if (message && typeof message.type === 'string' && !message.cmd) {
+      message.cmd = message.type;
+    }
     return new Promise((resolve, reject) => {
       try {
-        chrome.runtime.sendMessage(payload, (response) => {
+        chrome.runtime.sendMessage(message, (response) => {
           const lastError = chrome.runtime && chrome.runtime.lastError ? chrome.runtime.lastError : null;
           if (lastError) {
             reject(new Error(lastError.message || 'sendMessage failed'));
@@ -200,7 +204,7 @@
 
   async function refreshQueueCount() {
     try {
-      const response = await sendRuntimeMessage({ type: 'deletion_queue_count' });
+      const response = await sendRuntimeMessage({ cmd: 'deletion_queue_count' });
       if (response && response.ok && typeof response.count === 'number') {
         updateDeleteUi(response.count);
         return;
@@ -217,7 +221,7 @@
     }
     setBatchInFlight(true);
     try {
-      const response = await sendRuntimeMessage({ type: 'run_ui_deletion_batch', trigger: 'popup_button' });
+      const response = await sendRuntimeMessage({ cmd: 'phase2_run_delete_batch', trigger: 'popup_button' });
       if (response && response.ok) {
         const summary = response.summary || {};
         const successes = Number.isFinite(summary.successes) ? summary.successes : 0;
@@ -595,11 +599,12 @@
     if (!message || typeof message !== 'object') {
       return;
     }
-    if (message.type === 'runner_update') {
+    const messageCmd = typeof message.cmd === 'string' ? message.cmd : message.type;
+    if (messageCmd === 'runner_update') {
       handleRunnerUpdate(message.payload || message);
       return;
     }
-    if (message.type === 'deletion_queue_updated') {
+    if (messageCmd === 'phase2_queue_count_changed' || messageCmd === 'deletion_queue_updated') {
       if (typeof message.count === 'number') {
         updateDeleteUi(message.count);
       } else {

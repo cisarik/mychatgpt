@@ -269,9 +269,13 @@ function captureLatestConversationPair() {
 
 /* Slovensky komentar: Posle runtime spravu ako Promise. */
 function sendRuntimeMessage(payload) {
+  const message = { ...payload };
+  if (message && typeof message.type === 'string' && !message.cmd) {
+    message.cmd = message.type;
+  }
   return new Promise((resolve, reject) => {
     try {
-      chrome.runtime.sendMessage(payload, (response) => {
+      chrome.runtime.sendMessage(message, (response) => {
         const lastError = chrome.runtime && chrome.runtime.lastError ? chrome.runtime.lastError : null;
         if (lastError) {
           reject(new Error(lastError.message || 'sendMessage failed'));
@@ -2996,6 +3000,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return undefined;
 });
 
+/* Slovensky komentar: Exportuje runner API pre pozadie. */
+if (typeof window !== 'undefined') {
+  window.MyChatGPT = window.MyChatGPT || {};
+  window.MyChatGPT.deleteByTitle = deleteByTitle;
+}
+
 /* Slovensky komentar: Stav pre spracovanie hints=search. */
 const searchHintState = {
   scheduled: false,
@@ -3036,7 +3046,7 @@ async function runSearchHintWorkflow() {
   const title = getDocumentConversationTitle();
   try {
     const response = await sendRuntimeMessage({
-      type: 'phase1_enqueue_delete',
+      cmd: 'phase1_enqueue_delete',
       traceId,
       snapshot: {
         title,

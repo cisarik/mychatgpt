@@ -15,6 +15,9 @@ const UI_DELETE_TIMEOUTS = Object.freeze({
 /* Slovensky komentar: Pocet opakovani pre jednotlive kroky. */
 const UI_DELETE_RETRIES = 2;
 
+/* Slovensky komentar: Drzi cakania na vysledok mazania pre fazu 2. */
+const phase2ResultWaiters = new Map();
+
 /* Slovensky komentar: Vrati hlboku kopiu predvolenych nastaveni. */
 function createDefaultSettingsSnapshot() {
   const base = typeof SETTINGS_DEFAULTS === 'object' && SETTINGS_DEFAULTS
@@ -285,13 +288,127 @@ async function broadcastQueueCount() {
   }
   try {
     chrome.runtime.sendMessage({
-      type: 'deletion_queue_updated',
+      cmd: 'phase2_queue_count_changed',
       count
     });
   } catch (_notifyError) {
     /* Slovensky komentar: Ignoruje pripadnu chybu pri odoslani. */
   }
   return count;
+}
+
+/* Slovensky komentar: Registruje cakanie na odpoved mazania pre konkretnu polozku. */
+function waitForPhase2Result(itemId, { timeoutMs = 45000 } = {}) {
+  if (!itemId) {
+    return {
+      promise: Promise.resolve({ status: 'failed', reasonCode: 'missing_id', resolved: false })
+    };
+  }
+  let settled = false;
+  let settlePromise = null;
+  const promise = new Promise((resolve) => {
+    settlePromise = resolve;
+  });
+  const finalize = (result) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    clearTimeout(timerId);
+    if (phase2ResultWaiters.get(itemId) === resolver) {
+      phase2ResultWaiters.delete(itemId);
+    }
+    settlePromise({
+      status: typeof result.status === 'string' ? result.status : 'failed',
+      reasonCode: result.reasonCode || null,
+      resolved: result.resolved === true
+    });
+  };
+  const resolver = (result) => {
+    finalize({
+      status: typeof result.status === 'string' ? result.status : 'failed',
+      reasonCode: result.reasonCode || null,
+      resolved: true
+    });
+  };
+  const timerId = setTimeout(() => {
+    finalize({ status: 'failed', reasonCode: 'timeout', resolved: false });
+  }, Math.max(1000, timeoutMs));
+  phase2ResultWaiters.set(itemId, resolver);
+  const cancel = (reasonCode = 'cancelled') => {
+    finalize({ status: 'failed', reasonCode, resolved: false });
+  };
+  return { promise, cancel };
+}
+
+/* Slovensky komentar: Pokusi sa vyriesit cakanie na vysledok fazy 2. */
+function resolvePhase2Result(itemId, payload) {
+  const resolver = phase2ResultWaiters.get(itemId);
+  if (typeof resolver === 'function') {
+    resolver({
+      status: payload && typeof payload.status === 'string' ? payload.status : 'failed',
+      reasonCode: payload && payload.reasonCode ? payload.reasonCode : null
+    });
+    return true;
+  }
+  return false;
+}
+
+/* Slovensky komentar: Spusti mazanie jednej polozky v tab-e cez injekciu runnera. */
+async function runOneDelete(tabId, payload) {
+  const itemId = payload && payload.id ? payload.id : null;
+  if (!itemId) {
+    return { status: 'failed', reasonCode: 'missing_id', resolved: false };
+  }
+  if (typeof tabId !== 'number') {
+    return { status: 'failed', reasonCode: 'tab_unavailable', resolved: false };
+  }
+  const waiter = waitForPhase2Result(itemId, { timeoutMs: 45000 });
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (p) => {
+        (async () => {
+          try {
+            const result = await (window.MyChatGPT && typeof window.MyChatGPT.deleteByTitle === 'function'
+              ? window.MyChatGPT.deleteByTitle(p)
+              : Promise.resolve({ ok: false, reasonCode: 'runner_missing' }));
+            if (result && result.ok) {
+              chrome.runtime.sendMessage({
+                cmd: 'phase2_item_done',
+                id: p && p.id ? p.id : null,
+                status: 'deleted'
+              });
+            } else {
+              chrome.runtime.sendMessage({
+                cmd: 'phase2_item_done',
+                id: p && p.id ? p.id : null,
+                status: 'failed',
+                reasonCode:
+                  result && result.reasonCode ? result.reasonCode : 'verify_still_present'
+              });
+            }
+          } catch (error) {
+            chrome.runtime.sendMessage({
+              cmd: 'phase2_item_done',
+              id: p && p.id ? p.id : null,
+              status: 'failed',
+              reasonCode: 'runner_exception'
+            });
+          }
+        })();
+      },
+      args: [payload]
+    });
+  } catch (error) {
+    if (waiter && typeof waiter.cancel === 'function') {
+      waiter.cancel('inject_failed');
+    }
+    const message = error && error.message ? error.message : String(error);
+    return { status: 'failed', reasonCode: 'inject_failed', resolved: false, message };
+  }
+  const result = await waiter.promise;
+  return result;
 }
 
 /* Slovensky komentar: Spusti spracovanie fronty mazania cez UI automatizaciu. */
@@ -346,69 +463,49 @@ async function runDeletionBatch(trigger = 'manual') {
       /* Slovensky komentar: Tichy pokracujuci rezim pri chybe logu. */
     }
 
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+    } catch (_injectError) {
+      /* Slovensky komentar: Ignoruje chybu, skript mohol byt uz injektovany. */
+    }
+
     for (let index = 0; index < queuedItems.length; index += 1) {
       const item = queuedItems[index];
+      const itemId = item && item.id ? item.id : null;
       const titleText = item && typeof item.title === 'string' && item.title ? item.title : '(untitled)';
-      let response = null;
-      try {
-        response = await sendWithEnsureCS(
-          tabId,
-          {
-            type: 'phase2_delete_by_title',
-            payload: {
-              id: item && item.id ? item.id : null,
-              title: item ? item.title : null,
-              retries: UI_DELETE_RETRIES,
-              timeouts: UI_DELETE_TIMEOUTS
-            }
-          },
-          { timeoutMs: 25000 }
-        );
-      } catch (error) {
-        const reasonCode = error && error.message === 'timeout' ? 'timeout' : 'send_failed';
-        response = {
-          ok: false,
-          reasonCode,
-          error: error && error.message ? error.message : String(error)
-        };
-        console.warn('[batch] send_step_failed', { id: item && item.id ? item.id : null, reasonCode, message: response.error });
-      }
-
+      const runPayload = {
+        id: itemId,
+        title: item ? item.title : null,
+        retries: UI_DELETE_RETRIES,
+        timeouts: UI_DELETE_TIMEOUTS
+      };
+      const result = await runOneDelete(tabId, runPayload);
       let statusLabel = '';
-      if (response && response.ok) {
+      if (result && result.status === 'deleted') {
         successes += 1;
-        try {
-          const markOk = await Database.markDeleted(item && item.id ? item.id : null);
-          if (!markOk) {
-            console.warn('[batch] mark_deleted_noop', { id: item && item.id ? item.id : null });
-          }
-        } catch (markError) {
-          console.warn('[batch] mark_deleted_failed', {
-            id: item && item.id ? item.id : null,
-            message: markError && markError.message
-          });
-        }
         statusLabel = 'deleted';
       } else {
         failures += 1;
-        const reasonCode = response && typeof response.reasonCode === 'string' ? response.reasonCode : 'error';
-        try {
-          const marked = await Database.markFailed(item && item.id ? item.id : null, reasonCode);
-          if (!marked) {
-            console.warn('[batch] mark_failed_noop', { id: item && item.id ? item.id : null, reasonCode });
+        const reasonCode = result && result.reasonCode ? result.reasonCode : 'error';
+        if (!result || result.resolved !== true) {
+          try {
+            const marked = await Database.markFailed(itemId, reasonCode);
+            if (!marked) {
+              console.warn('[batch] mark_failed_noop', { id: itemId, reasonCode });
+            }
+          } catch (markError) {
+            console.warn('[batch] mark_failed_error', {
+              id: itemId,
+              reasonCode,
+              message: markError && markError.message
+            });
           }
-        } catch (markError) {
-          console.warn('[batch] mark_failed_error', {
-            id: item && item.id ? item.id : null,
-            reasonCode,
-            message: markError && markError.message
-          });
+          await broadcastQueueCount();
         }
         statusLabel = `failed:${reasonCode}`;
       }
 
       console.info(`[batch] item ${index + 1}/${queuedItems.length} title="${titleText}" result=${statusLabel}`);
-      await broadcastQueueCount();
     }
 
     console.info(`[batch] done successes=${successes} failures=${failures}`);
@@ -560,27 +657,15 @@ function createChatgptTab(windowId = null) {
   });
 }
 
-/* Slovensky komentar: Otvori mini popup okno s chatgpt.com. */
-function createMiniWindow() {
-  return new Promise((resolve, reject) => {
-    chrome.windows.create(
-      {
-        url: 'https://chatgpt.com/',
-        type: 'popup',
-        focused: true,
-        width: 480,
-        height: 720
-      },
-      (win) => {
-        const runtimeError = chrome.runtime.lastError;
-        if (runtimeError) {
-          reject(new Error(runtimeError.message || 'windows.create failed'));
-          return;
-        }
-        resolve(win || null);
-      }
-    );
+/* Slovensky komentar: Otvori mini popup okno so specifikovanymi rozmermi. */
+async function openMiniWindow() {
+  const win = await chrome.windows.create({
+    type: 'popup',
+    url: 'https://chatgpt.com/',
+    width: 1200,
+    height: 900
   });
+  return win;
 }
 
 /* Slovensky komentar: Zatvori okno ak existuje. */
@@ -665,7 +750,7 @@ async function ensureActiveChatgptTab() {
 /* Slovensky komentar: Podla rezimu pripravi tab pre UI mazanie. */
 async function ensureUiAutomationContext(useMiniWindow) {
   if (useMiniWindow) {
-    const createdWindow = await createMiniWindow();
+    const createdWindow = await openMiniWindow();
     const windowId = createdWindow && typeof createdWindow.id === 'number' ? createdWindow.id : null;
     let tabId = null;
     if (createdWindow && Array.isArray(createdWindow.tabs)) {
@@ -1120,7 +1205,38 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message && message.type === 'debug_test_log') {
+  const messageType = message && typeof message.cmd === 'string' ? message.cmd : message && typeof message.type === 'string' ? message.type : null;
+  if (messageType === 'phase2_item_done') {
+    (async () => {
+      const itemId = message && message.id ? message.id : null;
+      if (!itemId) {
+        sendResponse({ ok: false, reasonCode: 'missing_id' });
+        return;
+      }
+      const status = typeof message.status === 'string' ? message.status : 'failed';
+      const reasonCode = message && message.reasonCode ? message.reasonCode : null;
+      try {
+        if (status === 'deleted') {
+          await Database.markDeleted(itemId);
+        } else {
+          await Database.markFailed(itemId, reasonCode || 'runner_failure');
+        }
+      } catch (dbError) {
+        console.warn('[batch] phase2_item_done_db_error', {
+          id: itemId,
+          status,
+          reasonCode: reasonCode || null,
+          message: dbError && dbError.message
+        });
+      }
+      await broadcastQueueCount();
+      resolvePhase2Result(itemId, { status, reasonCode });
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  if (messageType === 'debug_test_log') {
     (async () => {
       const note = typeof message.note === 'string' ? message.note.trim() : '';
       const requestedAt = new Date().toISOString();
@@ -1166,7 +1282,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
-  if (message && message.type === 'run_ui_deletion_batch') {
+  if (messageType === 'phase2_run_delete_batch' || messageType === 'run_ui_deletion_batch') {
     (async () => {
       try {
         const summary = await runDeletionBatch(message.trigger || 'popup_button');
@@ -1181,7 +1297,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
-  if (message && message.type === 'heuristics_eval') {
+  if (messageType === 'heuristics_eval') {
     (async () => {
       const decision = {
         decided: false,
@@ -1327,7 +1443,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
-  if (message && message.type === 'scan_now') {
+  if (messageType === 'scan_now') {
     (async () => {
       try {
         const settings = await getSettingsFresh();
@@ -1351,7 +1467,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
-  if (message && message.type === 'connectivity_test') {
+  if (messageType === 'connectivity_test') {
     (async () => {
       const traceId = `ping:${Date.now()}`;
       let activeTab = null;
@@ -1417,7 +1533,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
-  if (message && message.type === 'probe_request') {
+  if (messageType === 'probe_request') {
     (async () => {
       const traceId = `probe:${Date.now()}`;
       let activeTab = null;
@@ -1511,7 +1627,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
-  if (message && message.type === 'capture_preview_debug') {
+  if (messageType === 'capture_preview_debug') {
     (async () => {
       let reasonCode = 'capture_error';
       try {
@@ -1592,7 +1708,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
-  if (message && message.type === 'backup_now') {
+  if (messageType === 'backup_now') {
     (async () => {
       const traceId = `backup:${Date.now()}`;
       let reasonCode = 'backup_capture_error';
@@ -1716,7 +1832,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
-  if (message && message.type === 'eval_and_backup') {
+  if (messageType === 'eval_and_backup') {
     (async () => {
       const traceId = `eval-backup:${Date.now()}`;
       const reasonCodes = [];
@@ -1836,17 +1952,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
-  if (message && message.type === 'backup_and_delete_active') {
+  if (messageType === 'backup_and_delete_active') {
     sendResponse({ ok: false, reasonCode: 'deprecated' });
     return false;
   }
 
-  if (message && message.type === 'delete_backup') {
+  if (messageType === 'delete_backup') {
     sendResponse({ ok: false, reason: 'deprecated' });
     return false;
   }
 
-  if (message && message.type === 'phase1_enqueue_delete') {
+  if (messageType === 'phase1_enqueue_delete') {
     (async () => {
       const traceId = typeof message.traceId === 'string' && message.traceId
         ? message.traceId
@@ -1915,7 +2031,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         try {
           chrome.runtime.sendMessage({
-            type: 'deletion_queue_updated',
+            cmd: 'phase2_queue_count_changed',
             count: queueCount
           });
         } catch (_notifyError) {
@@ -1949,7 +2065,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message && message.type === 'deletion_queue_count') {
+  if (messageType === 'deletion_queue_count') {
     (async () => {
       try {
         const count = await Database.countQueued();
@@ -1964,7 +2080,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message && message.type === 'bulk_backup_open_tabs') {
+  if (messageType === 'bulk_backup_open_tabs') {
     (async () => {
       const summary = {
         timestamp: Date.now(),
@@ -2214,6 +2330,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
-  return undefined;
+  sendResponse({ ok: false, reasonCode: 'unknown_cmd', cmd: messageType });
+  return true;
 });
 
